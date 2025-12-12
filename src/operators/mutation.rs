@@ -863,17 +863,13 @@ impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for SubtreeMut
     fn mutate<R: Rng>(&self, genome: &mut TreeGenome<T, F>, rng: &mut R) {
         // Decide whether to select a function or terminal position
         let position = if rng.gen::<f64>() < self.function_probability {
-            genome.random_function_position(rng).unwrap_or_else(|| {
-                genome
-                    .random_terminal_position(rng)
-                    .unwrap_or_default()
-            })
+            genome
+                .random_function_position(rng)
+                .unwrap_or_else(|| genome.random_terminal_position(rng).unwrap_or_default())
         } else {
-            genome.random_terminal_position(rng).unwrap_or_else(|| {
-                genome
-                    .random_function_position(rng)
-                    .unwrap_or_default()
-            })
+            genome
+                .random_terminal_position(rng)
+                .unwrap_or_else(|| genome.random_function_position(rng).unwrap_or_default())
         };
 
         // Calculate remaining depth budget
@@ -923,11 +919,9 @@ impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for HoistMutat
     fn mutate<R: Rng>(&self, genome: &mut TreeGenome<T, F>, rng: &mut R) {
         // Select a random position (prefer function nodes to make it interesting)
         let position = if rng.gen::<f64>() < self.function_probability {
-            genome.random_function_position(rng).unwrap_or_else(|| {
-                genome
-                    .random_terminal_position(rng)
-                    .unwrap_or_default()
-            })
+            genome
+                .random_function_position(rng)
+                .unwrap_or_else(|| genome.random_terminal_position(rng).unwrap_or_default())
         } else {
             genome.random_position(rng)
         };
@@ -1477,7 +1471,10 @@ mod tests {
             }
         }
 
-        assert!(any_changed, "Point mutation should sometimes change the tree");
+        assert!(
+            any_changed,
+            "Point mutation should sometimes change the tree"
+        );
     }
 
     #[test]

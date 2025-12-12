@@ -210,10 +210,7 @@ where
     }
 
     /// Set the fitness function
-    pub fn fitness<NewFit>(
-        self,
-        fitness: NewFit,
-    ) -> SteadyStateBuilder<G, F, S, C, M, NewFit, Term>
+    pub fn fitness<NewFit>(self, fitness: NewFit) -> SteadyStateBuilder<G, F, S, C, M, NewFit, Term>
     where
         NewFit: Fitness<Genome = G, Value = F>,
     {
@@ -450,15 +447,14 @@ where
             let parent2 = &selection_pool[parent2_idx].0;
 
             // Crossover
-            let (mut child1, mut child2) =
-                if rng.gen::<f64>() < self.config.crossover_probability {
-                    match self.crossover.crossover(parent1, parent2, rng).genome() {
-                        Some((c1, c2)) => (c1, c2),
-                        None => (parent1.clone(), parent2.clone()),
-                    }
-                } else {
-                    (parent1.clone(), parent2.clone())
-                };
+            let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability {
+                match self.crossover.crossover(parent1, parent2, rng).genome() {
+                    Some((c1, c2)) => (c1, c2),
+                    None => (parent1.clone(), parent2.clone()),
+                }
+            } else {
+                (parent1.clone(), parent2.clone())
+            };
 
             // Mutation
             self.mutation.mutate(&mut child1, rng);
@@ -520,9 +516,8 @@ where
                 generation += 1;
                 population.set_generation(generation);
 
-                let timing = TimingStats::new().with_total(
-                    step_start.elapsed() * self.config.steps_per_generation as u32,
-                );
+                let timing = TimingStats::new()
+                    .with_total(step_start.elapsed() * self.config.steps_per_generation as u32);
 
                 let gen_stats =
                     GenerationStats::from_population(&population, generation, evaluations)
@@ -616,19 +611,18 @@ where
             let parent2 = &selection_pool[parent2_idx].0;
 
             // Crossover with bounds
-            let (mut child1, mut child2) =
-                if rng.gen::<f64>() < self.config.crossover_probability {
-                    match self
-                        .crossover
-                        .crossover_bounded(parent1, parent2, &self.bounds, rng)
-                        .genome()
-                    {
-                        Some((c1, c2)) => (c1, c2),
-                        None => (parent1.clone(), parent2.clone()),
-                    }
-                } else {
-                    (parent1.clone(), parent2.clone())
-                };
+            let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability {
+                match self
+                    .crossover
+                    .crossover_bounded(parent1, parent2, &self.bounds, rng)
+                    .genome()
+                {
+                    Some((c1, c2)) => (c1, c2),
+                    None => (parent1.clone(), parent2.clone()),
+                }
+            } else {
+                (parent1.clone(), parent2.clone())
+            };
 
             // Mutation with bounds
             self.mutation.mutate_bounded(&mut child1, &self.bounds, rng);

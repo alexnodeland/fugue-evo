@@ -881,9 +881,7 @@ impl NkLandscape {
 
             // Generate all possible configurations
             for config_bits in 0..num_configs {
-                let config: Vec<bool> = (0..=k)
-                    .map(|j| (config_bits >> j) & 1 == 1)
-                    .collect();
+                let config: Vec<bool> = (0..=k).map(|j| (config_bits >> j) & 1 == 1).collect();
                 use rand::Rng;
                 table.insert(config, rng.gen::<f64>());
             }
@@ -910,9 +908,7 @@ impl NkLandscape {
         // Adjacent neighbors
         let mut neighbors = Vec::with_capacity(n);
         for i in 0..n {
-            let gene_neighbors: Vec<usize> = (1..=k)
-                .map(|offset| (i + offset) % n)
-                .collect();
+            let gene_neighbors: Vec<usize> = (1..=k).map(|offset| (i + offset) % n).collect();
             neighbors.push(gene_neighbors);
         }
 
@@ -923,9 +919,7 @@ impl NkLandscape {
             let mut table = std::collections::HashMap::with_capacity(num_configs);
 
             for config_bits in 0..num_configs {
-                let config: Vec<bool> = (0..=k)
-                    .map(|j| (config_bits >> j) & 1 == 1)
-                    .collect();
+                let config: Vec<bool> = (0..=k).map(|j| (config_bits >> j) & 1 == 1).collect();
                 use rand::Rng;
                 table.insert(config, rng.gen::<f64>());
             }
@@ -1299,7 +1293,7 @@ mod tests {
         let fitness: f64 = nk.evaluate(&genome);
 
         // Fitness should be average of contributions, so in [0, 1]
-        assert!(fitness >= 0.0 && fitness <= 1.0);
+        assert!((0.0..=1.0).contains(&fitness));
     }
 
     #[test]
@@ -1308,7 +1302,7 @@ mod tests {
         let genome = BitString::ones(10);
         let fitness: f64 = nk.evaluate(&genome);
 
-        assert!(fitness >= 0.0 && fitness <= 1.0);
+        assert!((0.0..=1.0).contains(&fitness));
     }
 
     #[test]

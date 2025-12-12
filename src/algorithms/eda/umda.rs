@@ -188,16 +188,16 @@ impl ContinuousUnivariateModel {
     /// Create from bounds (initial uniform-ish distribution)
     pub fn from_bounds(bounds: &MultiBounds) -> Self {
         let means: Vec<f64> = bounds.bounds.iter().map(|b| b.center()).collect();
-        let variances: Vec<f64> = bounds.bounds.iter().map(|b| (b.range() / 4.0).powi(2)).collect();
+        let variances: Vec<f64> = bounds
+            .bounds
+            .iter()
+            .map(|b| (b.range() / 4.0).powi(2))
+            .collect();
         Self { means, variances }
     }
 
     /// Update model from selected individuals
-    pub fn update(
-        &mut self,
-        selected: &[&RealVector],
-        config: &UMDAConfig,
-    ) {
+    pub fn update(&mut self, selected: &[&RealVector], config: &UMDAConfig) {
         let n = selected.len() as f64;
         if n == 0.0 {
             return;
@@ -230,7 +230,8 @@ impl ContinuousUnivariateModel {
             .zip(self.variances.iter())
             .zip(bounds.bounds.iter())
             .map(|((mean, var), bound)| {
-                let normal = Normal::new(*mean, var.sqrt()).unwrap_or(Normal::new(*mean, 0.1).unwrap());
+                let normal =
+                    Normal::new(*mean, var.sqrt()).unwrap_or(Normal::new(*mean, 0.1).unwrap());
                 let value = normal.sample(rng);
                 value.clamp(bound.min, bound.max)
             })
@@ -294,7 +295,10 @@ where
     }
 
     /// Run the UMDA algorithm
-    pub fn run<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<RealVector, F>, EvolutionError> {
+    pub fn run<R: Rng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<EvolutionResult<RealVector, F>, EvolutionError> {
         let start_time = Instant::now();
 
         // Initialize model
@@ -341,8 +345,8 @@ where
 
             // Sort and select top individuals
             population.sort_by_fitness();
-            let select_count = (self.config.population_size as f64 * self.config.selection_ratio)
-                .ceil() as usize;
+            let select_count =
+                (self.config.population_size as f64 * self.config.selection_ratio).ceil() as usize;
             let selected: Vec<&RealVector> = population
                 .iter()
                 .take(select_count)
@@ -375,22 +379,18 @@ where
 
             // Record statistics
             let timing = TimingStats::new().with_total(gen_start.elapsed());
-            let gen_stats =
-                GenerationStats::from_population(&population, generation, evaluations)
-                    .with_timing(timing);
+            let gen_stats = GenerationStats::from_population(&population, generation, evaluations)
+                .with_timing(timing);
             fitness_history.push(gen_stats.best_fitness);
             stats.record(gen_stats);
         }
 
         stats.set_runtime(start_time.elapsed());
 
-        Ok(EvolutionResult::new(
-            best.genome,
-            best.fitness.unwrap(),
-            generation,
-            evaluations,
+        Ok(
+            EvolutionResult::new(best.genome, best.fitness.unwrap(), generation, evaluations)
+                .with_stats(stats),
         )
-        .with_stats(stats))
     }
 }
 
@@ -504,7 +504,10 @@ where
     }
 
     /// Run the UMDA algorithm
-    pub fn run<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<BitString, F>, EvolutionError> {
+    pub fn run<R: Rng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<EvolutionResult<BitString, F>, EvolutionError> {
         let start_time = Instant::now();
 
         // Get dimension from bounds
@@ -554,8 +557,8 @@ where
 
             // Sort and select top individuals
             population.sort_by_fitness();
-            let select_count = (self.config.population_size as f64 * self.config.selection_ratio)
-                .ceil() as usize;
+            let select_count =
+                (self.config.population_size as f64 * self.config.selection_ratio).ceil() as usize;
             let selected: Vec<&BitString> = population
                 .iter()
                 .take(select_count)
@@ -588,22 +591,18 @@ where
 
             // Record statistics
             let timing = TimingStats::new().with_total(gen_start.elapsed());
-            let gen_stats =
-                GenerationStats::from_population(&population, generation, evaluations)
-                    .with_timing(timing);
+            let gen_stats = GenerationStats::from_population(&population, generation, evaluations)
+                .with_timing(timing);
             fitness_history.push(gen_stats.best_fitness);
             stats.record(gen_stats);
         }
 
         stats.set_runtime(start_time.elapsed());
 
-        Ok(EvolutionResult::new(
-            best.genome,
-            best.fitness.unwrap(),
-            generation,
-            evaluations,
+        Ok(
+            EvolutionResult::new(best.genome, best.fitness.unwrap(), generation, evaluations)
+                .with_stats(stats),
         )
-        .with_stats(stats))
     }
 }
 

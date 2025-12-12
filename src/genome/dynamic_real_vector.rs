@@ -62,7 +62,11 @@ impl DynamicRealVector {
     }
 
     /// Create a zero-filled vector of the given dimension
-    pub fn zeros(dimension: usize, min_length: usize, max_length: usize) -> Result<Self, GenomeError> {
+    pub fn zeros(
+        dimension: usize,
+        min_length: usize,
+        max_length: usize,
+    ) -> Result<Self, GenomeError> {
         Self::new(vec![0.0; dimension], min_length, max_length)
     }
 

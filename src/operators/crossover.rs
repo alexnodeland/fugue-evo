@@ -972,7 +972,7 @@ pub struct SubtreeCrossover {
 impl Default for SubtreeCrossover {
     fn default() -> Self {
         Self {
-            max_depth: Some(17),      // Standard GP default
+            max_depth: Some(17),       // Standard GP default
             function_probability: 0.9, // Favor internal nodes
         }
     }

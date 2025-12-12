@@ -354,8 +354,7 @@ where
         let mut best = population[0].clone();
 
         // Create a tracking population for termination checks
-        let mut tracking_population: Population<G, F> =
-            Population::with_capacity(self.config.mu);
+        let mut tracking_population: Population<G, F> = Population::with_capacity(self.config.mu);
         for (adaptive, fit) in &population {
             let mut ind = Individual::new(adaptive.inner().clone());
             ind.set_fitness(fit.clone());
@@ -386,8 +385,7 @@ where
             let gen_start = Instant::now();
 
             // Generate offspring
-            let mut offspring: Vec<(AdaptiveGenome<G>, F)> =
-                Vec::with_capacity(self.config.lambda);
+            let mut offspring: Vec<(AdaptiveGenome<G>, F)> = Vec::with_capacity(self.config.lambda);
 
             for _ in 0..self.config.lambda {
                 // Select parent(s) for recombination
@@ -401,7 +399,11 @@ where
                         // Select two parents, randomly pick genes
                         let p1_idx = rng.gen_range(0..self.config.mu);
                         let p2_idx = rng.gen_range(0..self.config.mu);
-                        self.discrete_recombination(&population[p1_idx].0, &population[p2_idx].0, rng)
+                        self.discrete_recombination(
+                            &population[p1_idx].0,
+                            &population[p2_idx].0,
+                            rng,
+                        )
                     }
                     RecombinationType::Intermediate => {
                         // Average of two parents
@@ -433,16 +435,14 @@ where
                     // Combine parents and offspring
                     let mut combined = population;
                     combined.extend(offspring);
-                    combined.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    combined
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     population = combined.into_iter().take(self.config.mu).collect();
                 }
                 ESSelectionStrategy::MuCommaLambda => {
                     // Select only from offspring
-                    offspring.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    offspring
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     population = offspring.into_iter().take(self.config.mu).collect();
                 }
             }
@@ -474,13 +474,10 @@ where
 
         stats.set_runtime(start_time.elapsed());
 
-        Ok(EvolutionResult::new(
-            best.0.into_inner(),
-            best.1,
-            generation,
-            evaluations,
+        Ok(
+            EvolutionResult::new(best.0.into_inner(), best.1, generation, evaluations)
+                .with_stats(stats),
         )
-        .with_stats(stats))
     }
 
     /// Discrete recombination: randomly select genes from parents
@@ -499,8 +496,7 @@ where
             .map(|(g1, g2)| if rng.gen_bool(0.5) { *g1 } else { *g2 })
             .collect();
 
-        let child_genome =
-            G::from_genes(child_genes).expect("Failed to create genome from genes");
+        let child_genome = G::from_genes(child_genes).expect("Failed to create genome from genes");
 
         // Recombine strategy parameters
         match (&p1.strategy, &p2.strategy) {
@@ -534,8 +530,7 @@ where
             .map(|(g1, g2)| (g1 + g2) / 2.0)
             .collect();
 
-        let child_genome =
-            G::from_genes(child_genes).expect("Failed to create genome from genes");
+        let child_genome = G::from_genes(child_genes).expect("Failed to create genome from genes");
 
         // Average strategy parameters
         match (&p1.strategy, &p2.strategy) {
@@ -569,8 +564,7 @@ where
             }
         }
 
-        let child_genome =
-            G::from_genes(child_genes).expect("Failed to create genome from genes");
+        let child_genome = G::from_genes(child_genes).expect("Failed to create genome from genes");
 
         // Average all strategy parameters
         let avg_sigma = if self.config.self_adaptive {
@@ -676,16 +670,15 @@ mod tests {
         let mut rng = rand::thread_rng();
         let bounds = MultiBounds::symmetric(5.12, 10);
 
-        let es: EvolutionStrategy<RealVector, f64, _, _> =
-            ESBuilder::mu_comma_lambda(10, 70)
-                .unwrap()
-                .initial_sigma(1.0)
-                .self_adaptive(true)
-                .bounds(bounds)
-                .fitness(Sphere::new(10))
-                .termination(MaxEvaluations::new(3000))
-                .build()
-                .unwrap();
+        let es: EvolutionStrategy<RealVector, f64, _, _> = ESBuilder::mu_comma_lambda(10, 70)
+            .unwrap()
+            .initial_sigma(1.0)
+            .self_adaptive(true)
+            .bounds(bounds)
+            .fitness(Sphere::new(10))
+            .termination(MaxEvaluations::new(3000))
+            .build()
+            .unwrap();
 
         let result = es.run(&mut rng).unwrap();
 

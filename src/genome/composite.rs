@@ -23,7 +23,9 @@ use crate::genome::traits::EvolutionaryGenome;
 /// - `A`: The first genome type
 /// - `B`: The second genome type
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(bound = "A: Serialize + for<'de2> Deserialize<'de2>, B: Serialize + for<'de2> Deserialize<'de2>")]
+#[serde(
+    bound = "A: Serialize + for<'de2> Deserialize<'de2>, B: Serialize + for<'de2> Deserialize<'de2>"
+)]
 pub struct CompositeGenome<A, B>
 where
     A: EvolutionaryGenome,
