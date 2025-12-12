@@ -66,6 +66,14 @@ pub enum CheckpointError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
+    /// Deserialization error
+    #[error("Deserialization error: {0}")]
+    Deserialization(String),
+
+    /// Checkpoint version mismatch
+    #[error("Version mismatch: expected {expected}, found {found}")]
+    VersionMismatch { expected: u32, found: u32 },
+
     /// Checkpoint version is too new
     #[error("Checkpoint version {0} is newer than supported")]
     VersionTooNew(u32),
@@ -73,6 +81,14 @@ pub enum CheckpointError {
     /// Checkpoint version is too old
     #[error("Checkpoint version {0} is too old to load")]
     VersionTooOld(u32),
+
+    /// Checkpoint file not found
+    #[error("Checkpoint not found: {0}")]
+    NotFound(String),
+
+    /// Corrupted checkpoint data
+    #[error("Corrupted checkpoint: {0}")]
+    Corrupted(String),
 }
 
 /// Top-level error type for evolution operations

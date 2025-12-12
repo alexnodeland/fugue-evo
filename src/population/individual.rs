@@ -4,13 +4,16 @@
 
 use std::cmp::Ordering;
 
+use serde::{Deserialize, Serialize};
+
 use crate::fitness::traits::FitnessValue;
 use crate::genome::traits::EvolutionaryGenome;
 
 /// An individual in the population
 ///
 /// Wraps a genome with its computed fitness value and additional metadata.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct Individual<G, F = f64>
 where
     G: EvolutionaryGenome,

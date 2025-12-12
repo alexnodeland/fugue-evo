@@ -30,6 +30,7 @@
 //! ```
 
 pub mod algorithms;
+pub mod checkpoint;
 pub mod diagnostics;
 pub mod error;
 pub mod fitness;
@@ -43,6 +44,7 @@ pub mod termination;
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::algorithms::prelude::*;
+    pub use crate::checkpoint::prelude::*;
     pub use crate::diagnostics::prelude::*;
     pub use crate::error::*;
     pub use crate::fitness::prelude::*;

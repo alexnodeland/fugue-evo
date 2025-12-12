@@ -2,6 +2,8 @@
 //!
 //! This module provides statistics collection and analysis for evolutionary runs.
 
+pub mod convergence;
+
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -286,6 +288,11 @@ where
 }
 
 pub mod prelude {
+    pub use super::convergence::{
+        detect_stagnation, evolutionary_ess, evolutionary_ess_log, evolutionary_rhat,
+        fitness_convergence, ConvergenceConfig, ConvergenceDetector, ConvergenceReason,
+        ConvergenceStatus,
+    };
     pub use super::{EvolutionResult, EvolutionStats, GenerationStats, TimingStats};
 }
 

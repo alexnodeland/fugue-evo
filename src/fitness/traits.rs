@@ -4,13 +4,18 @@
 
 use std::fmt::Debug;
 
+use serde::{de::DeserializeOwned, Serialize};
+
 use crate::genome::traits::EvolutionaryGenome;
 
 /// Trait bound for fitness values
 ///
 /// Fitness values must be comparable and convertible to f64 for
-/// probabilistic selection operations.
-pub trait FitnessValue: PartialOrd + Clone + Send + Sync + Debug + 'static {
+/// probabilistic selection operations. They must also be serializable
+/// for checkpointing.
+pub trait FitnessValue:
+    PartialOrd + Clone + Send + Sync + Debug + Serialize + DeserializeOwned + 'static
+{
     /// Convert fitness to f64 for probabilistic operations
     fn to_f64(&self) -> f64;
 
@@ -74,7 +79,7 @@ impl FitnessValue for usize {
 }
 
 /// Multi-objective fitness value using Pareto ranking
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct ParetoFitness {
     /// Objective values (all to be maximized)
     pub objectives: Vec<f64>,

@@ -272,6 +272,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tracing",
  "zstd",
