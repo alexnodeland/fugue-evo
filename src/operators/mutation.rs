@@ -7,8 +7,9 @@ use rand_distr::{Distribution, Normal};
 
 use crate::genome::bit_string::BitString;
 use crate::genome::bounds::MultiBounds;
+use crate::genome::permutation::Permutation;
 use crate::genome::real_vector::RealVector;
-use crate::genome::traits::{BinaryGenome, EvolutionaryGenome, RealValuedGenome};
+use crate::genome::traits::{BinaryGenome, EvolutionaryGenome, PermutationGenome, RealValuedGenome};
 use crate::operators::traits::{BoundedMutationOperator, MutationOperator};
 
 /// Polynomial mutation (bounded)
@@ -388,6 +389,289 @@ impl MutationOperator<RealVector> for ScrambleMutation {
     }
 }
 
+// =============================================================================
+// Permutation Mutation Operators
+// =============================================================================
+
+/// Swap mutation for permutation genomes
+///
+/// Swaps two random positions in the permutation.
+/// This is one of the simplest and most commonly used permutation mutations.
+#[derive(Clone, Debug, Default)]
+pub struct PermutationSwapMutation {
+    /// Number of swaps to perform
+    pub num_swaps: usize,
+}
+
+impl PermutationSwapMutation {
+    /// Create a new swap mutation with a single swap
+    pub fn new() -> Self {
+        Self { num_swaps: 1 }
+    }
+
+    /// Create with multiple swaps
+    pub fn with_swaps(num_swaps: usize) -> Self {
+        Self { num_swaps }
+    }
+}
+
+impl MutationOperator<Permutation> for PermutationSwapMutation {
+    fn mutate<R: Rng>(&self, genome: &mut Permutation, rng: &mut R) {
+        let n = genome.dimension();
+        if n < 2 {
+            return;
+        }
+
+        for _ in 0..self.num_swaps {
+            let i = rng.gen_range(0..n);
+            let j = rng.gen_range(0..n);
+            if i != j {
+                genome.swap(i, j);
+            }
+        }
+    }
+}
+
+/// Insert mutation for permutation genomes
+///
+/// Removes an element from one position and inserts it at another.
+/// This preserves adjacencies better than swap mutation.
+#[derive(Clone, Debug, Default)]
+pub struct InsertMutation {
+    /// Number of insert operations to perform
+    pub num_inserts: usize,
+}
+
+impl InsertMutation {
+    /// Create a new insert mutation with a single insert
+    pub fn new() -> Self {
+        Self { num_inserts: 1 }
+    }
+
+    /// Create with multiple inserts
+    pub fn with_inserts(num_inserts: usize) -> Self {
+        Self { num_inserts }
+    }
+}
+
+impl MutationOperator<Permutation> for InsertMutation {
+    fn mutate<R: Rng>(&self, genome: &mut Permutation, rng: &mut R) {
+        let n = genome.dimension();
+        if n < 2 {
+            return;
+        }
+
+        for _ in 0..self.num_inserts {
+            let from = rng.gen_range(0..n);
+            let to = rng.gen_range(0..n);
+            if from != to {
+                genome.insert(from, to);
+            }
+        }
+    }
+}
+
+/// Inversion mutation (2-opt) for permutation genomes
+///
+/// Reverses a random segment of the permutation.
+/// This is particularly effective for TSP-like problems as it can
+/// remove crossing edges.
+#[derive(Clone, Debug, Default)]
+pub struct InversionMutation;
+
+impl InversionMutation {
+    /// Create a new inversion mutation
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl MutationOperator<Permutation> for InversionMutation {
+    fn mutate<R: Rng>(&self, genome: &mut Permutation, rng: &mut R) {
+        let n = genome.dimension();
+        if n < 2 {
+            return;
+        }
+
+        let mut start = rng.gen_range(0..n);
+        let mut end = rng.gen_range(0..n);
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        genome.reverse_segment(start, end);
+    }
+}
+
+/// Scramble mutation for permutation genomes
+///
+/// Shuffles a random segment of the permutation.
+/// More disruptive than inversion, but still preserves some structure.
+#[derive(Clone, Debug, Default)]
+pub struct PermutationScrambleMutation;
+
+impl PermutationScrambleMutation {
+    /// Create a new scramble mutation
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl MutationOperator<Permutation> for PermutationScrambleMutation {
+    fn mutate<R: Rng>(&self, genome: &mut Permutation, rng: &mut R) {
+        use rand::seq::SliceRandom;
+
+        let n = genome.dimension();
+        if n < 2 {
+            return;
+        }
+
+        let mut start = rng.gen_range(0..n);
+        let mut end = rng.gen_range(0..n);
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        // Shuffle the segment
+        let perm = genome.permutation_mut();
+        perm[start..=end].shuffle(rng);
+    }
+}
+
+/// Displacement mutation for permutation genomes
+///
+/// Selects a segment, removes it, and inserts it at a random position.
+/// This is similar to insert mutation but operates on segments.
+#[derive(Clone, Debug, Default)]
+pub struct DisplacementMutation;
+
+impl DisplacementMutation {
+    /// Create a new displacement mutation
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl MutationOperator<Permutation> for DisplacementMutation {
+    fn mutate<R: Rng>(&self, genome: &mut Permutation, rng: &mut R) {
+        let n = genome.dimension();
+        if n < 3 {
+            return;
+        }
+
+        // Select segment
+        let mut start = rng.gen_range(0..n);
+        let mut end = rng.gen_range(0..n);
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        let segment_len = end - start + 1;
+        if segment_len >= n {
+            return; // Can't displace the entire permutation
+        }
+
+        // Extract segment
+        let perm = genome.permutation_mut();
+        let segment: Vec<usize> = perm[start..=end].to_vec();
+
+        // Remove segment
+        let remaining: Vec<usize> = perm[..start]
+            .iter()
+            .chain(perm[end + 1..].iter())
+            .copied()
+            .collect();
+
+        // Choose insertion point in remaining
+        let insert_pos = rng.gen_range(0..=remaining.len());
+
+        // Rebuild permutation
+        let new_perm: Vec<usize> = remaining[..insert_pos]
+            .iter()
+            .chain(segment.iter())
+            .chain(remaining[insert_pos..].iter())
+            .copied()
+            .collect();
+
+        perm.copy_from_slice(&new_perm);
+    }
+}
+
+/// Adaptive mutation rate for permutation genomes
+///
+/// Combines multiple mutation operators with configurable probabilities.
+#[derive(Clone, Debug)]
+pub struct AdaptivePermutationMutation {
+    /// Probability of swap mutation
+    pub swap_prob: f64,
+    /// Probability of insert mutation
+    pub insert_prob: f64,
+    /// Probability of inversion mutation
+    pub inversion_prob: f64,
+    /// Probability of scramble mutation
+    pub scramble_prob: f64,
+}
+
+impl AdaptivePermutationMutation {
+    /// Create with default probabilities (each equally likely)
+    pub fn new() -> Self {
+        Self {
+            swap_prob: 0.25,
+            insert_prob: 0.25,
+            inversion_prob: 0.25,
+            scramble_prob: 0.25,
+        }
+    }
+
+    /// Create with custom probabilities
+    pub fn with_probs(swap: f64, insert: f64, inversion: f64, scramble: f64) -> Self {
+        Self {
+            swap_prob: swap,
+            insert_prob: insert,
+            inversion_prob: inversion,
+            scramble_prob: scramble,
+        }
+    }
+}
+
+impl Default for AdaptivePermutationMutation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MutationOperator<Permutation> for AdaptivePermutationMutation {
+    fn mutate<R: Rng>(&self, genome: &mut Permutation, rng: &mut R) {
+        let total = self.swap_prob + self.insert_prob + self.inversion_prob + self.scramble_prob;
+        if total <= 0.0 {
+            return;
+        }
+
+        let r = rng.gen::<f64>() * total;
+        let mut cumulative = 0.0;
+
+        cumulative += self.swap_prob;
+        if r < cumulative {
+            PermutationSwapMutation::new().mutate(genome, rng);
+            return;
+        }
+
+        cumulative += self.insert_prob;
+        if r < cumulative {
+            InsertMutation::new().mutate(genome, rng);
+            return;
+        }
+
+        cumulative += self.inversion_prob;
+        if r < cumulative {
+            InversionMutation::new().mutate(genome, rng);
+            return;
+        }
+
+        PermutationScrambleMutation::new().mutate(genome, rng);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,5 +897,141 @@ mod tests {
 
         // Count should be preserved
         assert_eq!(genome.count_ones(), original.count_ones());
+    }
+
+    // =========================================================================
+    // Permutation Mutation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_permutation_swap_mutation() {
+        let mut rng = rand::thread_rng();
+        let original = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let mut genome = original.clone();
+
+        let mutation = PermutationSwapMutation::new();
+        mutation.mutate(&mut genome, &mut rng);
+
+        // Should still be valid permutation
+        assert!(genome.is_valid_permutation());
+        assert_eq!(genome.dimension(), 8);
+    }
+
+    #[test]
+    fn test_permutation_swap_mutation_multiple() {
+        let mut rng = rand::thread_rng();
+        let original = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut genome = original.clone();
+
+        let mutation = PermutationSwapMutation::with_swaps(5);
+        mutation.mutate(&mut genome, &mut rng);
+
+        // Should still be valid permutation
+        assert!(genome.is_valid_permutation());
+        assert_eq!(genome.dimension(), 10);
+    }
+
+    #[test]
+    fn test_insert_mutation() {
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..50 {
+            let mut genome = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+
+            let mutation = InsertMutation::new();
+            mutation.mutate(&mut genome, &mut rng);
+
+            assert!(genome.is_valid_permutation());
+            assert_eq!(genome.dimension(), 8);
+        }
+    }
+
+    #[test]
+    fn test_inversion_mutation() {
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..50 {
+            let mut genome = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+
+            let mutation = InversionMutation::new();
+            mutation.mutate(&mut genome, &mut rng);
+
+            assert!(genome.is_valid_permutation());
+            assert_eq!(genome.dimension(), 8);
+        }
+    }
+
+    #[test]
+    fn test_inversion_mutation_reverses_segment() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        let mut genome = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+
+        let mutation = InversionMutation::new();
+        mutation.mutate(&mut genome, &mut rng);
+
+        // Should still be valid permutation
+        assert!(genome.is_valid_permutation());
+    }
+
+    #[test]
+    fn test_permutation_scramble_mutation() {
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..50 {
+            let mut genome = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+
+            let mutation = PermutationScrambleMutation::new();
+            mutation.mutate(&mut genome, &mut rng);
+
+            assert!(genome.is_valid_permutation());
+            assert_eq!(genome.dimension(), 8);
+        }
+    }
+
+    #[test]
+    fn test_displacement_mutation() {
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..50 {
+            let mut genome = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+            let mutation = DisplacementMutation::new();
+            mutation.mutate(&mut genome, &mut rng);
+
+            assert!(genome.is_valid_permutation());
+            assert_eq!(genome.dimension(), 10);
+        }
+    }
+
+    #[test]
+    fn test_adaptive_permutation_mutation() {
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..100 {
+            let mut genome = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+
+            let mutation = AdaptivePermutationMutation::new();
+            mutation.mutate(&mut genome, &mut rng);
+
+            assert!(genome.is_valid_permutation());
+            assert_eq!(genome.dimension(), 8);
+        }
+    }
+
+    #[test]
+    fn test_adaptive_permutation_mutation_custom_probs() {
+        let mut rng = rand::thread_rng();
+
+        // Test with only inversion mutation
+        let mutation = AdaptivePermutationMutation::with_probs(0.0, 0.0, 1.0, 0.0);
+
+        for _ in 0..50 {
+            let mut genome = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+            mutation.mutate(&mut genome, &mut rng);
+
+            assert!(genome.is_valid_permutation());
+        }
     }
 }
