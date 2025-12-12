@@ -1,23 +1,49 @@
 //! Core genome traits
 //!
-//! This module defines the `EvolutionaryGenome` trait and related types.
+//! This module defines the `EvolutionaryGenome` trait and related types,
+//! with integration to Fugue PPL for probabilistic operations.
 
+use fugue::{addr, Address, Trace};
+
+// Re-export ChoiceValue for use in genome implementations
+pub use fugue::ChoiceValue;
 use rand::Rng;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::error::GenomeError;
 use crate::genome::bounds::MultiBounds;
 
-/// Core genome abstraction for evolutionary algorithms
+/// Core genome abstraction with Fugue integration for evolutionary algorithms.
 ///
-/// This trait defines the interface for evolvable solution representations.
+/// This trait defines the interface for evolvable solution representations,
+/// with explicit Fugue trace integration for probabilistic operations.
 /// Genomes must be cloneable, serializable, and thread-safe.
+///
+/// # Fugue Integration
+///
+/// The key insight is that Fugue's traces can represent genomes. Each gene
+/// is stored at an indexed address, enabling:
+/// - Trace-based mutation (selective resampling)
+/// - Trace-based crossover (merging parent traces)
+/// - Probabilistic interpretation of genetic operators
 pub trait EvolutionaryGenome: Clone + Send + Sync + Serialize + DeserializeOwned + 'static {
     /// The allele type for individual genes
     type Allele: Clone + Send;
 
     /// The phenotype or decoded solution type
     type Phenotype;
+
+    /// Convert genome to Fugue trace for probabilistic operations.
+    ///
+    /// Each gene is stored at an indexed address (e.g., "gene#0", "gene#1", ...),
+    /// enabling trace-based evolutionary operators.
+    fn to_trace(&self) -> Trace;
+
+    /// Reconstruct genome from Fugue trace after evolutionary operations.
+    ///
+    /// This is the inverse of `to_trace()`, extracting gene values from
+    /// the trace's choice map.
+    fn from_trace(trace: &Trace) -> Result<Self, GenomeError>;
 
     /// Decode genome into phenotype for fitness evaluation
     fn decode(&self) -> Self::Phenotype;
@@ -38,9 +64,14 @@ pub trait EvolutionaryGenome: Clone + Send + Sync + Serialize + DeserializeOwned
         None
     }
 
-    /// Distance metric between two genomes (default: not implemented)
+    /// Distance metric between two genomes (default: 0.0)
     fn distance(&self, _other: &Self) -> f64 {
         0.0
+    }
+
+    /// Get the address prefix used for trace storage (default: "gene")
+    fn trace_prefix() -> &'static str {
+        "gene"
     }
 }
 
@@ -113,6 +144,11 @@ pub trait PermutationGenome: EvolutionaryGenome<Allele = usize> {
     }
 }
 
+/// Helper function to create a gene address for trace storage
+pub fn gene_address(prefix: &str, index: usize) -> Address {
+    addr!(prefix, index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +163,29 @@ mod tests {
     impl EvolutionaryGenome for MockGenome {
         type Allele = f64;
         type Phenotype = Vec<f64>;
+
+        fn to_trace(&self) -> Trace {
+            let mut trace = Trace::default();
+            for (i, &gene) in self.genes.iter().enumerate() {
+                trace.insert_choice(addr!("gene", i), ChoiceValue::F64(gene), 0.0);
+            }
+            trace
+        }
+
+        fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
+            let mut genes = Vec::new();
+            let mut i = 0;
+            while let Some(val) = trace.get_f64(&addr!("gene", i)) {
+                genes.push(val);
+                i += 1;
+            }
+            if genes.is_empty() {
+                return Err(GenomeError::InvalidStructure(
+                    "No genes found in trace".to_string(),
+                ));
+            }
+            Ok(Self { genes })
+        }
 
         fn decode(&self) -> Self::Phenotype {
             self.genes.clone()
@@ -225,6 +284,39 @@ mod tests {
         assert_eq!(genome.genes, vec![-5.0, 0.0, 5.0]);
     }
 
+    #[test]
+    fn test_mock_genome_to_trace() {
+        let genome = MockGenome {
+            genes: vec![1.0, 2.0, 3.0],
+        };
+        let trace = genome.to_trace();
+
+        assert_eq!(trace.get_f64(&addr!("gene", 0)), Some(1.0));
+        assert_eq!(trace.get_f64(&addr!("gene", 1)), Some(2.0));
+        assert_eq!(trace.get_f64(&addr!("gene", 2)), Some(3.0));
+    }
+
+    #[test]
+    fn test_mock_genome_from_trace() {
+        let mut trace = Trace::default();
+        trace.insert_choice(addr!("gene", 0), ChoiceValue::F64(1.5), 0.0);
+        trace.insert_choice(addr!("gene", 1), ChoiceValue::F64(2.5), 0.0);
+        trace.insert_choice(addr!("gene", 2), ChoiceValue::F64(3.5), 0.0);
+
+        let genome = MockGenome::from_trace(&trace).unwrap();
+        assert_eq!(genome.genes, vec![1.5, 2.5, 3.5]);
+    }
+
+    #[test]
+    fn test_mock_genome_trace_roundtrip() {
+        let original = MockGenome {
+            genes: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        };
+        let trace = original.to_trace();
+        let recovered = MockGenome::from_trace(&trace).unwrap();
+        assert_eq!(original, recovered);
+    }
+
     // Mock binary genome for testing
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct MockBinaryGenome {
@@ -234,6 +326,29 @@ mod tests {
     impl EvolutionaryGenome for MockBinaryGenome {
         type Allele = bool;
         type Phenotype = Vec<bool>;
+
+        fn to_trace(&self) -> Trace {
+            let mut trace = Trace::default();
+            for (i, &bit) in self.bits.iter().enumerate() {
+                trace.insert_choice(addr!("bit", i), ChoiceValue::Bool(bit), 0.0);
+            }
+            trace
+        }
+
+        fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
+            let mut bits = Vec::new();
+            let mut i = 0;
+            while let Some(val) = trace.get_bool(&addr!("bit", i)) {
+                bits.push(val);
+                i += 1;
+            }
+            if bits.is_empty() {
+                return Err(GenomeError::InvalidStructure(
+                    "No bits found in trace".to_string(),
+                ));
+            }
+            Ok(Self { bits })
+        }
 
         fn decode(&self) -> Self::Phenotype {
             self.bits.clone()
@@ -246,6 +361,10 @@ mod tests {
         fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
             let bits = (0..bounds.dimension()).map(|_| rng.gen()).collect();
             Self { bits }
+        }
+
+        fn trace_prefix() -> &'static str {
+            "bit"
         }
     }
 
@@ -272,6 +391,16 @@ mod tests {
         assert_eq!(genome.count_zeros(), 2);
     }
 
+    #[test]
+    fn test_binary_genome_trace_roundtrip() {
+        let original = MockBinaryGenome {
+            bits: vec![true, false, true, false, true],
+        };
+        let trace = original.to_trace();
+        let recovered = MockBinaryGenome::from_trace(&trace).unwrap();
+        assert_eq!(original, recovered);
+    }
+
     // Mock permutation genome for testing
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct MockPermGenome {
@@ -281,6 +410,29 @@ mod tests {
     impl EvolutionaryGenome for MockPermGenome {
         type Allele = usize;
         type Phenotype = Vec<usize>;
+
+        fn to_trace(&self) -> Trace {
+            let mut trace = Trace::default();
+            for (i, &val) in self.perm.iter().enumerate() {
+                trace.insert_choice(addr!("perm", i), ChoiceValue::Usize(val), 0.0);
+            }
+            trace
+        }
+
+        fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
+            let mut perm = Vec::new();
+            let mut i = 0;
+            while let Some(val) = trace.get_usize(&addr!("perm", i)) {
+                perm.push(val);
+                i += 1;
+            }
+            if perm.is_empty() {
+                return Err(GenomeError::InvalidStructure(
+                    "No permutation found in trace".to_string(),
+                ));
+            }
+            Ok(Self { perm })
+        }
 
         fn decode(&self) -> Self::Phenotype {
             self.perm.clone()
@@ -296,6 +448,10 @@ mod tests {
             let mut perm: Vec<usize> = (0..n).collect();
             perm.shuffle(rng);
             Self { perm }
+        }
+
+        fn trace_prefix() -> &'static str {
+            "perm"
         }
     }
 
@@ -332,5 +488,15 @@ mod tests {
 
         let empty = MockPermGenome { perm: vec![] };
         assert!(empty.is_valid_permutation());
+    }
+
+    #[test]
+    fn test_permutation_genome_trace_roundtrip() {
+        let original = MockPermGenome {
+            perm: vec![3, 1, 4, 0, 2],
+        };
+        let trace = original.to_trace();
+        let recovered = MockPermGenome::from_trace(&trace).unwrap();
+        assert_eq!(original, recovered);
     }
 }

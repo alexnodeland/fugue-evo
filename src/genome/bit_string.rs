@@ -1,7 +1,9 @@
 //! Bit string genome
 //!
-//! This module provides a fixed-length bit string genome type for combinatorial optimization.
+//! This module provides a fixed-length bit string genome type for combinatorial optimization,
+//! with Fugue trace integration for probabilistic operations.
 
+use fugue::{addr, ChoiceValue, Trace};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -171,6 +173,35 @@ impl EvolutionaryGenome for BitString {
     type Allele = bool;
     type Phenotype = Vec<bool>;
 
+    /// Convert BitString to Fugue trace.
+    ///
+    /// Each bit is stored at address "bit#i" where i is the index.
+    fn to_trace(&self) -> Trace {
+        let mut trace = Trace::default();
+        for (i, &bit) in self.bits.iter().enumerate() {
+            trace.insert_choice(addr!("bit", i), ChoiceValue::Bool(bit), 0.0);
+        }
+        trace
+    }
+
+    /// Reconstruct BitString from Fugue trace.
+    ///
+    /// Reads bits from addresses "bit#0", "bit#1", ... until no more are found.
+    fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
+        let mut bits = Vec::new();
+        let mut i = 0;
+        while let Some(val) = trace.get_bool(&addr!("bit", i)) {
+            bits.push(val);
+            i += 1;
+        }
+        if bits.is_empty() {
+            return Err(GenomeError::InvalidStructure(
+                "No bits found in trace".to_string(),
+            ));
+        }
+        Ok(Self { bits })
+    }
+
     fn decode(&self) -> Self::Phenotype {
         self.bits.clone()
     }
@@ -194,6 +225,10 @@ impl EvolutionaryGenome for BitString {
 
     fn distance(&self, other: &Self) -> f64 {
         self.hamming_distance(other) as f64
+    }
+
+    fn trace_prefix() -> &'static str {
+        "bit"
     }
 }
 
@@ -267,6 +302,7 @@ impl std::fmt::Display for BitString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fugue::addr;
 
     #[test]
     fn test_bit_string_new() {
@@ -427,5 +463,43 @@ mod tests {
         let bs = BitString::new(vec![true, false, true]);
         let phenotype = bs.decode();
         assert_eq!(phenotype, vec![true, false, true]);
+    }
+
+    #[test]
+    fn test_bit_string_to_trace() {
+        let bs = BitString::new(vec![true, false, true, false]);
+        let trace = bs.to_trace();
+
+        assert_eq!(trace.get_bool(&addr!("bit", 0)), Some(true));
+        assert_eq!(trace.get_bool(&addr!("bit", 1)), Some(false));
+        assert_eq!(trace.get_bool(&addr!("bit", 2)), Some(true));
+        assert_eq!(trace.get_bool(&addr!("bit", 3)), Some(false));
+        assert_eq!(trace.get_bool(&addr!("bit", 4)), None);
+    }
+
+    #[test]
+    fn test_bit_string_from_trace() {
+        let mut trace = Trace::default();
+        trace.insert_choice(addr!("bit", 0), ChoiceValue::Bool(true), 0.0);
+        trace.insert_choice(addr!("bit", 1), ChoiceValue::Bool(false), 0.0);
+        trace.insert_choice(addr!("bit", 2), ChoiceValue::Bool(true), 0.0);
+
+        let bs = BitString::from_trace(&trace).unwrap();
+        assert_eq!(bs.bits(), &[true, false, true]);
+    }
+
+    #[test]
+    fn test_bit_string_trace_roundtrip() {
+        let original = BitString::new(vec![true, false, true, true, false]);
+        let trace = original.to_trace();
+        let recovered = BitString::from_trace(&trace).unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_bit_string_from_trace_empty() {
+        let trace = Trace::default();
+        let result = BitString::from_trace(&trace);
+        assert!(result.is_err());
     }
 }
