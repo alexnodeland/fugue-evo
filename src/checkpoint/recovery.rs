@@ -328,16 +328,13 @@ impl CheckpointManager {
             return Ok(None);
         }
 
-        // Sort by modification time (newest first)
+        // Sort by filename index (newest first) - more deterministic than modification time
+        // Filenames are formatted as {base_name}_{index:04}.{ext}
         checkpoints.sort_by(|a, b| {
-            b.metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                .cmp(
-                    &a.metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                )
+            let name_a = a.file_name().to_string_lossy().to_string();
+            let name_b = b.file_name().to_string_lossy().to_string();
+            // Compare in reverse order to get newest first
+            name_b.cmp(&name_a)
         });
 
         // Try to load the newest checkpoint
