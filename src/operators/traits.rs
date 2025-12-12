@@ -5,8 +5,8 @@
 use rand::Rng;
 
 use crate::error::OperatorResult;
-use crate::genome::traits::EvolutionaryGenome;
 use crate::genome::bounds::MultiBounds;
+use crate::genome::traits::EvolutionaryGenome;
 
 /// Selection operator trait
 ///
@@ -37,12 +37,7 @@ pub trait SelectionOperator<G: EvolutionaryGenome>: Send + Sync {
 /// Combines genetic material from two parents to create offspring.
 pub trait CrossoverOperator<G: EvolutionaryGenome>: Send + Sync {
     /// Apply crossover to two parents and produce two offspring
-    fn crossover<R: Rng>(
-        &self,
-        parent1: &G,
-        parent2: &G,
-        rng: &mut R,
-    ) -> OperatorResult<(G, G)>;
+    fn crossover<R: Rng>(&self, parent1: &G, parent2: &G, rng: &mut R) -> OperatorResult<(G, G)>;
 
     /// Get the probability of crossover being applied
     fn crossover_probability(&self) -> f64 {
@@ -96,11 +91,7 @@ mod tests {
     struct MockSelection;
 
     impl SelectionOperator<RealVector> for MockSelection {
-        fn select<R: Rng>(
-            &self,
-            population: &[(RealVector, f64)],
-            rng: &mut R,
-        ) -> usize {
+        fn select<R: Rng>(&self, population: &[(RealVector, f64)], rng: &mut R) -> usize {
             rng.gen_range(0..population.len())
         }
     }

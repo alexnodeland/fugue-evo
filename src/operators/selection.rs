@@ -2,8 +2,8 @@
 //!
 //! This module provides various selection operators for genetic algorithms.
 
-use rand::Rng;
 use rand::seq::SliceRandom;
+use rand::Rng;
 use rand_distr::{Distribution, WeightedIndex};
 
 use crate::genome::traits::EvolutionaryGenome;
@@ -172,7 +172,7 @@ impl RankSelection {
     /// Create a new rank selection
     pub fn new(selection_pressure: f64) -> Self {
         assert!(
-            selection_pressure >= 1.0 && selection_pressure <= 2.0,
+            (1.0..=2.0).contains(&selection_pressure),
             "Selection pressure must be in [1.0, 2.0]"
         );
         Self { selection_pressure }
@@ -242,11 +242,11 @@ impl<G: EvolutionaryGenome> SelectionOperator<G> for BoltzmannSelection {
         assert!(!population.is_empty(), "Population cannot be empty");
 
         // Use log-sum-exp trick for numerical stability
-        let scaled: Vec<f64> = population.iter().map(|(_, f)| f / self.temperature).collect();
-        let max_scaled = scaled
+        let scaled: Vec<f64> = population
             .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
+            .map(|(_, f)| f / self.temperature)
+            .collect();
+        let max_scaled = scaled.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
         let weights: Vec<f64> = scaled.iter().map(|s| (s - max_scaled).exp()).collect();
 

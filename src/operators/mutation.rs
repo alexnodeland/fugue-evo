@@ -39,7 +39,7 @@ impl PolynomialMutation {
     /// Set a fixed mutation probability per gene
     pub fn with_probability(mut self, probability: f64) -> Self {
         assert!(
-            probability >= 0.0 && probability <= 1.0,
+            (0.0..=1.0).contains(&probability),
             "Probability must be in [0, 1]"
         );
         self.mutation_probability = Some(probability);
@@ -121,7 +121,7 @@ impl GaussianMutation {
     /// Set a fixed mutation probability per gene
     pub fn with_probability(mut self, probability: f64) -> Self {
         assert!(
-            probability >= 0.0 && probability <= 1.0,
+            (0.0..=1.0).contains(&probability),
             "Probability must be in [0, 1]"
         );
         self.mutation_probability = Some(probability);
@@ -184,7 +184,7 @@ impl UniformMutation {
     /// Set a fixed mutation probability per gene
     pub fn with_probability(mut self, probability: f64) -> Self {
         assert!(
-            probability >= 0.0 && probability <= 1.0,
+            (0.0..=1.0).contains(&probability),
             "Probability must be in [0, 1]"
         );
         self.mutation_probability = Some(probability);
@@ -240,7 +240,7 @@ impl BitFlipMutation {
     /// Set a fixed mutation probability per bit
     pub fn with_probability(mut self, probability: f64) -> Self {
         assert!(
-            probability >= 0.0 && probability <= 1.0,
+            (0.0..=1.0).contains(&probability),
             "Probability must be in [0, 1]"
         );
         self.mutation_probability = Some(probability);
@@ -525,7 +525,11 @@ mod tests {
 
         // About half should be flipped
         let flipped = genome.count_ones();
-        assert!(flipped > 20 && flipped < 80, "Expected ~50 flips, got {}", flipped);
+        assert!(
+            flipped > 20 && flipped < 80,
+            "Expected ~50 flips, got {}",
+            flipped
+        );
     }
 
     #[test]

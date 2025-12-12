@@ -252,9 +252,7 @@ mod tests {
 
     #[test]
     fn test_max_generations() {
-        let individuals = vec![
-            Individual::with_fitness(RealVector::new(vec![1.0]), 10.0),
-        ];
+        let individuals = vec![Individual::with_fitness(RealVector::new(vec![1.0]), 10.0)];
         let pop = Population::from_individuals(individuals);
         let history = vec![];
 
@@ -272,9 +270,7 @@ mod tests {
 
     #[test]
     fn test_max_evaluations() {
-        let individuals = vec![
-            Individual::with_fitness(RealVector::new(vec![1.0]), 10.0),
-        ];
+        let individuals = vec![Individual::with_fitness(RealVector::new(vec![1.0]), 10.0)];
         let pop = Population::from_individuals(individuals);
         let history = vec![];
 
@@ -289,9 +285,7 @@ mod tests {
 
     #[test]
     fn test_fitness_stagnation() {
-        let individuals = vec![
-            Individual::with_fitness(RealVector::new(vec![1.0]), 10.0),
-        ];
+        let individuals = vec![Individual::with_fitness(RealVector::new(vec![1.0]), 10.0)];
         let pop = Population::from_individuals(individuals);
 
         let criterion = FitnessStagnation::new(5, 0.01);
@@ -314,9 +308,7 @@ mod tests {
 
     #[test]
     fn test_target_fitness() {
-        let individuals = vec![
-            Individual::with_fitness(RealVector::new(vec![1.0]), 10.0),
-        ];
+        let individuals = vec![Individual::with_fitness(RealVector::new(vec![1.0]), 10.0)];
         let pop = Population::from_individuals(individuals);
         let history = vec![];
 
@@ -338,9 +330,7 @@ mod tests {
 
     #[test]
     fn test_any_of() {
-        let individuals = vec![
-            Individual::with_fitness(RealVector::new(vec![1.0]), 10.0),
-        ];
+        let individuals = vec![Individual::with_fitness(RealVector::new(vec![1.0]), 10.0)];
         let pop = Population::from_individuals(individuals);
         let history = vec![];
 
@@ -364,9 +354,7 @@ mod tests {
 
     #[test]
     fn test_all_of() {
-        let individuals = vec![
-            Individual::with_fitness(RealVector::new(vec![1.0]), 10.0),
-        ];
+        let individuals = vec![Individual::with_fitness(RealVector::new(vec![1.0]), 10.0)];
         let pop = Population::from_individuals(individuals);
         let history = vec![];
 

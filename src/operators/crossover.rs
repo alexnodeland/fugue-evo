@@ -40,7 +40,7 @@ impl SbxCrossover {
     /// Set the per-gene crossover probability
     pub fn with_probability(mut self, probability: f64) -> Self {
         assert!(
-            probability >= 0.0 && probability <= 1.0,
+            (0.0..=1.0).contains(&probability),
             "Probability must be in [0, 1]"
         );
         self.crossover_probability = probability;
@@ -223,10 +223,7 @@ impl UniformCrossover {
 
     /// Create with a specific bias towards parent1
     pub fn with_bias(bias: f64) -> Self {
-        assert!(
-            bias >= 0.0 && bias <= 1.0,
-            "Bias must be in [0, 1]"
-        );
+        assert!((0.0..=1.0).contains(&bias), "Bias must be in [0, 1]");
         Self { bias }
     }
 }
@@ -388,10 +385,7 @@ pub struct ArithmeticCrossover {
 impl ArithmeticCrossover {
     /// Create a new arithmetic crossover with the given weight
     pub fn new(weight: f64) -> Self {
-        assert!(
-            weight >= 0.0 && weight <= 1.0,
-            "Weight must be in [0, 1]"
-        );
+        assert!((0.0..=1.0).contains(&weight), "Weight must be in [0, 1]");
         Self { weight }
     }
 

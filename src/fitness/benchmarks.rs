@@ -5,8 +5,8 @@
 use std::f64::consts::PI;
 
 use crate::fitness::traits::Fitness;
-use crate::genome::real_vector::RealVector;
 use crate::genome::bit_string::BitString;
+use crate::genome::real_vector::RealVector;
 use crate::genome::traits::{BinaryGenome, RealValuedGenome};
 
 /// Trait for benchmark functions
@@ -426,8 +426,8 @@ impl Fitness for LeadingOnes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approx::assert_relative_eq;
     use crate::fitness::traits::Fitness;
+    use approx::assert_relative_eq;
 
     // Sphere function tests
     #[test]

@@ -130,7 +130,7 @@ impl MultiBounds {
         values
             .iter()
             .enumerate()
-            .all(|(i, &v)| self.bounds.get(i).map_or(false, |b| b.contains(v)))
+            .all(|(i, &v)| self.bounds.get(i).is_some_and(|b| b.contains(v)))
     }
 }
 

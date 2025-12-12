@@ -144,8 +144,16 @@ where
             .iter()
             .filter(|i| i.is_evaluated())
             .max_by(|a, b| {
-                let fa = a.fitness.as_ref().map(|f| f.to_f64()).unwrap_or(f64::NEG_INFINITY);
-                let fb = b.fitness.as_ref().map(|f| f.to_f64()).unwrap_or(f64::NEG_INFINITY);
+                let fa = a
+                    .fitness
+                    .as_ref()
+                    .map(|f| f.to_f64())
+                    .unwrap_or(f64::NEG_INFINITY);
+                let fb = b
+                    .fitness
+                    .as_ref()
+                    .map(|f| f.to_f64())
+                    .unwrap_or(f64::NEG_INFINITY);
                 fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
             })
     }
@@ -156,8 +164,16 @@ where
             .iter()
             .filter(|i| i.is_evaluated())
             .min_by(|a, b| {
-                let fa = a.fitness.as_ref().map(|f| f.to_f64()).unwrap_or(f64::INFINITY);
-                let fb = b.fitness.as_ref().map(|f| f.to_f64()).unwrap_or(f64::INFINITY);
+                let fa = a
+                    .fitness
+                    .as_ref()
+                    .map(|f| f.to_f64())
+                    .unwrap_or(f64::INFINITY);
+                let fb = b
+                    .fitness
+                    .as_ref()
+                    .map(|f| f.to_f64())
+                    .unwrap_or(f64::INFINITY);
                 fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
             })
     }
@@ -165,8 +181,16 @@ where
     /// Sort the population by fitness (best first)
     pub fn sort_by_fitness(&mut self) {
         self.individuals.sort_by(|a, b| {
-            let fa = a.fitness.as_ref().map(|f| f.to_f64()).unwrap_or(f64::NEG_INFINITY);
-            let fb = b.fitness.as_ref().map(|f| f.to_f64()).unwrap_or(f64::NEG_INFINITY);
+            let fa = a
+                .fitness
+                .as_ref()
+                .map(|f| f.to_f64())
+                .unwrap_or(f64::NEG_INFINITY);
+            let fb = b
+                .fitness
+                .as_ref()
+                .map(|f| f.to_f64())
+                .unwrap_or(f64::NEG_INFINITY);
             fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
         });
     }
@@ -247,8 +271,8 @@ where
             return None;
         }
 
-        let variance =
-            evaluated.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / (evaluated.len() - 1) as f64;
+        let variance = evaluated.iter().map(|f| (f - mean).powi(2)).sum::<f64>()
+            / (evaluated.len() - 1) as f64;
         Some(variance.sqrt())
     }
 
@@ -263,7 +287,9 @@ where
 
         for i in 0..self.len() {
             for j in (i + 1)..self.len() {
-                total_distance += self.individuals[i].genome.distance(&self.individuals[j].genome);
+                total_distance += self.individuals[i]
+                    .genome
+                    .distance(&self.individuals[j].genome);
                 count += 1;
             }
         }

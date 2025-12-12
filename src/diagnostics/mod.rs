@@ -120,7 +120,7 @@ impl GenerationStats {
         let best = fitnesses.last().copied().unwrap_or(f64::NEG_INFINITY);
         let worst = fitnesses.first().copied().unwrap_or(f64::INFINITY);
         let mean = fitnesses.iter().sum::<f64>() / fitnesses.len() as f64;
-        let median = if fitnesses.len() % 2 == 0 {
+        let median = if fitnesses.len().is_multiple_of(2) {
             (fitnesses[fitnesses.len() / 2 - 1] + fitnesses[fitnesses.len() / 2]) / 2.0
         } else {
             fitnesses[fitnesses.len() / 2]

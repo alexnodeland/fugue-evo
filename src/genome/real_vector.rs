@@ -40,7 +40,7 @@ impl RealVector {
     }
 
     /// Create from an iterator
-    pub fn from_iter<I: IntoIterator<Item = f64>>(iter: I) -> Self {
+    pub fn collect_from<I: IntoIterator<Item = f64>>(iter: I) -> Self {
         Self {
             genes: iter.into_iter().collect(),
         }

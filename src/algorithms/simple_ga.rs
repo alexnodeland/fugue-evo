@@ -222,7 +222,10 @@ where
     }
 
     /// Set max generations (convenience method)
-    pub fn max_generations(self, max: usize) -> SimpleGABuilder<G, F, S, C, M, Fit, MaxGenerations> {
+    pub fn max_generations(
+        self,
+        max: usize,
+    ) -> SimpleGABuilder<G, F, S, C, M, Fit, MaxGenerations> {
         SimpleGABuilder {
             config: self.config,
             bounds: self.bounds,
@@ -247,6 +250,7 @@ where
     Term: TerminationCriterion<G, F>,
 {
     /// Build the SimpleGA instance
+    #[allow(clippy::type_complexity)]
     pub fn build(self) -> Result<SimpleGA<G, F, S, C, M, Fit, Term>, EvolutionError> {
         let bounds = self
             .bounds
@@ -370,7 +374,8 @@ where
             let gen_start = Instant::now();
 
             // Create new generation
-            let mut new_population: Population<G, F> = Population::with_capacity(self.config.population_size);
+            let mut new_population: Population<G, F> =
+                Population::with_capacity(self.config.population_size);
 
             // Elitism: copy best individuals
             if self.config.elitism {
@@ -402,15 +407,15 @@ where
 
                 // Crossover
                 let cross_start = Instant::now();
-                let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability
-                {
-                    match self.crossover.crossover(parent1, parent2, rng).genome() {
-                        Some((c1, c2)) => (c1, c2),
-                        None => (parent1.clone(), parent2.clone()),
-                    }
-                } else {
-                    (parent1.clone(), parent2.clone())
-                };
+                let (mut child1, mut child2) =
+                    if rng.gen::<f64>() < self.config.crossover_probability {
+                        match self.crossover.crossover(parent1, parent2, rng).genome() {
+                            Some((c1, c2)) => (c1, c2),
+                            None => (parent1.clone(), parent2.clone()),
+                        }
+                    } else {
+                        (parent1.clone(), parent2.clone())
+                    };
                 crossover_time += cross_start.elapsed();
 
                 // Mutation
@@ -445,7 +450,12 @@ where
                 new_population.evaluate(&self.fitness);
             }
             let eval_time = eval_start.elapsed();
-            evaluations += new_population.len() - (if self.config.elitism { self.config.elite_count } else { 0 });
+            evaluations += new_population.len()
+                - (if self.config.elitism {
+                    self.config.elite_count
+                } else {
+                    0
+                });
 
             // Update generation counter
             new_population.set_generation(population.generation() + 1);
@@ -466,8 +476,9 @@ where
                 .with_evaluation(eval_time)
                 .with_total(gen_start.elapsed());
 
-            let gen_stats = GenerationStats::from_population(&population, population.generation(), evaluations)
-                .with_timing(timing);
+            let gen_stats =
+                GenerationStats::from_population(&population, population.generation(), evaluations)
+                    .with_timing(timing);
             fitness_history.push(gen_stats.best_fitness);
             stats.record(gen_stats);
         }
@@ -496,7 +507,10 @@ where
     Term: TerminationCriterion<G, F>,
 {
     /// Run the genetic algorithm with bounded operators
-    pub fn run_bounded<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<G, F>, EvolutionError> {
+    pub fn run_bounded<R: Rng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<EvolutionResult<G, F>, EvolutionError> {
         let start_time = Instant::now();
 
         // Initialize population
@@ -542,7 +556,8 @@ where
             }
 
             // Create new generation
-            let mut new_population: Population<G, F> = Population::with_capacity(self.config.population_size);
+            let mut new_population: Population<G, F> =
+                Population::with_capacity(self.config.population_size);
 
             // Elitism
             if self.config.elitism {
@@ -562,19 +577,19 @@ where
                 let parent1 = &selection_pool[parent1_idx].0;
                 let parent2 = &selection_pool[parent2_idx].0;
 
-                let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability
-                {
-                    match self
-                        .crossover
-                        .crossover_bounded(parent1, parent2, &self.bounds, rng)
-                        .genome()
-                    {
-                        Some((c1, c2)) => (c1, c2),
-                        None => (parent1.clone(), parent2.clone()),
-                    }
-                } else {
-                    (parent1.clone(), parent2.clone())
-                };
+                let (mut child1, mut child2) =
+                    if rng.gen::<f64>() < self.config.crossover_probability {
+                        match self
+                            .crossover
+                            .crossover_bounded(parent1, parent2, &self.bounds, rng)
+                            .genome()
+                        {
+                            Some((c1, c2)) => (c1, c2),
+                            None => (parent1.clone(), parent2.clone()),
+                        }
+                    } else {
+                        (parent1.clone(), parent2.clone())
+                    };
 
                 self.mutation.mutate_bounded(&mut child1, &self.bounds, rng);
                 self.mutation.mutate_bounded(&mut child2, &self.bounds, rng);
@@ -600,7 +615,12 @@ where
             } else {
                 new_population.evaluate(&self.fitness);
             }
-            evaluations += new_population.len() - (if self.config.elitism { self.config.elite_count } else { 0 });
+            evaluations += new_population.len()
+                - (if self.config.elitism {
+                    self.config.elite_count
+                } else {
+                    0
+                });
 
             new_population.set_generation(population.generation() + 1);
             population = new_population;
@@ -611,7 +631,8 @@ where
                 }
             }
 
-            let gen_stats = GenerationStats::from_population(&population, population.generation(), evaluations);
+            let gen_stats =
+                GenerationStats::from_population(&population, population.generation(), evaluations);
             fitness_history.push(gen_stats.best_fitness);
             stats.record(gen_stats);
         }

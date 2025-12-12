@@ -2,10 +2,10 @@
 //!
 //! This module provides the fitness abstraction and benchmark functions.
 
-pub mod traits;
 pub mod benchmarks;
+pub mod traits;
 
 pub mod prelude {
-    pub use super::traits::*;
     pub use super::benchmarks::*;
+    pub use super::traits::*;
 }

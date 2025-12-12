@@ -29,23 +29,23 @@
 //!     .run(&mut rng)?;
 //! ```
 
+pub mod algorithms;
+pub mod diagnostics;
 pub mod error;
-pub mod genome;
 pub mod fitness;
+pub mod genome;
 pub mod operators;
 pub mod population;
 pub mod termination;
-pub mod algorithms;
-pub mod diagnostics;
 
 /// Prelude module for convenient imports
 pub mod prelude {
+    pub use crate::algorithms::prelude::*;
+    pub use crate::diagnostics::prelude::*;
     pub use crate::error::*;
-    pub use crate::genome::prelude::*;
     pub use crate::fitness::prelude::*;
+    pub use crate::genome::prelude::*;
     pub use crate::operators::prelude::*;
     pub use crate::population::prelude::*;
     pub use crate::termination::prelude::*;
-    pub use crate::algorithms::prelude::*;
-    pub use crate::diagnostics::prelude::*;
 }
