@@ -255,7 +255,7 @@ impl CheckpointManager {
 
     /// Check if a checkpoint should be saved at this generation
     pub fn should_save(&self, generation: usize) -> bool {
-        generation > 0 && generation % self.interval == 0
+        generation > 0 && generation.is_multiple_of(self.interval)
     }
 
     /// Get the path for the current checkpoint

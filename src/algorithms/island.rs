@@ -429,7 +429,10 @@ where
         self.total_evaluations = self.islands.iter().map(|i| i.evaluations).sum();
 
         // Migration
-        if self.generation % self.config.migration_interval == 0 {
+        if self
+            .generation
+            .is_multiple_of(self.config.migration_interval)
+        {
             self.migrate(rng);
         }
 
