@@ -12,6 +12,7 @@ use crate::genome::real_vector::RealVector;
 use crate::genome::traits::{
     BinaryGenome, EvolutionaryGenome, PermutationGenome, RealValuedGenome,
 };
+use crate::genome::tree::{Function, Terminal, TreeGenome, TreeNode};
 use crate::operators::traits::{BoundedMutationOperator, MutationOperator};
 
 /// Polynomial mutation (bounded)
@@ -674,6 +675,392 @@ impl MutationOperator<Permutation> for AdaptivePermutationMutation {
     }
 }
 
+// =============================================================================
+// Tree (GP) Mutation Operators
+// =============================================================================
+
+/// Point mutation for tree genomes (genetic programming)
+///
+/// Selects a random node and replaces it with a new random node of the same
+/// type. For function nodes, the replacement has the same arity. For terminal
+/// nodes, another random terminal is selected.
+///
+/// This is a non-destructive mutation that preserves tree structure while
+/// changing individual nodes.
+#[derive(Clone, Debug)]
+pub struct PointMutation {
+    /// Per-node mutation probability
+    pub mutation_probability: f64,
+    /// Probability of selecting a function node (vs terminal)
+    pub function_probability: f64,
+}
+
+impl PointMutation {
+    /// Create a new point mutation with default settings
+    ///
+    /// Defaults: 0.1 per-node probability, 0.9 function probability
+    pub fn new() -> Self {
+        Self {
+            mutation_probability: 0.1,
+            function_probability: 0.9,
+        }
+    }
+
+    /// Set the per-node mutation probability
+    pub fn with_probability(mut self, probability: f64) -> Self {
+        assert!(
+            (0.0..=1.0).contains(&probability),
+            "Probability must be in [0, 1]"
+        );
+        self.mutation_probability = probability;
+        self
+    }
+
+    /// Set the function selection probability
+    pub fn with_function_probability(mut self, probability: f64) -> Self {
+        assert!(
+            (0.0..=1.0).contains(&probability),
+            "Probability must be in [0, 1]"
+        );
+        self.function_probability = probability;
+        self
+    }
+
+    /// Mutate a single node, returning a new node of the same type/arity
+    fn mutate_node<T: Terminal, F: Function, R: Rng>(
+        &self,
+        node: &TreeNode<T, F>,
+        rng: &mut R,
+    ) -> TreeNode<T, F> {
+        match node {
+            TreeNode::Terminal(_) => {
+                // Replace with a random terminal
+                TreeNode::Terminal(T::random(rng))
+            }
+            TreeNode::Function(func, children) => {
+                // Find a function with the same arity
+                let target_arity = func.arity();
+                let funcs = F::functions();
+
+                // Filter functions with matching arity
+                let matching_funcs: Vec<&F> =
+                    funcs.iter().filter(|f| f.arity() == target_arity).collect();
+
+                if matching_funcs.is_empty() {
+                    // No matching arity, return original
+                    TreeNode::Function(func.clone(), children.clone())
+                } else {
+                    // Select a random function with the same arity
+                    let new_func = matching_funcs[rng.gen_range(0..matching_funcs.len())].clone();
+                    TreeNode::Function(new_func, children.clone())
+                }
+            }
+        }
+    }
+
+    /// Recursively apply point mutation to tree nodes
+    fn mutate_recursive<T: Terminal, F: Function, R: Rng>(
+        &self,
+        node: &TreeNode<T, F>,
+        rng: &mut R,
+    ) -> TreeNode<T, F> {
+        // Decide if we mutate this node
+        let mutated_node = if rng.gen::<f64>() < self.mutation_probability {
+            self.mutate_node(node, rng)
+        } else {
+            node.clone()
+        };
+
+        // Recurse into children if this is a function node
+        match mutated_node {
+            TreeNode::Terminal(t) => TreeNode::Terminal(t),
+            TreeNode::Function(func, children) => {
+                let new_children: Vec<TreeNode<T, F>> = children
+                    .iter()
+                    .map(|c| self.mutate_recursive(c, rng))
+                    .collect();
+                TreeNode::Function(func, new_children)
+            }
+        }
+    }
+}
+
+impl Default for PointMutation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for PointMutation {
+    fn mutate<R: Rng>(&self, genome: &mut TreeGenome<T, F>, rng: &mut R) {
+        let new_root = self.mutate_recursive(&genome.root, rng);
+        genome.root = new_root;
+    }
+
+    fn mutation_probability(&self) -> f64 {
+        self.mutation_probability
+    }
+}
+
+/// Subtree mutation for tree genomes (genetic programming)
+///
+/// Replaces a randomly selected subtree with a new randomly generated subtree.
+/// This is a more disruptive mutation than point mutation.
+#[derive(Clone, Debug)]
+pub struct SubtreeMutation {
+    /// Maximum depth of the generated subtree
+    pub max_subtree_depth: usize,
+    /// Probability of selecting a function node for replacement
+    pub function_probability: f64,
+    /// Terminal probability for grow method
+    pub terminal_probability: f64,
+}
+
+impl SubtreeMutation {
+    /// Create a new subtree mutation with default settings
+    pub fn new() -> Self {
+        Self {
+            max_subtree_depth: 4,
+            function_probability: 0.9,
+            terminal_probability: 0.3,
+        }
+    }
+
+    /// Set the maximum depth for generated subtrees
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_subtree_depth = depth;
+        self
+    }
+
+    /// Set the function selection probability
+    pub fn with_function_probability(mut self, probability: f64) -> Self {
+        assert!(
+            (0.0..=1.0).contains(&probability),
+            "Probability must be in [0, 1]"
+        );
+        self.function_probability = probability;
+        self
+    }
+
+    /// Set the terminal probability for tree generation
+    pub fn with_terminal_probability(mut self, probability: f64) -> Self {
+        assert!(
+            (0.0..=1.0).contains(&probability),
+            "Probability must be in [0, 1]"
+        );
+        self.terminal_probability = probability;
+        self
+    }
+}
+
+impl Default for SubtreeMutation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for SubtreeMutation {
+    fn mutate<R: Rng>(&self, genome: &mut TreeGenome<T, F>, rng: &mut R) {
+        // Decide whether to select a function or terminal position
+        let position = if rng.gen::<f64>() < self.function_probability {
+            genome.random_function_position(rng).unwrap_or_else(|| {
+                genome
+                    .random_terminal_position(rng)
+                    .unwrap_or_default()
+            })
+        } else {
+            genome.random_terminal_position(rng).unwrap_or_else(|| {
+                genome
+                    .random_function_position(rng)
+                    .unwrap_or_default()
+            })
+        };
+
+        // Calculate remaining depth budget
+        let current_depth = position.len();
+        let remaining_depth = genome.max_depth.saturating_sub(current_depth);
+        let subtree_depth = remaining_depth.min(self.max_subtree_depth).max(1);
+
+        // Generate a new subtree using the grow method
+        let new_subtree: TreeGenome<T, F> =
+            TreeGenome::generate_grow(rng, subtree_depth, self.terminal_probability);
+
+        // Replace the subtree
+        genome.root.replace_subtree(&position, new_subtree.root);
+    }
+}
+
+/// Hoist mutation for tree genomes (genetic programming)
+///
+/// Selects a random subtree and replaces the entire tree with it.
+/// This is useful for bloat control.
+#[derive(Clone, Debug, Default)]
+pub struct HoistMutation {
+    /// Probability of selecting a function node
+    pub function_probability: f64,
+}
+
+impl HoistMutation {
+    /// Create a new hoist mutation
+    pub fn new() -> Self {
+        Self {
+            function_probability: 0.5,
+        }
+    }
+
+    /// Set the function selection probability
+    pub fn with_function_probability(mut self, probability: f64) -> Self {
+        assert!(
+            (0.0..=1.0).contains(&probability),
+            "Probability must be in [0, 1]"
+        );
+        self.function_probability = probability;
+        self
+    }
+}
+
+impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for HoistMutation {
+    fn mutate<R: Rng>(&self, genome: &mut TreeGenome<T, F>, rng: &mut R) {
+        // Select a random position (prefer function nodes to make it interesting)
+        let position = if rng.gen::<f64>() < self.function_probability {
+            genome.random_function_position(rng).unwrap_or_else(|| {
+                genome
+                    .random_terminal_position(rng)
+                    .unwrap_or_default()
+            })
+        } else {
+            genome.random_position(rng)
+        };
+
+        // Skip if selecting the root (no change)
+        if position.is_empty() {
+            return;
+        }
+
+        // Get the subtree and make it the new root
+        if let Some(subtree) = genome.root.get_subtree(&position) {
+            genome.root = subtree.clone();
+        }
+    }
+}
+
+/// Shrink mutation for tree genomes (genetic programming)
+///
+/// Replaces a randomly selected subtree with one of its terminals.
+/// This reduces tree size and helps with bloat control.
+#[derive(Clone, Debug, Default)]
+pub struct ShrinkMutation;
+
+impl ShrinkMutation {
+    /// Create a new shrink mutation
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for ShrinkMutation {
+    fn mutate<R: Rng>(&self, genome: &mut TreeGenome<T, F>, rng: &mut R) {
+        // Find a function node to shrink
+        if let Some(func_position) = genome.random_function_position(rng) {
+            // Skip root to maintain some structure
+            if func_position.is_empty() {
+                return;
+            }
+
+            // Get a terminal from within the selected subtree
+            if let Some(subtree) = genome.root.get_subtree(&func_position) {
+                let terminal_positions = subtree.terminal_positions();
+                if !terminal_positions.is_empty() {
+                    // Pick a random terminal from the subtree
+                    let term_pos = &terminal_positions[rng.gen_range(0..terminal_positions.len())];
+
+                    // Get the terminal value
+                    if let Some(terminal_node) = subtree.get_subtree(term_pos) {
+                        let replacement = terminal_node.clone();
+                        // Replace the function node with the terminal
+                        genome.root.replace_subtree(&func_position, replacement);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Adaptive mutation for tree genomes (genetic programming)
+///
+/// Combines multiple tree mutations with configurable probabilities.
+#[derive(Clone, Debug)]
+pub struct AdaptiveTreeMutation {
+    /// Probability of point mutation
+    pub point_prob: f64,
+    /// Probability of subtree mutation
+    pub subtree_prob: f64,
+    /// Probability of hoist mutation
+    pub hoist_prob: f64,
+    /// Probability of shrink mutation
+    pub shrink_prob: f64,
+}
+
+impl AdaptiveTreeMutation {
+    /// Create with default probabilities
+    pub fn new() -> Self {
+        Self {
+            point_prob: 0.4,
+            subtree_prob: 0.3,
+            hoist_prob: 0.15,
+            shrink_prob: 0.15,
+        }
+    }
+
+    /// Create with custom probabilities
+    pub fn with_probs(point: f64, subtree: f64, hoist: f64, shrink: f64) -> Self {
+        Self {
+            point_prob: point,
+            subtree_prob: subtree,
+            hoist_prob: hoist,
+            shrink_prob: shrink,
+        }
+    }
+}
+
+impl Default for AdaptiveTreeMutation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for AdaptiveTreeMutation {
+    fn mutate<R: Rng>(&self, genome: &mut TreeGenome<T, F>, rng: &mut R) {
+        let total = self.point_prob + self.subtree_prob + self.hoist_prob + self.shrink_prob;
+        if total <= 0.0 {
+            return;
+        }
+
+        let r = rng.gen::<f64>() * total;
+        let mut cumulative = 0.0;
+
+        cumulative += self.point_prob;
+        if r < cumulative {
+            PointMutation::new().mutate(genome, rng);
+            return;
+        }
+
+        cumulative += self.subtree_prob;
+        if r < cumulative {
+            SubtreeMutation::new().mutate(genome, rng);
+            return;
+        }
+
+        cumulative += self.hoist_prob;
+        if r < cumulative {
+            HoistMutation::new().mutate(genome, rng);
+            return;
+        }
+
+        ShrinkMutation::new().mutate(genome, rng);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,6 +1421,154 @@ mod tests {
             mutation.mutate(&mut genome, &mut rng);
 
             assert!(genome.is_valid_permutation());
+        }
+    }
+
+    // =========================================================================
+    // Tree (GP) Mutation Tests
+    // =========================================================================
+
+    use crate::genome::tree::{ArithmeticFunction, ArithmeticTerminal};
+
+    fn create_test_tree() -> TreeGenome<ArithmeticTerminal, ArithmeticFunction> {
+        // Create: (+ x0 (* 1.0 x1))
+        let x0 = TreeNode::terminal(ArithmeticTerminal::Variable(0));
+        let c1 = TreeNode::terminal(ArithmeticTerminal::Constant(1.0));
+        let x1 = TreeNode::terminal(ArithmeticTerminal::Variable(1));
+        let mul = TreeNode::function(ArithmeticFunction::Mul, vec![c1, x1]);
+        let add = TreeNode::function(ArithmeticFunction::Add, vec![x0, mul]);
+        TreeGenome::new(add, 5)
+    }
+
+    #[test]
+    fn test_point_mutation_preserves_structure() {
+        let mut rng = rand::thread_rng();
+        let original = create_test_tree();
+        let original_size = original.size();
+
+        for _ in 0..50 {
+            let mut genome = original.clone();
+            let mutation = PointMutation::new().with_probability(1.0);
+            mutation.mutate(&mut genome, &mut rng);
+
+            // Point mutation preserves tree structure (size)
+            assert_eq!(genome.size(), original_size);
+            assert!(genome.evaluate(&[1.0, 2.0]).is_finite());
+        }
+    }
+
+    #[test]
+    fn test_point_mutation_changes_tree() {
+        let mut rng = rand::thread_rng();
+        let original = create_test_tree();
+        let mut any_changed = false;
+
+        for _ in 0..100 {
+            let mut genome = original.clone();
+            let mutation = PointMutation::new().with_probability(1.0);
+            mutation.mutate(&mut genome, &mut rng);
+
+            // Check if the evaluation changed (indicates mutation occurred)
+            let orig_val = original.evaluate(&[1.0, 2.0]);
+            let new_val = genome.evaluate(&[1.0, 2.0]);
+            if (orig_val - new_val).abs() > 1e-10 {
+                any_changed = true;
+                break;
+            }
+        }
+
+        assert!(any_changed, "Point mutation should sometimes change the tree");
+    }
+
+    #[test]
+    fn test_subtree_mutation() {
+        let mut rng = rand::thread_rng();
+        let original = create_test_tree();
+
+        for _ in 0..50 {
+            let mut genome = original.clone();
+            let mutation = SubtreeMutation::new().with_max_depth(3);
+            mutation.mutate(&mut genome, &mut rng);
+
+            // Tree should still be valid (evaluates to finite value)
+            assert!(genome.evaluate(&[1.0, 2.0]).is_finite());
+            assert!(genome.size() >= 1);
+        }
+    }
+
+    #[test]
+    fn test_hoist_mutation_reduces_tree() {
+        let mut rng = rand::thread_rng();
+
+        // Create a deeper tree
+        let tree: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+            TreeGenome::generate_full(&mut rng, 4, 5);
+
+        let original_size = tree.size();
+
+        for _ in 0..50 {
+            let mut genome = tree.clone();
+            let mutation = HoistMutation::new();
+            mutation.mutate(&mut genome, &mut rng);
+
+            // Hoist mutation should reduce or maintain tree size
+            assert!(genome.size() <= original_size);
+            assert!(genome.evaluate(&[1.0, 2.0]).is_finite());
+        }
+    }
+
+    #[test]
+    fn test_shrink_mutation_reduces_tree() {
+        let mut rng = rand::thread_rng();
+
+        // Create a deeper tree
+        let tree: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+            TreeGenome::generate_full(&mut rng, 4, 5);
+
+        for _ in 0..50 {
+            let mut genome = tree.clone();
+            let original_size = genome.size();
+            let mutation = ShrinkMutation::new();
+            mutation.mutate(&mut genome, &mut rng);
+
+            // Shrink mutation should reduce or maintain tree size
+            assert!(genome.size() <= original_size);
+            assert!(genome.evaluate(&[1.0, 2.0]).is_finite());
+        }
+    }
+
+    #[test]
+    fn test_adaptive_tree_mutation() {
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..100 {
+            let mut genome: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+                TreeGenome::generate_ramped_half_and_half(&mut rng, 2, 5);
+
+            let mutation = AdaptiveTreeMutation::new();
+            mutation.mutate(&mut genome, &mut rng);
+
+            // Tree should still be valid
+            assert!(genome.size() >= 1);
+            assert!(genome.evaluate(&[1.0, 2.0]).is_finite());
+        }
+    }
+
+    #[test]
+    fn test_adaptive_tree_mutation_custom_probs() {
+        let mut rng = rand::thread_rng();
+
+        // Test with only point mutation
+        let mutation = AdaptiveTreeMutation::with_probs(1.0, 0.0, 0.0, 0.0);
+
+        for _ in 0..50 {
+            let mut genome: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+                TreeGenome::generate_ramped_half_and_half(&mut rng, 2, 5);
+            let original_size = genome.size();
+            mutation.mutate(&mut genome, &mut rng);
+
+            // Point mutation preserves structure
+            assert_eq!(genome.size(), original_size);
         }
     }
 }

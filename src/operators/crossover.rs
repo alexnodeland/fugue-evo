@@ -951,6 +951,148 @@ impl CrossoverOperator<Permutation> for EdgeRecombinationCrossover {
     }
 }
 
+// ============================================================================
+// Genetic Programming Crossover
+// ============================================================================
+
+use crate::genome::tree::{Function, Terminal, TreeGenome, TreeNode};
+
+/// Subtree Crossover for genetic programming
+///
+/// Selects random subtrees from two parent trees and swaps them
+/// to create offspring. This is the standard crossover operator for GP.
+#[derive(Clone, Debug)]
+pub struct SubtreeCrossover {
+    /// Maximum depth for offspring trees (to control bloat)
+    pub max_depth: Option<usize>,
+    /// Probability of selecting a function node (vs terminal)
+    pub function_probability: f64,
+}
+
+impl Default for SubtreeCrossover {
+    fn default() -> Self {
+        Self {
+            max_depth: Some(17),      // Standard GP default
+            function_probability: 0.9, // Favor internal nodes
+        }
+    }
+}
+
+impl SubtreeCrossover {
+    /// Create a new subtree crossover operator
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create with a specific maximum depth limit
+    pub fn with_max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = Some(max_depth);
+        self
+    }
+
+    /// Create with no depth limit
+    pub fn without_depth_limit(mut self) -> Self {
+        self.max_depth = None;
+        self
+    }
+
+    /// Set the probability of selecting a function node
+    pub fn with_function_probability(mut self, prob: f64) -> Self {
+        self.function_probability = prob.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Select a random crossover point in the tree
+    fn select_crossover_point<T: Terminal, F: Function, R: Rng>(
+        &self,
+        tree: &TreeNode<T, F>,
+        rng: &mut R,
+    ) -> Vec<usize> {
+        // Decide whether to select a function or terminal node
+        let select_function = rng.gen::<f64>() < self.function_probability;
+
+        let positions = if select_function {
+            let func_pos = tree.function_positions();
+            if func_pos.is_empty() {
+                tree.positions() // Fall back to all positions
+            } else {
+                func_pos
+            }
+        } else {
+            let term_pos = tree.terminal_positions();
+            if term_pos.is_empty() {
+                tree.positions()
+            } else {
+                term_pos
+            }
+        };
+
+        if positions.is_empty() {
+            vec![] // Root position
+        } else {
+            positions[rng.gen_range(0..positions.len())].clone()
+        }
+    }
+}
+
+impl<T: Terminal, F: Function> CrossoverOperator<TreeGenome<T, F>> for SubtreeCrossover {
+    fn crossover<R: Rng>(
+        &self,
+        parent1: &TreeGenome<T, F>,
+        parent2: &TreeGenome<T, F>,
+        rng: &mut R,
+    ) -> OperatorResult<(TreeGenome<T, F>, TreeGenome<T, F>)> {
+        // Select crossover points in each parent
+        let point1 = self.select_crossover_point(&parent1.root, rng);
+        let point2 = self.select_crossover_point(&parent2.root, rng);
+
+        // Get the subtrees at those points
+        let subtree1 = parent1
+            .root
+            .get_subtree(&point1)
+            .cloned()
+            .unwrap_or_else(|| parent1.root.clone());
+        let subtree2 = parent2
+            .root
+            .get_subtree(&point2)
+            .cloned()
+            .unwrap_or_else(|| parent2.root.clone());
+
+        // Create offspring by swapping subtrees
+        let mut child1_root = parent1.root.clone();
+        let mut child2_root = parent2.root.clone();
+
+        // Replace subtrees
+        if point1.is_empty() {
+            child1_root = subtree2.clone();
+        } else {
+            child1_root.replace_subtree(&point1, subtree2.clone());
+        }
+
+        if point2.is_empty() {
+            child2_root = subtree1.clone();
+        } else {
+            child2_root.replace_subtree(&point2, subtree1);
+        }
+
+        // Check depth limit and reject if exceeded
+        if let Some(max_depth) = self.max_depth {
+            if child1_root.depth() > max_depth {
+                // Fallback: return clones of parents
+                return OperatorResult::Success((parent1.clone(), parent2.clone()));
+            }
+            if child2_root.depth() > max_depth {
+                return OperatorResult::Success((parent1.clone(), parent2.clone()));
+            }
+        }
+
+        let child1 = TreeGenome::new(child1_root, parent1.max_depth);
+        let child2 = TreeGenome::new(child2_root, parent2.max_depth);
+
+        OperatorResult::Success((child1, child2))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

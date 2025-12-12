@@ -751,6 +751,240 @@ impl Fitness for StyblinskiTang {
     }
 }
 
+// ============================================================================
+// Combinatorial Benchmarks
+// ============================================================================
+
+/// Royal Road function
+///
+/// Tests the "building block hypothesis" - fitness is the count of complete
+/// schemas (contiguous blocks of 1s). Rewards completing full blocks rather
+/// than partial solutions.
+///
+/// For example, with schema_size=8 and num_schemas=4 (32-bit string):
+/// - 11111111 00000000 11111111 00000000 has fitness 2 (two complete blocks)
+/// - 11111110 11111111 11111111 11111111 has fitness 3 (one incomplete)
+#[derive(Clone, Debug)]
+pub struct RoyalRoad {
+    /// Size of each schema (block of consecutive 1s)
+    pub schema_size: usize,
+    /// Number of schemas in the genome
+    pub num_schemas: usize,
+}
+
+impl RoyalRoad {
+    /// Create a new Royal Road function
+    ///
+    /// # Arguments
+    /// * `schema_size` - Number of bits in each schema (typically 8)
+    /// * `num_schemas` - Number of schemas (typically 8)
+    pub fn new(schema_size: usize, num_schemas: usize) -> Self {
+        Self {
+            schema_size,
+            num_schemas,
+        }
+    }
+
+    /// Standard Royal Road configuration (8x8 = 64 bits)
+    pub fn standard() -> Self {
+        Self::new(8, 8)
+    }
+
+    /// Total genome length required
+    pub fn genome_length(&self) -> usize {
+        self.schema_size * self.num_schemas
+    }
+
+    /// Check if a schema (block) is complete (all 1s)
+    fn is_complete_schema(&self, bits: &[bool], schema_index: usize) -> bool {
+        let start = schema_index * self.schema_size;
+        let end = start + self.schema_size;
+
+        if end > bits.len() {
+            return false;
+        }
+
+        bits[start..end].iter().all(|&b| b)
+    }
+
+    /// Count the number of complete schemas
+    pub fn count_complete_schemas(&self, bits: &[bool]) -> usize {
+        (0..self.num_schemas)
+            .filter(|&i| self.is_complete_schema(bits, i))
+            .count()
+    }
+}
+
+impl Fitness for RoyalRoad {
+    type Genome = BitString;
+    type Value = usize;
+
+    fn evaluate(&self, genome: &Self::Genome) -> usize {
+        self.count_complete_schemas(genome.bits())
+    }
+}
+
+/// NK Landscape
+///
+/// A tunable fitness landscape with controllable epistasis (gene interactions).
+/// - N is the genome length
+/// - K is the number of other genes that affect each gene's fitness contribution
+///
+/// Higher K = more rugged landscape with more local optima.
+/// K=0: smooth landscape (separable)
+/// K=N-1: maximally rugged (all genes interact)
+///
+/// The fitness is the average of local fitness contributions.
+#[derive(Clone, Debug)]
+pub struct NkLandscape {
+    /// Genome length (N)
+    n: usize,
+    /// Epistasis degree (K)
+    k: usize,
+    /// Neighbor indices for each gene position
+    neighbors: Vec<Vec<usize>>,
+    /// Fitness contribution lookup tables
+    /// For each gene i, maps (gene i value, neighbor values) -> contribution
+    contributions: Vec<std::collections::HashMap<Vec<bool>, f64>>,
+}
+
+impl NkLandscape {
+    /// Create a new NK Landscape with random fitness contributions
+    ///
+    /// # Arguments
+    /// * `n` - Genome length
+    /// * `k` - Epistasis degree (must be < n)
+    /// * `seed` - Random seed for reproducibility
+    pub fn new(n: usize, k: usize, seed: u64) -> Self {
+        assert!(k < n, "K must be less than N");
+
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+        // Generate random neighbors for each position
+        let mut neighbors = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut gene_neighbors: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+            // Shuffle and take first k neighbors
+            use rand::seq::SliceRandom;
+            gene_neighbors.shuffle(&mut rng);
+            gene_neighbors.truncate(k);
+            gene_neighbors.sort();
+            neighbors.push(gene_neighbors);
+        }
+
+        // Generate random fitness contributions for each configuration
+        let mut contributions = Vec::with_capacity(n);
+        for _i in 0..n {
+            let num_configs = 1 << (k + 1); // 2^(k+1) configurations
+            let mut table = std::collections::HashMap::with_capacity(num_configs);
+
+            // Generate all possible configurations
+            for config_bits in 0..num_configs {
+                let config: Vec<bool> = (0..=k)
+                    .map(|j| (config_bits >> j) & 1 == 1)
+                    .collect();
+                use rand::Rng;
+                table.insert(config, rng.gen::<f64>());
+            }
+
+            contributions.push(table);
+        }
+
+        Self {
+            n,
+            k,
+            neighbors,
+            contributions,
+        }
+    }
+
+    /// Create an NK Landscape with adjacent neighbors
+    /// (each gene interacts with its k nearest neighbors)
+    pub fn with_adjacent_neighbors(n: usize, k: usize, seed: u64) -> Self {
+        assert!(k < n, "K must be less than N");
+
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+        // Adjacent neighbors
+        let mut neighbors = Vec::with_capacity(n);
+        for i in 0..n {
+            let gene_neighbors: Vec<usize> = (1..=k)
+                .map(|offset| (i + offset) % n)
+                .collect();
+            neighbors.push(gene_neighbors);
+        }
+
+        // Generate random fitness contributions
+        let mut contributions = Vec::with_capacity(n);
+        for _i in 0..n {
+            let num_configs = 1 << (k + 1);
+            let mut table = std::collections::HashMap::with_capacity(num_configs);
+
+            for config_bits in 0..num_configs {
+                let config: Vec<bool> = (0..=k)
+                    .map(|j| (config_bits >> j) & 1 == 1)
+                    .collect();
+                use rand::Rng;
+                table.insert(config, rng.gen::<f64>());
+            }
+
+            contributions.push(table);
+        }
+
+        Self {
+            n,
+            k,
+            neighbors,
+            contributions,
+        }
+    }
+
+    /// Get genome length (N)
+    pub fn genome_length(&self) -> usize {
+        self.n
+    }
+
+    /// Get epistasis degree (K)
+    pub fn epistasis(&self) -> usize {
+        self.k
+    }
+
+    /// Evaluate fitness for a bit string
+    pub fn evaluate_bits(&self, bits: &[bool]) -> f64 {
+        assert!(bits.len() >= self.n);
+
+        let mut total = 0.0;
+
+        for i in 0..self.n {
+            // Build configuration: [gene_i, neighbor_1, neighbor_2, ...]
+            let mut config = Vec::with_capacity(self.k + 1);
+            config.push(bits[i]);
+            for &j in &self.neighbors[i] {
+                config.push(bits[j]);
+            }
+
+            // Look up contribution
+            if let Some(&contribution) = self.contributions[i].get(&config) {
+                total += contribution;
+            }
+        }
+
+        // Return average fitness
+        total / self.n as f64
+    }
+}
+
+impl Fitness for NkLandscape {
+    type Genome = BitString;
+    type Value = f64;
+
+    fn evaluate(&self, genome: &Self::Genome) -> f64 {
+        self.evaluate_bits(genome.bits())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -995,5 +1229,91 @@ mod tests {
             fitness,
             optimal
         );
+    }
+
+    // Royal Road tests
+    #[test]
+    fn test_royal_road_all_ones() {
+        let rr = RoyalRoad::new(4, 4); // 16-bit genome
+        let genome = BitString::ones(16);
+        let fitness: usize = rr.evaluate(&genome);
+        assert_eq!(fitness, 4); // All 4 schemas complete
+    }
+
+    #[test]
+    fn test_royal_road_all_zeros() {
+        let rr = RoyalRoad::new(4, 4);
+        let genome = BitString::zeros(16);
+        let fitness: usize = rr.evaluate(&genome);
+        assert_eq!(fitness, 0); // No schemas complete
+    }
+
+    #[test]
+    fn test_royal_road_partial() {
+        let rr = RoyalRoad::new(4, 4);
+        // First and third schemas complete
+        let bits = vec![
+            true, true, true, true, // Schema 0: complete
+            false, false, false, false, // Schema 1: empty
+            true, true, true, true, // Schema 2: complete
+            true, true, true, false, // Schema 3: incomplete
+        ];
+        let genome = BitString::new(bits);
+        let fitness: usize = rr.evaluate(&genome);
+        assert_eq!(fitness, 2);
+    }
+
+    #[test]
+    fn test_royal_road_standard() {
+        let rr = RoyalRoad::standard();
+        assert_eq!(rr.genome_length(), 64);
+        assert_eq!(rr.schema_size, 8);
+        assert_eq!(rr.num_schemas, 8);
+    }
+
+    // NK Landscape tests
+    #[test]
+    fn test_nk_landscape_creation() {
+        let nk = NkLandscape::new(10, 2, 42);
+        assert_eq!(nk.genome_length(), 10);
+        assert_eq!(nk.epistasis(), 2);
+    }
+
+    #[test]
+    fn test_nk_landscape_deterministic() {
+        // Same seed should give same landscape
+        let nk1 = NkLandscape::new(8, 2, 123);
+        let nk2 = NkLandscape::new(8, 2, 123);
+
+        let genome = BitString::new(vec![true, false, true, false, true, false, true, false]);
+        let f1: f64 = nk1.evaluate(&genome);
+        let f2: f64 = nk2.evaluate(&genome);
+
+        assert_relative_eq!(f1, f2);
+    }
+
+    #[test]
+    fn test_nk_landscape_fitness_range() {
+        let nk = NkLandscape::new(10, 3, 42);
+        let genome = BitString::new(vec![true; 10]);
+        let fitness: f64 = nk.evaluate(&genome);
+
+        // Fitness should be average of contributions, so in [0, 1]
+        assert!(fitness >= 0.0 && fitness <= 1.0);
+    }
+
+    #[test]
+    fn test_nk_landscape_adjacent() {
+        let nk = NkLandscape::with_adjacent_neighbors(10, 2, 42);
+        let genome = BitString::ones(10);
+        let fitness: f64 = nk.evaluate(&genome);
+
+        assert!(fitness >= 0.0 && fitness <= 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "K must be less than N")]
+    fn test_nk_landscape_invalid_k() {
+        let _nk = NkLandscape::new(5, 5, 42); // K = N is invalid
     }
 }

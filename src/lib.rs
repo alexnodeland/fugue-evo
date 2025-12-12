@@ -1,7 +1,6 @@
 // Clippy allows for intentional patterns in this library
 #![allow(clippy::needless_range_loop)] // Matrix operations are clearer with explicit indices
 #![allow(clippy::derivable_impls)] // Some Default impls have doc comments
-#![allow(clippy::manual_is_multiple_of)] // Clarity in some contexts
 #![allow(clippy::redundant_closure)] // Closure style consistency
 #![allow(clippy::should_implement_trait)] // Custom add methods for domain types
 #![allow(clippy::get_first)] // Explicit .get(0) is clearer in some contexts
