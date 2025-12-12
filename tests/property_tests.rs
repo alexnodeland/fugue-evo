@@ -2,8 +2,8 @@
 //!
 //! Uses proptest to verify invariants and properties of the library.
 
-use proptest::prelude::*;
 use fugue_evo::prelude::*;
+use proptest::prelude::*;
 
 proptest! {
     // ==================== RealVector Properties ====================

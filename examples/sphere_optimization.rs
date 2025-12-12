@@ -7,8 +7,8 @@
 //! that's easy to optimize but useful for verifying the GA is working correctly.
 
 use fugue_evo::prelude::*;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Sphere Function Optimization ===\n");

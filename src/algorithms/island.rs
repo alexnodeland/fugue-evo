@@ -3,12 +3,12 @@
 //! Implements a distributed evolutionary algorithm where multiple populations
 //! (islands) evolve independently with periodic migration of individuals.
 
-use rayon::prelude::*;
 use rand::SeedableRng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::error::{EvolutionError, EvoResult, OperatorResult};
+use crate::error::{EvoResult, EvolutionError, OperatorResult};
 use crate::fitness::traits::{Fitness, FitnessValue};
 use crate::genome::bounds::MultiBounds;
 use crate::genome::traits::EvolutionaryGenome;
@@ -185,10 +185,13 @@ where
         let elites: Vec<_> = self.population.iter().take(elitism).cloned().collect();
 
         // Prepare selection pool: (genome, fitness) pairs
-        let selection_pool: Vec<(G, f64)> = self.population
+        let selection_pool: Vec<(G, f64)> = self
+            .population
             .iter()
             .filter_map(|ind| {
-                ind.fitness.as_ref().map(|f| (ind.genome.clone(), f.to_f64()))
+                ind.fitness
+                    .as_ref()
+                    .map(|f| (ind.genome.clone(), f.to_f64()))
             })
             .collect();
 
@@ -208,7 +211,9 @@ where
 
             // Crossover
             let (mut child1, mut child2) = match crossover.crossover(parent1, parent2, rng) {
-                OperatorResult::Success((c1, c2)) | OperatorResult::Repaired((c1, c2), _) => (c1, c2),
+                OperatorResult::Success((c1, c2)) | OperatorResult::Repaired((c1, c2), _) => {
+                    (c1, c2)
+                }
                 OperatorResult::Failed(_) => (parent1.clone(), parent2.clone()),
             };
 
@@ -237,17 +242,19 @@ where
     }
 
     /// Get emigrants for migration (individuals leaving this island)
-    pub fn get_emigrants<R: rand::Rng>(&self, policy: &MigrationPolicy, rng: &mut R) -> Vec<Individual<G, F>> {
+    pub fn get_emigrants<R: rand::Rng>(
+        &self,
+        policy: &MigrationPolicy,
+        rng: &mut R,
+    ) -> Vec<Individual<G, F>> {
         match policy {
             MigrationPolicy::Best(k) => {
                 let mut sorted: Vec<_> = self.population.iter().cloned().collect();
-                sorted.sort_by(|a, b| {
-                    match (a.fitness.as_ref(), b.fitness.as_ref()) {
-                        (Some(fa), Some(fb)) => fb.partial_cmp(fa).unwrap_or(std::cmp::Ordering::Equal),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => std::cmp::Ordering::Equal,
-                    }
+                sorted.sort_by(|a, b| match (a.fitness.as_ref(), b.fitness.as_ref()) {
+                    (Some(fa), Some(fb)) => fb.partial_cmp(fa).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
                 });
                 sorted.into_iter().take(*k).collect()
             }
@@ -259,13 +266,11 @@ where
             }
             MigrationPolicy::BestReplaceWorst(k) => {
                 let mut sorted: Vec<_> = self.population.iter().cloned().collect();
-                sorted.sort_by(|a, b| {
-                    match (a.fitness.as_ref(), b.fitness.as_ref()) {
-                        (Some(fa), Some(fb)) => fb.partial_cmp(fa).unwrap_or(std::cmp::Ordering::Equal),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => std::cmp::Ordering::Equal,
-                    }
+                sorted.sort_by(|a, b| match (a.fitness.as_ref(), b.fitness.as_ref()) {
+                    (Some(fa), Some(fb)) => fb.partial_cmp(fa).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
                 });
                 sorted.into_iter().take(*k).collect()
             }
@@ -348,7 +353,12 @@ where
         let islands: Vec<_> = (0..config.num_islands)
             .map(|i| {
                 let mut island_rng = rand::rngs::StdRng::from_seed(rng.gen());
-                Island::new(i, config.island_population_size, &config.bounds, &mut island_rng)
+                Island::new(
+                    i,
+                    config.island_population_size,
+                    &config.bounds,
+                    &mut island_rng,
+                )
             })
             .collect();
 
@@ -375,7 +385,9 @@ where
             self.step(rng)?;
         }
 
-        self.global_best.as_ref().ok_or(EvolutionError::EmptyPopulation)
+        self.global_best
+            .as_ref()
+            .ok_or(EvolutionError::EmptyPopulation)
     }
 
     /// Perform one generation step on all islands
@@ -431,7 +443,8 @@ where
         let topology = &self.config.topology;
 
         // Collect emigrants from each island
-        let emigrants: Vec<Vec<Individual<G, F>>> = self.islands
+        let emigrants: Vec<Vec<Individual<G, F>>> = self
+            .islands
             .iter()
             .map(|island| island.get_emigrants(policy, &mut rand::rngs::StdRng::from_entropy()))
             .collect();
@@ -453,7 +466,11 @@ where
                 _ => {
                     // Send to first target
                     if let Some(&target) = targets.first() {
-                        self.islands[target].accept_immigrants(source_emigrants.clone(), policy, rng);
+                        self.islands[target].accept_immigrants(
+                            source_emigrants.clone(),
+                            policy,
+                            rng,
+                        );
                     }
                 }
             }
@@ -473,29 +490,38 @@ where
 
     /// Get statistics about each island
     pub fn island_statistics(&self) -> Vec<IslandStats<F>> {
-        self.islands.iter().map(|island| {
-            let (sum, best) = island.population.iter()
-                .filter_map(|i| i.fitness.clone())
-                .fold((0.0, None::<F>), |(sum, best), f| {
-                    let new_best = match best {
-                        None => Some(f.clone()),
-                        Some(b) if f.is_better_than(&b) => Some(f.clone()),
-                        b => b,
-                    };
-                    (sum + f.to_f64(), new_best)
-                });
+        self.islands
+            .iter()
+            .map(|island| {
+                let (sum, best) = island
+                    .population
+                    .iter()
+                    .filter_map(|i| i.fitness.clone())
+                    .fold((0.0, None::<F>), |(sum, best), f| {
+                        let new_best = match best {
+                            None => Some(f.clone()),
+                            Some(b) if f.is_better_than(&b) => Some(f.clone()),
+                            b => b,
+                        };
+                        (sum + f.to_f64(), new_best)
+                    });
 
-            let count = island.population.iter().filter(|i| i.fitness.is_some()).count();
+                let count = island
+                    .population
+                    .iter()
+                    .filter(|i| i.fitness.is_some())
+                    .count();
 
-            IslandStats {
-                index: island.index,
-                generation: island.generation,
-                evaluations: island.evaluations,
-                population_size: island.population.len(),
-                mean_fitness: if count > 0 { sum / count as f64 } else { 0.0 },
-                best_fitness: best,
-            }
-        }).collect()
+                IslandStats {
+                    index: island.index,
+                    generation: island.generation,
+                    evaluations: island.evaluations,
+                    population_size: island.population.len(),
+                    mean_fitness: if count > 0 { sum / count as f64 } else { 0.0 },
+                    best_fitness: best,
+                }
+            })
+            .collect()
     }
 }
 
@@ -618,7 +644,10 @@ where
     }
 
     /// Build the island model
-    pub fn build<R: rand::Rng>(self, rng: &mut R) -> EvoResult<IslandModel<G, Fit, Sel, Cross, Mut, F>> {
+    pub fn build<R: rand::Rng>(
+        self,
+        rng: &mut R,
+    ) -> EvoResult<IslandModel<G, Fit, Sel, Cross, Mut, F>> {
         let fitness = self.fitness.ok_or(EvolutionError::Configuration(
             "Fitness function is required".to_string(),
         ))?;

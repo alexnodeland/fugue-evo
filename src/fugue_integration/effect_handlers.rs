@@ -9,14 +9,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use fugue::{Address, ChoiceValue, Trace};
 #[cfg(test)]
 use fugue::addr;
+use fugue::{Address, ChoiceValue, Trace};
 use rand::Rng;
 
+use super::trace_operators::{CrossoverMask, MutationSelector};
 use crate::error::GenomeError;
 use crate::genome::traits::EvolutionaryGenome;
-use super::trace_operators::{MutationSelector, CrossoverMask};
 
 /// Record of a mutation operation
 #[derive(Clone, Debug)]
@@ -308,7 +308,9 @@ pub struct ComposedMutationHandler {
 impl ComposedMutationHandler {
     /// Create a new composed handler
     pub fn new() -> Self {
-        Self { handlers: Vec::new() }
+        Self {
+            handlers: Vec::new(),
+        }
     }
 
     /// Add a handler to the composition
@@ -327,7 +329,9 @@ impl Default for ComposedMutationHandler {
 impl MutationHandler for ComposedMutationHandler {
     fn before_mutation(&self, trace: &Trace, generation: usize) -> bool {
         // All handlers must agree
-        self.handlers.iter().all(|h| h.before_mutation(trace, generation))
+        self.handlers
+            .iter()
+            .all(|h| h.before_mutation(trace, generation))
     }
 
     fn after_mutation(&self, original: &Trace, mutated: &Trace, record: &MutationRecord) {
@@ -356,7 +360,9 @@ pub struct ComposedCrossoverHandler {
 impl ComposedCrossoverHandler {
     /// Create a new composed handler
     pub fn new() -> Self {
-        Self { handlers: Vec::new() }
+        Self {
+            handlers: Vec::new(),
+        }
     }
 
     /// Add a handler to the composition
@@ -412,7 +418,7 @@ where
 
     // Check if mutation should proceed
     if !handler.before_mutation(&trace, generation) {
-        return Ok(G::from_trace(&trace)?);
+        return G::from_trace(&trace);
     }
 
     // Select and potentially modify mutation sites
@@ -488,14 +494,30 @@ where
         let (val_for_child1, val_for_child2) = if mask.from_parent1(&addr) {
             from_parent1.push(addr.clone());
             (
-                trace1.choices.get(&addr).map(|c| c.value.clone()).unwrap_or(ChoiceValue::F64(0.0)),
-                trace2.choices.get(&addr).map(|c| c.value.clone()).unwrap_or(ChoiceValue::F64(0.0)),
+                trace1
+                    .choices
+                    .get(&addr)
+                    .map(|c| c.value.clone())
+                    .unwrap_or(ChoiceValue::F64(0.0)),
+                trace2
+                    .choices
+                    .get(&addr)
+                    .map(|c| c.value.clone())
+                    .unwrap_or(ChoiceValue::F64(0.0)),
             )
         } else {
             from_parent2.push(addr.clone());
             (
-                trace2.choices.get(&addr).map(|c| c.value.clone()).unwrap_or(ChoiceValue::F64(0.0)),
-                trace1.choices.get(&addr).map(|c| c.value.clone()).unwrap_or(ChoiceValue::F64(0.0)),
+                trace2
+                    .choices
+                    .get(&addr)
+                    .map(|c| c.value.clone())
+                    .unwrap_or(ChoiceValue::F64(0.0)),
+                trace1
+                    .choices
+                    .get(&addr)
+                    .map(|c| c.value.clone())
+                    .unwrap_or(ChoiceValue::F64(0.0)),
             )
         };
 
@@ -541,7 +563,10 @@ impl OperationStatistics {
         let total_crossovers = crossovers.len();
 
         let avg_mutation_sites = if total_mutations > 0 {
-            mutations.iter().map(|r| r.mutated_addresses.len()).sum::<usize>() as f64
+            mutations
+                .iter()
+                .map(|r| r.mutated_addresses.len())
+                .sum::<usize>() as f64
                 / total_mutations as f64
         } else {
             0.0
@@ -576,10 +601,10 @@ impl OperationStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genome::real_vector::RealVector;
     use crate::fugue_integration::trace_operators::{
-        UniformMutationSelector, UniformCrossoverMask, gaussian_mutation,
+        gaussian_mutation, UniformCrossoverMask, UniformMutationSelector,
     };
+    use crate::genome::real_vector::RealVector;
 
     #[test]
     fn test_logging_handler_mutation() {
@@ -590,15 +615,8 @@ mod tests {
         let selector = UniformMutationSelector::new(1.0); // Mutate all
         let mutation_fn = gaussian_mutation(0.1);
 
-        let _mutated = handled_mutate_trace(
-            &genome,
-            &selector,
-            mutation_fn,
-            &handler,
-            0,
-            &mut rng,
-        )
-        .unwrap();
+        let _mutated =
+            handled_mutate_trace(&genome, &selector, mutation_fn, &handler, 0, &mut rng).unwrap();
 
         let records = handler.get_mutations();
         assert_eq!(records.len(), 1);
@@ -616,15 +634,8 @@ mod tests {
         let trace1 = parent1.to_trace();
         let mask = UniformCrossoverMask::balanced(&trace1, &mut rng);
 
-        let (_child1, _child2) = handled_crossover_traces(
-            &parent1,
-            &parent2,
-            &mask,
-            &handler,
-            0,
-            &mut rng,
-        )
-        .unwrap();
+        let (_child1, _child2) =
+            handled_crossover_traces(&parent1, &parent2, &mask, &handler, 0, &mut rng).unwrap();
 
         let records = handler.get_crossovers();
         assert_eq!(records.len(), 1);
@@ -642,26 +653,13 @@ mod tests {
 
         // First two mutations should succeed
         for _ in 0..2 {
-            let result = handled_mutate_trace(
-                &genome,
-                &selector,
-                &mutation_fn,
-                &handler,
-                0,
-                &mut rng,
-            );
+            let result =
+                handled_mutate_trace(&genome, &selector, &mutation_fn, &handler, 0, &mut rng);
             assert!(result.is_ok());
         }
 
         // Third mutation should be skipped (returns original)
-        let result = handled_mutate_trace(
-            &genome,
-            &selector,
-            &mutation_fn,
-            &handler,
-            0,
-            &mut rng,
-        );
+        let result = handled_mutate_trace(&genome, &selector, &mutation_fn, &handler, 0, &mut rng);
         assert!(result.is_ok());
     }
 
@@ -680,14 +678,7 @@ mod tests {
         let selector = UniformMutationSelector::new(1.0);
         let mutation_fn = gaussian_mutation(0.1);
 
-        let _ = handled_mutate_trace(
-            &genome,
-            &selector,
-            mutation_fn,
-            &composed,
-            0,
-            &mut rng,
-        );
+        let _ = handled_mutate_trace(&genome, &selector, mutation_fn, &composed, 0, &mut rng);
 
         // Logging handler should have recorded the mutation
         assert_eq!(logging.get_mutations().len(), 1);

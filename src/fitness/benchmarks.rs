@@ -989,6 +989,11 @@ mod tests {
         let fitness = st.evaluate(&near_opt);
         let optimal = st.optimal_fitness();
         // The returned fitness is negated, so compare negatives
-        assert!(fitness > optimal - 1.0, "Fitness {} should be close to optimal {}", fitness, optimal);
+        assert!(
+            fitness > optimal - 1.0,
+            "Fitness {} should be close to optimal {}",
+            fitness,
+            optimal
+        );
     }
 }

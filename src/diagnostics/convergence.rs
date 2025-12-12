@@ -362,8 +362,11 @@ pub fn evolutionary_rhat(runs: &[Vec<f64>]) -> f64 {
     // Between-chain variance
     let chain_means: Vec<f64> = runs.iter().map(|r| r.iter().sum::<f64>() / n).collect();
     let grand_mean = chain_means.iter().sum::<f64>() / m;
-    let b =
-        n / (m - 1.0) * chain_means.iter().map(|cm| (cm - grand_mean).powi(2)).sum::<f64>();
+    let b = n / (m - 1.0)
+        * chain_means
+            .iter()
+            .map(|cm| (cm - grand_mean).powi(2))
+            .sum::<f64>();
 
     // Within-chain variance
     let w: f64 = runs
@@ -592,7 +595,12 @@ impl TerminationCriteria {
             };
 
             if met {
-                satisfied.push(criterion.to_reason(generation, evaluations, best_fitness, diversity));
+                satisfied.push(criterion.to_reason(
+                    generation,
+                    evaluations,
+                    best_fitness,
+                    diversity,
+                ));
             }
         }
 
@@ -633,7 +641,9 @@ impl TerminationCriterion {
         diversity: f64,
     ) -> ConvergenceReason {
         match self {
-            Self::MaxGenerations(_) => ConvergenceReason::MaxGenerations { generations: generation },
+            Self::MaxGenerations(_) => ConvergenceReason::MaxGenerations {
+                generations: generation,
+            },
             Self::MaxEvaluations(_) => ConvergenceReason::MaxEvaluations { evaluations },
             Self::TargetFitness(_, _) => ConvergenceReason::target_reached(best_fitness),
             Self::Stagnation(gens, _) => ConvergenceReason::fitness_stagnation(*gens),
@@ -680,7 +690,9 @@ mod tests {
 
     #[test]
     fn test_convergence_detector_target_fitness() {
-        let config = ConvergenceConfig::default().target_fitness(100.0).target_tolerance(1.0);
+        let config = ConvergenceConfig::default()
+            .target_fitness(100.0)
+            .target_tolerance(1.0);
         let mut detector = ConvergenceDetector::new(config);
 
         detector.update(0, 10, 99.5, 50.0, 0.5);
@@ -705,7 +717,10 @@ mod tests {
         let status = detector.check();
         assert!(status.is_converged());
         if let ConvergenceStatus::Converged(reason) = status {
-            assert!(matches!(reason, ConvergenceReason::FitnessStagnation { .. }));
+            assert!(matches!(
+                reason,
+                ConvergenceReason::FitnessStagnation { .. }
+            ));
         }
     }
 
@@ -737,7 +752,9 @@ mod tests {
     fn test_evolutionary_rhat_divergent() {
         // Very different chains with internal variation should give high R-hat
         let chain1 = vec![1.0, 2.0, 1.5, 2.5, 1.2, 2.8, 1.8, 2.2, 1.3, 2.7];
-        let chain2 = vec![100.0, 101.0, 100.5, 101.5, 100.2, 101.8, 100.8, 101.2, 100.3, 101.7];
+        let chain2 = vec![
+            100.0, 101.0, 100.5, 101.5, 100.2, 101.8, 100.8, 101.2, 100.3, 101.7,
+        ];
         let rhat = evolutionary_rhat(&[chain1, chain2]);
         // R-hat should be high for divergent chains
         assert!(rhat > 1.5, "R-hat was {}, expected > 1.5", rhat);
@@ -895,9 +912,8 @@ mod tests {
         let not_converged = ConvergenceStatus::NotConverged;
         assert!(!not_converged.is_converged());
 
-        let converged = ConvergenceStatus::Converged(ConvergenceReason::MaxGenerations {
-            generations: 100,
-        });
+        let converged =
+            ConvergenceStatus::Converged(ConvergenceReason::MaxGenerations { generations: 100 });
         assert!(converged.is_converged());
     }
 }

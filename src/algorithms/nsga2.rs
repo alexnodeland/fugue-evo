@@ -14,7 +14,9 @@ use crate::error::EvoResult;
 use crate::fitness::traits::ParetoFitness;
 use crate::genome::bounds::MultiBounds;
 use crate::genome::traits::EvolutionaryGenome;
-use crate::operators::traits::{BoundedCrossoverOperator, BoundedMutationOperator, CrossoverOperator, MutationOperator};
+use crate::operators::traits::{
+    BoundedCrossoverOperator, BoundedMutationOperator, CrossoverOperator, MutationOperator,
+};
 use crate::population::individual::Individual;
 
 /// Multi-objective fitness function trait
@@ -99,7 +101,7 @@ impl<G: EvolutionaryGenome> Nsga2Individual<G> {
 
 /// Fast non-dominated sort
 ///
-/// Returns fronts where front[0] is the Pareto-optimal front
+/// Returns fronts where `front[0]` is the Pareto-optimal front
 pub fn fast_non_dominated_sort<G: EvolutionaryGenome>(
     population: &mut [Nsga2Individual<G>],
 ) -> Vec<Vec<usize>> {
@@ -128,9 +130,7 @@ pub fn fast_non_dominated_sort<G: EvolutionaryGenome>(
 
     // Build fronts
     let mut fronts: Vec<Vec<usize>> = vec![];
-    let mut current_front: Vec<usize> = (0..n)
-        .filter(|&i| domination_count[i] == 0)
-        .collect();
+    let mut current_front: Vec<usize> = (0..n).filter(|&i| domination_count[i] == 0).collect();
 
     let mut rank = 0;
     while !current_front.is_empty() {
@@ -359,10 +359,8 @@ where
         let offspring = self.create_offspring(population, fitness, crossover, mutation, rng);
 
         // Combine parent and offspring populations
-        let mut combined: Vec<Nsga2Individual<G>> = population
-            .drain(..)
-            .chain(offspring.into_iter())
-            .collect();
+        let mut combined: Vec<Nsga2Individual<G>> =
+            population.drain(..).chain(offspring.into_iter()).collect();
 
         // Non-dominated sort
         let fronts = fast_non_dominated_sort(&mut combined);
@@ -495,12 +493,11 @@ where
         bounds: &MultiBounds,
         rng: &mut R,
     ) {
-        let offspring = self.create_offspring_bounded(population, fitness, crossover, mutation, bounds, rng);
+        let offspring =
+            self.create_offspring_bounded(population, fitness, crossover, mutation, bounds, rng);
 
-        let mut combined: Vec<Nsga2Individual<G>> = population
-            .drain(..)
-            .chain(offspring.into_iter())
-            .collect();
+        let mut combined: Vec<Nsga2Individual<G>> =
+            population.drain(..).chain(offspring.into_iter()).collect();
 
         let fronts = fast_non_dominated_sort(&mut combined);
 
@@ -591,18 +588,9 @@ mod tests {
 
     #[test]
     fn test_domination() {
-        let a = Nsga2Individual::<RealVector>::new(
-            RealVector::new(vec![0.0]),
-            vec![1.0, 2.0],
-        );
-        let b = Nsga2Individual::<RealVector>::new(
-            RealVector::new(vec![0.0]),
-            vec![2.0, 3.0],
-        );
-        let c = Nsga2Individual::<RealVector>::new(
-            RealVector::new(vec![0.0]),
-            vec![1.5, 1.5],
-        );
+        let a = Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![1.0, 2.0]);
+        let b = Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![2.0, 3.0]);
+        let c = Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![1.5, 1.5]);
 
         assert!(a.dominates(&b)); // a is better in both objectives
         assert!(!b.dominates(&a));
@@ -656,24 +644,15 @@ mod tests {
 
     #[test]
     fn test_crowded_comparison() {
-        let mut a = Nsga2Individual::<RealVector>::new(
-            RealVector::new(vec![0.0]),
-            vec![1.0, 1.0],
-        );
+        let mut a = Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![1.0, 1.0]);
         a.rank = 0;
         a.crowding_distance = 2.0;
 
-        let mut b = Nsga2Individual::<RealVector>::new(
-            RealVector::new(vec![0.0]),
-            vec![2.0, 2.0],
-        );
+        let mut b = Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![2.0, 2.0]);
         b.rank = 1;
         b.crowding_distance = 3.0;
 
-        let mut c = Nsga2Individual::<RealVector>::new(
-            RealVector::new(vec![0.0]),
-            vec![1.5, 1.5],
-        );
+        let mut c = Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![1.5, 1.5]);
         c.rank = 0;
         c.crowding_distance = 1.0;
 
@@ -715,7 +694,10 @@ mod tests {
         assert_eq!(population.len(), 50);
 
         // Check that we have a Pareto front
-        let pareto_front = Nsga2::<RealVector, Zdt1, SbxCrossover, PolynomialMutation>::get_pareto_front(&population);
+        let pareto_front =
+            Nsga2::<RealVector, Zdt1, SbxCrossover, PolynomialMutation>::get_pareto_front(
+                &population,
+            );
         assert!(!pareto_front.is_empty());
     }
 
@@ -733,7 +715,10 @@ mod tests {
             .run_bounded(&fitness, &crossover, &mutation, &bounds, 50, &mut rng)
             .unwrap();
 
-        let pareto_front = Nsga2::<RealVector, Zdt1, SbxCrossover, PolynomialMutation>::get_pareto_front(&population);
+        let pareto_front =
+            Nsga2::<RealVector, Zdt1, SbxCrossover, PolynomialMutation>::get_pareto_front(
+                &population,
+            );
 
         // Verify Pareto front properties
         for ind in &pareto_front {

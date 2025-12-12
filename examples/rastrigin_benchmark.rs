@@ -8,8 +8,8 @@
 //! at the origin.
 
 use fugue_evo::prelude::*;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Rastrigin Function Benchmark ===\n");
@@ -30,8 +30,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
         .population_size(200)
         .bounds(bounds)
-        .selection(TournamentSelection::new(5))  // Higher pressure
-        .crossover(SbxCrossover::new(15.0))       // More exploration
+        .selection(TournamentSelection::new(5)) // Higher pressure
+        .crossover(SbxCrossover::new(15.0)) // More exploration
         .mutation(PolynomialMutation::new(20.0).with_probability(0.1))
         .fitness(fitness)
         .max_generations(500)

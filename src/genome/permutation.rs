@@ -90,7 +90,7 @@ impl Permutation {
 
     /// Get the inverse permutation
     ///
-    /// If perm[i] = j, then inverse[j] = i
+    /// If `perm[i] = j`, then `inverse[j] = i`
     pub fn inverse(&self) -> Self {
         let n = self.perm.len();
         let mut inv = vec![0; n];
@@ -102,7 +102,7 @@ impl Permutation {
 
     /// Compose this permutation with another
     ///
-    /// Returns a permutation where result[i] = other[self[i]]
+    /// Returns a permutation where `result[i] = other[self[i]]`
     pub fn compose(&self, other: &Self) -> Result<Self, GenomeError> {
         if self.perm.len() != other.perm.len() {
             return Err(GenomeError::DimensionMismatch {
@@ -137,8 +137,8 @@ impl Permutation {
 
     /// Calculate the number of inversions (disorder measure)
     ///
-    /// An inversion is a pair (i, j) where i < j but perm[i] > perm[j].
-    /// Returns a value in [0, n*(n-1)/2] where 0 means sorted.
+    /// An inversion is a pair (i, j) where i < j but `perm[i] > perm[j]`.
+    /// Returns a value in `[0, n*(n-1)/2]` where 0 means sorted.
     pub fn inversions(&self) -> usize {
         let n = self.perm.len();
         let mut count = 0;

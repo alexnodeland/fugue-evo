@@ -1,4 +1,4 @@
-//! Integration with Fugue's Model<T> monad
+//! Integration with Fugue's `Model<T>` monad
 //!
 //! This module provides probabilistic evolutionary models that integrate
 //! with Fugue's inference engine (SMC, MCMC).
@@ -224,12 +224,7 @@ where
     }
 
     /// Run the chain for multiple steps
-    pub fn run_chain<R: Rng>(
-        &self,
-        initial: &G,
-        num_steps: usize,
-        rng: &mut R,
-    ) -> Vec<G> {
+    pub fn run_chain<R: Rng>(&self, initial: &G, num_steps: usize, rng: &mut R) -> Vec<G> {
         let mut chain = Vec::with_capacity(num_steps + 1);
         let mut current = initial.clone();
 
@@ -466,10 +461,14 @@ where
                 .iter()
                 .map(|p| {
                     let trace = p.genome.to_trace();
-                    let value = trace.choices.get(addr).map(|c| match &c.value {
-                        ChoiceValue::F64(f) => *f,
-                        _ => 0.0,
-                    }).unwrap_or(0.0);
+                    let value = trace
+                        .choices
+                        .get(addr)
+                        .map(|c| match &c.value {
+                            ChoiceValue::F64(f) => *f,
+                            _ => 0.0,
+                        })
+                        .unwrap_or(0.0);
                     value * p.normalized_weight
                 })
                 .sum();
@@ -507,12 +506,17 @@ where
     F: Fitness<Genome = G, Value = f64> + Clone,
 {
     /// Create a new HBGA
-    pub fn new(fitness: F, bounds: MultiBounds, population_size: usize, generations: usize) -> Self {
+    pub fn new(
+        fitness: F,
+        bounds: MultiBounds,
+        population_size: usize,
+        generations: usize,
+    ) -> Self {
         Self {
             model: EvolutionModel::new(fitness, bounds),
             population_size,
             generations,
-            mutation_rate_prior: (2.0, 8.0),   // Prior favors low mutation rates
+            mutation_rate_prior: (2.0, 8.0), // Prior favors low mutation rates
             mutation_sigma_prior: (2.0, 10.0), // Prior favors small mutations
         }
     }
@@ -611,10 +615,7 @@ where
                 .mutation_rate(mutation_rate)
                 .mutation_sigma(mutation_sigma);
 
-            let model = EvolutionModel::new(
-                self.model.fitness.clone(),
-                self.model.bounds.clone(),
-            );
+            let model = EvolutionModel::new(self.model.fitness.clone(), self.model.bounds.clone());
             let step = EvolutionStep::new(model, config);
 
             population = selected

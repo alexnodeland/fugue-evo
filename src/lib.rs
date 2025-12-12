@@ -1,3 +1,18 @@
+// Clippy allows for intentional patterns in this library
+#![allow(clippy::needless_range_loop)] // Matrix operations are clearer with explicit indices
+#![allow(clippy::derivable_impls)] // Some Default impls have doc comments
+#![allow(clippy::manual_is_multiple_of)] // Clarity in some contexts
+#![allow(clippy::redundant_closure)] // Closure style consistency
+#![allow(clippy::should_implement_trait)] // Custom add methods for domain types
+#![allow(clippy::get_first)] // Explicit .get(0) is clearer in some contexts
+#![allow(clippy::useless_conversion)] // into_iter() for clarity
+#![allow(clippy::unnecessary_unwrap)] // Pattern clarity
+#![allow(clippy::wrong_self_convention)] // from_* methods for domain types
+#![allow(clippy::only_used_in_recursion)] // Tree traversal parameters
+#![allow(clippy::if_same_then_else)] // Sometimes intentional for clarity
+#![allow(clippy::manual_clamp)] // Explicit clamp logic for clarity
+#![allow(clippy::manual_memcpy)] // Matrix operations clarity
+
 //! # fugue-evo
 //!
 //! A Probabilistic Genetic Algorithm Library for Rust.

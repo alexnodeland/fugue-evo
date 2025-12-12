@@ -8,8 +8,8 @@
 //! distribution to efficiently search the fitness landscape.
 
 use fugue_evo::prelude::*;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== CMA-ES Optimization Example ===\n");
@@ -24,15 +24,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Global optimum: 0.0 at (1, 1, ..., 1)\n");
 
     // Create CMA-ES optimizer
-    let initial_mean = vec![0.0; DIM];  // Start at origin
-    let initial_sigma = 0.5;            // Initial step size
+    let initial_mean = vec![0.0; DIM]; // Start at origin
+    let initial_sigma = 0.5; // Initial step size
     let bounds = MultiBounds::symmetric(5.0, DIM);
 
     // Create fitness function that CMA-ES can use
     let fitness = RosenbrockCmaEs { dim: DIM };
 
-    let mut cmaes = CmaEs::new(initial_mean, initial_sigma)
-        .with_bounds(bounds);
+    let mut cmaes = CmaEs::new(initial_mean, initial_sigma).with_bounds(bounds);
 
     // Run optimization
     let best = cmaes.run_generations(&fitness, 1000, &mut rng)?;
@@ -79,6 +78,6 @@ impl CmaEsFitness for RosenbrockCmaEs {
             let term2 = 1.0 - genes[i];
             sum += 100.0 * term1 * term1 + term2 * term2;
         }
-        sum  // CMA-ES minimizes, so return positive value
+        sum // CMA-ES minimizes, so return positive value
     }
 }

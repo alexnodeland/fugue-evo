@@ -9,7 +9,9 @@ use crate::genome::bit_string::BitString;
 use crate::genome::bounds::MultiBounds;
 use crate::genome::permutation::Permutation;
 use crate::genome::real_vector::RealVector;
-use crate::genome::traits::{BinaryGenome, EvolutionaryGenome, PermutationGenome, RealValuedGenome};
+use crate::genome::traits::{
+    BinaryGenome, EvolutionaryGenome, PermutationGenome, RealValuedGenome,
+};
 use crate::operators::traits::{BoundedMutationOperator, MutationOperator};
 
 /// Polynomial mutation (bounded)

@@ -120,15 +120,11 @@ pub enum AlgorithmState {
     /// Simple generational GA (no additional state)
     SimpleGA,
     /// Steady-state GA
-    SteadyState {
-        replacement_count: usize,
-    },
+    SteadyState { replacement_count: usize },
     /// CMA-ES state
     CmaEs(CmaEsCheckpointState),
     /// NSGA-II state
-    Nsga2 {
-        pareto_front_indices: Vec<usize>,
-    },
+    Nsga2 { pareto_front_indices: Vec<usize> },
     /// HBGA state
     Hbga {
         population_params: Vec<f64>,
@@ -278,7 +274,8 @@ mod tests {
 
     #[test]
     fn test_checkpoint_builder() {
-        let population: Vec<Individual<RealVector>> = vec![Individual::new(RealVector::new(vec![1.0]))];
+        let population: Vec<Individual<RealVector>> =
+            vec![Individual::new(RealVector::new(vec![1.0]))];
 
         let checkpoint = CheckpointBuilder::new(5, population)
             .evaluations(1000)
@@ -288,7 +285,10 @@ mod tests {
 
         assert_eq!(checkpoint.generation, 5);
         assert_eq!(checkpoint.evaluations, 1000);
-        assert_eq!(checkpoint.metadata.get("experiment"), Some(&"test_run".to_string()));
+        assert_eq!(
+            checkpoint.metadata.get("experiment"),
+            Some(&"test_run".to_string())
+        );
     }
 
     #[test]

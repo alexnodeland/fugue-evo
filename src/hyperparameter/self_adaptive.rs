@@ -271,8 +271,8 @@ mod tests {
         let mut rng = rand::thread_rng();
         params.mutate(10, &mut rng);
 
-        // Should have changed
-        assert!(params.get_sigma(0) != 1.0 || true); // Might not change much
+        // Sigma should remain positive after mutation
+        assert!(params.get_sigma(0) > 0.0);
     }
 
     #[test]

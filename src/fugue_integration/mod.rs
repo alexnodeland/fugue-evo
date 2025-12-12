@@ -10,12 +10,12 @@
 //! - **Crossover as Trace Merging**: Crossover merges parent traces with constraints
 //! - **Effect Handlers**: Poutine-style handlers for evolutionary operations
 
-pub mod trace_operators;
 pub mod effect_handlers;
 pub mod evolution_model;
+pub mod trace_operators;
 
 pub mod prelude {
-    pub use super::trace_operators::*;
     pub use super::effect_handlers::*;
     pub use super::evolution_model::*;
+    pub use super::trace_operators::*;
 }

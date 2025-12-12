@@ -7,9 +7,9 @@
 //! a target function from input-output examples.
 
 use fugue_evo::prelude::*;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::Rng;
+use rand::SeedableRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Symbolic Regression with GP ===\n");
@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let training_data: Vec<(f64, f64)> = (-5..=5)
         .map(|i| {
             let x = i as f64;
-            let y = x * x + 2.0 * x + 1.0;  // Target function
+            let y = x * x + 2.0 * x + 1.0; // Target function
             (x, y)
         })
         .collect();
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut child = if rng.gen::<f64>() < crossover_rate {
                 // Subtree crossover
-                subtree_crossover(&parent1, &parent2, &mut rng)
+                subtree_crossover(parent1, parent2, &mut rng)
             } else {
                 parent1.clone()
             };
@@ -123,12 +123,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test the discovered function
     println!("\nComparison on test points:");
-    println!("{:>6} {:>12} {:>12} {:>12}", "x", "Target", "Predicted", "Error");
+    println!(
+        "{:>6} {:>12} {:>12} {:>12}",
+        "x", "Target", "Predicted", "Error"
+    );
     for x in [-3.5, -1.0, 0.0, 1.0, 2.5] {
         let target = x * x + 2.0 * x + 1.0;
         let predicted = best.0.evaluate(&[x]);
         let error = (target - predicted).abs();
-        println!("{:6.1} {:12.4} {:12.4} {:12.6}", x, target, predicted, error);
+        println!(
+            "{:6.1} {:12.4} {:12.4} {:12.6}",
+            x, target, predicted, error
+        );
     }
 
     Ok(())
@@ -149,7 +155,10 @@ fn tournament_select<'a>(
 ) -> &'a TreeGenome<ArithmeticTerminal, ArithmeticFunction> {
     use rand::seq::SliceRandom;
     let contestants: Vec<_> = pop.choose_multiple(rng, size).collect();
-    let best = contestants.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+    let best = contestants
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .unwrap();
     &best.0
 }
 
@@ -177,10 +186,7 @@ fn subtree_crossover(
     }
 }
 
-fn point_mutate(
-    tree: &mut TreeGenome<ArithmeticTerminal, ArithmeticFunction>,
-    rng: &mut StdRng,
-) {
+fn point_mutate(tree: &mut TreeGenome<ArithmeticTerminal, ArithmeticFunction>, rng: &mut StdRng) {
     let positions = tree.root.positions();
     if positions.is_empty() {
         return;
@@ -222,7 +228,7 @@ impl SymbolicRegressionFitness {
                 if predicted.is_finite() {
                     (y - predicted).powi(2)
                 } else {
-                    1e6  // Penalty for invalid values
+                    1e6 // Penalty for invalid values
                 }
             })
             .sum::<f64>()

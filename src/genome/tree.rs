@@ -179,7 +179,9 @@ impl<T: Terminal, F: Function> TreeNode<T, F> {
 }
 
 /// Trait for terminal nodes in GP trees
-pub trait Terminal: Clone + Send + Sync + PartialEq + fmt::Debug + Serialize + for<'de> Deserialize<'de> + 'static {
+pub trait Terminal:
+    Clone + Send + Sync + PartialEq + fmt::Debug + Serialize + for<'de> Deserialize<'de> + 'static
+{
     /// Generate a random terminal
     fn random<R: Rng>(rng: &mut R) -> Self;
 
@@ -194,7 +196,9 @@ pub trait Terminal: Clone + Send + Sync + PartialEq + fmt::Debug + Serialize + f
 }
 
 /// Trait for function nodes in GP trees
-pub trait Function: Clone + Send + Sync + PartialEq + fmt::Debug + Serialize + for<'de> Deserialize<'de> + 'static {
+pub trait Function:
+    Clone + Send + Sync + PartialEq + fmt::Debug + Serialize + for<'de> Deserialize<'de> + 'static
+{
     /// Get the arity (number of arguments) of this function
     fn arity(&self) -> usize;
 
@@ -433,7 +437,11 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
         Self { root, max_depth }
     }
 
-    fn generate_full_node<R: Rng>(rng: &mut R, target_depth: usize, current_depth: usize) -> TreeNode<T, F> {
+    fn generate_full_node<R: Rng>(
+        rng: &mut R,
+        target_depth: usize,
+        current_depth: usize,
+    ) -> TreeNode<T, F> {
         if current_depth >= target_depth {
             TreeNode::Terminal(T::random(rng))
         } else {
@@ -452,7 +460,12 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
         Self { root, max_depth }
     }
 
-    fn generate_grow_node<R: Rng>(rng: &mut R, max_depth: usize, current_depth: usize, terminal_prob: f64) -> TreeNode<T, F> {
+    fn generate_grow_node<R: Rng>(
+        rng: &mut R,
+        max_depth: usize,
+        current_depth: usize,
+        terminal_prob: f64,
+    ) -> TreeNode<T, F> {
         if current_depth >= max_depth {
             TreeNode::Terminal(T::random(rng))
         } else if rng.gen::<f64>() < terminal_prob {
@@ -468,7 +481,11 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
     }
 
     /// Generate using ramped half-and-half
-    pub fn generate_ramped_half_and_half<R: Rng>(rng: &mut R, min_depth: usize, max_depth: usize) -> Self {
+    pub fn generate_ramped_half_and_half<R: Rng>(
+        rng: &mut R,
+        min_depth: usize,
+        max_depth: usize,
+    ) -> Self {
         let depth = rng.gen_range(min_depth..=max_depth);
         if rng.gen() {
             Self::generate_full(rng, depth, max_depth)
@@ -486,7 +503,8 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
         match node {
             TreeNode::Terminal(t) => t.to_string(),
             TreeNode::Function(f, children) => {
-                let child_strs: Vec<String> = children.iter().map(|c| self.node_to_sexpr(c)).collect();
+                let child_strs: Vec<String> =
+                    children.iter().map(|c| self.node_to_sexpr(c)).collect();
                 format!("({} {})", f.to_string(), child_strs.join(" "))
             }
         }
@@ -528,7 +546,11 @@ impl<T: Terminal, F: Function> EvolutionaryGenome for TreeGenome<T, F> {
         let mut index = 0;
         self.node_to_trace(&self.root, &mut trace, &mut index);
         // Store max_depth and total size
-        trace.insert_choice(addr!("tree_max_depth"), ChoiceValue::Usize(self.max_depth), 0.0);
+        trace.insert_choice(
+            addr!("tree_max_depth"),
+            ChoiceValue::Usize(self.max_depth),
+            0.0,
+        );
         trace.insert_choice(addr!("tree_size"), ChoiceValue::Usize(index), 0.0);
         trace
     }
@@ -628,25 +650,35 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
 
         let is_terminal = trace
             .get_bool(&addr!("tree_is_terminal", current_index))
-            .ok_or_else(|| GenomeError::MissingAddress(format!("tree_is_terminal#{}", current_index)))?;
+            .ok_or_else(|| {
+                GenomeError::MissingAddress(format!("tree_is_terminal#{}", current_index))
+            })?;
 
         if is_terminal {
             let term_type = trace
                 .get_f64(&addr!("tree_term_type", current_index))
-                .ok_or_else(|| GenomeError::MissingAddress(format!("tree_term_type#{}", current_index)))?;
+                .ok_or_else(|| {
+                    GenomeError::MissingAddress(format!("tree_term_type#{}", current_index))
+                })?;
             let term_val = trace
                 .get_f64(&addr!("tree_term_val", current_index))
-                .ok_or_else(|| GenomeError::MissingAddress(format!("tree_term_val#{}", current_index)))?;
+                .ok_or_else(|| {
+                    GenomeError::MissingAddress(format!("tree_term_val#{}", current_index))
+                })?;
 
             let terminal = Self::decode_terminal(term_type, term_val)?;
             Ok(TreeNode::Terminal(terminal))
         } else {
             let func_idx = trace
                 .get_usize(&addr!("tree_func_idx", current_index))
-                .ok_or_else(|| GenomeError::MissingAddress(format!("tree_func_idx#{}", current_index)))?;
+                .ok_or_else(|| {
+                    GenomeError::MissingAddress(format!("tree_func_idx#{}", current_index))
+                })?;
             let arity = trace
                 .get_usize(&addr!("tree_arity", current_index))
-                .ok_or_else(|| GenomeError::MissingAddress(format!("tree_arity#{}", current_index)))?;
+                .ok_or_else(|| {
+                    GenomeError::MissingAddress(format!("tree_arity#{}", current_index))
+                })?;
 
             let func = Self::decode_function(func_idx)?;
             let mut children = Vec::with_capacity(arity);

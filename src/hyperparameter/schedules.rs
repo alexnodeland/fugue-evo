@@ -371,9 +371,12 @@ impl ParameterSchedule for CompositeSchedule {
         }
         // If past all phases, use the last phase's final value
         if let Some((end_gen, schedule)) = self.phases.last() {
-            let phase_duration = end_gen - self.phases.get(self.phases.len().saturating_sub(2))
-                .map(|(e, _)| *e)
-                .unwrap_or(0);
+            let phase_duration = end_gen
+                - self
+                    .phases
+                    .get(self.phases.len().saturating_sub(2))
+                    .map(|(e, _)| *e)
+                    .unwrap_or(0);
             schedule.value_at(phase_duration, phase_duration)
         } else {
             0.0

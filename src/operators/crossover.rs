@@ -11,7 +11,9 @@ use crate::genome::bit_string::BitString;
 use crate::genome::bounds::MultiBounds;
 use crate::genome::permutation::Permutation;
 use crate::genome::real_vector::RealVector;
-use crate::genome::traits::{BinaryGenome, EvolutionaryGenome, PermutationGenome, RealValuedGenome};
+use crate::genome::traits::{
+    BinaryGenome, EvolutionaryGenome, PermutationGenome, RealValuedGenome,
+};
 use crate::operators::traits::{BoundedCrossoverOperator, CrossoverOperator};
 
 /// Simulated Binary Crossover (SBX)
@@ -515,15 +517,21 @@ impl CrossoverOperator<Permutation> for PmxCrossover {
 
         let c1 = match Permutation::try_new(child1) {
             Ok(p) => p,
-            Err(e) => return OperatorResult::Failed(OperatorError::CrossoverFailed(
-                format!("PMX produced invalid child1: {}", e)
-            )),
+            Err(e) => {
+                return OperatorResult::Failed(OperatorError::CrossoverFailed(format!(
+                    "PMX produced invalid child1: {}",
+                    e
+                )))
+            }
         };
         let c2 = match Permutation::try_new(child2) {
             Ok(p) => p,
-            Err(e) => return OperatorResult::Failed(OperatorError::CrossoverFailed(
-                format!("PMX produced invalid child2: {}", e)
-            )),
+            Err(e) => {
+                return OperatorResult::Failed(OperatorError::CrossoverFailed(format!(
+                    "PMX produced invalid child2: {}",
+                    e
+                )))
+            }
         };
 
         OperatorResult::Success((c1, c2))
@@ -578,15 +586,21 @@ impl CrossoverOperator<Permutation> for OxCrossover {
 
         let c1 = match Permutation::try_new(child1) {
             Ok(p) => p,
-            Err(e) => return OperatorResult::Failed(OperatorError::CrossoverFailed(
-                format!("OX produced invalid child1: {}", e)
-            )),
+            Err(e) => {
+                return OperatorResult::Failed(OperatorError::CrossoverFailed(format!(
+                    "OX produced invalid child1: {}",
+                    e
+                )))
+            }
         };
         let c2 = match Permutation::try_new(child2) {
             Ok(p) => p,
-            Err(e) => return OperatorResult::Failed(OperatorError::CrossoverFailed(
-                format!("OX produced invalid child2: {}", e)
-            )),
+            Err(e) => {
+                return OperatorResult::Failed(OperatorError::CrossoverFailed(format!(
+                    "OX produced invalid child2: {}",
+                    e
+                )))
+            }
         };
 
         OperatorResult::Success((c1, c2))
@@ -595,7 +609,12 @@ impl CrossoverOperator<Permutation> for OxCrossover {
 
 impl OxCrossover {
     /// Create a single child using OX
-    fn ox_single(parent1: &Permutation, parent2: &Permutation, start: usize, end: usize) -> Vec<usize> {
+    fn ox_single(
+        parent1: &Permutation,
+        parent2: &Permutation,
+        start: usize,
+        end: usize,
+    ) -> Vec<usize> {
         let n = parent1.dimension();
         let p1 = parent1.permutation();
         let p2 = parent2.permutation();
@@ -717,15 +736,21 @@ impl CrossoverOperator<Permutation> for CxCrossover {
 
         let c1 = match Permutation::try_new(child1) {
             Ok(p) => p,
-            Err(e) => return OperatorResult::Failed(OperatorError::CrossoverFailed(
-                format!("CX produced invalid child1: {}", e)
-            )),
+            Err(e) => {
+                return OperatorResult::Failed(OperatorError::CrossoverFailed(format!(
+                    "CX produced invalid child1: {}",
+                    e
+                )))
+            }
         };
         let c2 = match Permutation::try_new(child2) {
             Ok(p) => p,
-            Err(e) => return OperatorResult::Failed(OperatorError::CrossoverFailed(
-                format!("CX produced invalid child2: {}", e)
-            )),
+            Err(e) => {
+                return OperatorResult::Failed(OperatorError::CrossoverFailed(format!(
+                    "CX produced invalid child2: {}",
+                    e
+                )))
+            }
         };
 
         OperatorResult::Success((c1, c2))
@@ -746,7 +771,10 @@ impl EdgeRecombinationCrossover {
     }
 
     /// Build edge table from parents
-    fn build_edge_table(parent1: &Permutation, parent2: &Permutation) -> HashMap<usize, HashSet<usize>> {
+    fn build_edge_table(
+        parent1: &Permutation,
+        parent2: &Permutation,
+    ) -> HashMap<usize, HashSet<usize>> {
         let n = parent1.dimension();
         let p1 = parent1.permutation();
         let p2 = parent2.permutation();
@@ -822,7 +850,11 @@ impl CrossoverOperator<Permutation> for EdgeRecombinationCrossover {
 
             // Choose next: prefer neighbor with fewest remaining edges
             let next = if !neighbors.is_empty() {
-                let filtered: Vec<usize> = neighbors.iter().filter(|x| remaining.contains(x)).copied().collect();
+                let filtered: Vec<usize> = neighbors
+                    .iter()
+                    .filter(|x| remaining.contains(x))
+                    .copied()
+                    .collect();
                 if filtered.is_empty() {
                     // Pick random from remaining
                     let remaining_vec: Vec<usize> = remaining.iter().copied().collect();
@@ -868,7 +900,11 @@ impl CrossoverOperator<Permutation> for EdgeRecombinationCrossover {
             let neighbors = edges2.get(&current2).cloned().unwrap_or_default();
 
             let next2 = if !neighbors.is_empty() {
-                let filtered: Vec<usize> = neighbors.iter().filter(|x| remaining2.contains(x)).copied().collect();
+                let filtered: Vec<usize> = neighbors
+                    .iter()
+                    .filter(|x| remaining2.contains(x))
+                    .copied()
+                    .collect();
                 if filtered.is_empty() {
                     let remaining_vec: Vec<usize> = remaining2.iter().copied().collect();
                     remaining_vec[rng.gen_range(0..remaining_vec.len())]
@@ -894,15 +930,21 @@ impl CrossoverOperator<Permutation> for EdgeRecombinationCrossover {
 
         let c1 = match Permutation::try_new(child) {
             Ok(p) => p,
-            Err(e) => return OperatorResult::Failed(OperatorError::CrossoverFailed(
-                format!("ERX produced invalid child1: {}", e)
-            )),
+            Err(e) => {
+                return OperatorResult::Failed(OperatorError::CrossoverFailed(format!(
+                    "ERX produced invalid child1: {}",
+                    e
+                )))
+            }
         };
         let c2 = match Permutation::try_new(child2) {
             Ok(p) => p,
-            Err(e) => return OperatorResult::Failed(OperatorError::CrossoverFailed(
-                format!("ERX produced invalid child2: {}", e)
-            )),
+            Err(e) => {
+                return OperatorResult::Failed(OperatorError::CrossoverFailed(format!(
+                    "ERX produced invalid child2: {}",
+                    e
+                )))
+            }
         };
 
         OperatorResult::Success((c1, c2))

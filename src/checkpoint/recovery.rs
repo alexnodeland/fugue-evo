@@ -58,7 +58,7 @@ where
             // Write version and magic
             writer.write_all(&CHECKPOINT_VERSION.to_le_bytes())?;
             writer.write_all(b"FEVC")?; // C for compressed
-            // Serialize to bytes first
+                                        // Serialize to bytes first
             let bytes = bincode::serialize(checkpoint)
                 .map_err(|e| CheckpointError::Serialization(e.to_string()))?;
             // Compress with simple RLE-like compression
@@ -123,8 +123,8 @@ where
         reader.read_exact(&mut compressed)?;
 
         // Decompress
-        let decompressed = decompress_data(&compressed)
-            .map_err(|e| CheckpointError::Corrupted(e))?;
+        let decompressed =
+            decompress_data(&compressed).map_err(|e| CheckpointError::Corrupted(e))?;
 
         bincode::deserialize(&decompressed)
             .map_err(|e| CheckpointError::Deserialization(e.to_string()))
@@ -134,8 +134,7 @@ where
         let file = File::open(path)?;
         let reader = BufReader::new(file);
 
-        serde_json::from_reader(reader)
-            .map_err(|e| CheckpointError::Deserialization(e.to_string()))
+        serde_json::from_reader(reader).map_err(|e| CheckpointError::Deserialization(e.to_string()))
     }
 }
 
@@ -153,9 +152,7 @@ fn compress_data(data: &[u8]) -> Vec<u8> {
         let mut count = 1u8;
 
         // Count consecutive identical bytes (max 255)
-        while i + (count as usize) < data.len()
-            && data[i + (count as usize)] == byte
-            && count < 255
+        while i + (count as usize) < data.len() && data[i + (count as usize)] == byte && count < 255
         {
             count += 1;
         }
@@ -293,10 +290,9 @@ impl CheckpointManager {
                 CheckpointFormat::Json => "json",
                 CheckpointFormat::Binary | CheckpointFormat::CompressedBinary => "ckpt",
             };
-            let old_path = self.directory.join(format!(
-                "{}_{:04}.{}",
-                self.base_name, old_index, extension
-            ));
+            let old_path = self
+                .directory
+                .join(format!("{}_{:04}.{}", self.base_name, old_index, extension));
             let _ = std::fs::remove_file(old_path); // Ignore errors
         }
 
@@ -317,11 +313,7 @@ impl CheckpointManager {
         let _pattern = format!("{}_*.{}", self.base_name, extension);
         let mut checkpoints: Vec<_> = std::fs::read_dir(&self.directory)?
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(&self.base_name)
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&self.base_name))
             .collect();
 
         if checkpoints.is_empty() {
@@ -379,9 +371,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.ckpt");
 
-        let population: Vec<Individual<RealVector>> = vec![
-            Individual::new(RealVector::new(vec![1.0, 2.0, 3.0])),
-        ];
+        let population: Vec<Individual<RealVector>> =
+            vec![Individual::new(RealVector::new(vec![1.0, 2.0, 3.0]))];
         let checkpoint = Checkpoint::new(5, population)
             .with_evaluations(500)
             .with_metadata("test", "value");
@@ -430,7 +421,8 @@ mod tests {
 
         // Save multiple checkpoints
         for gen in [10, 20, 30, 40] {
-            let population: Vec<Individual<RealVector>> = vec![Individual::new(RealVector::new(vec![gen as f64]))];
+            let population: Vec<Individual<RealVector>> =
+                vec![Individual::new(RealVector::new(vec![gen as f64]))];
             let checkpoint = Checkpoint::new(gen, population);
             manager.save(&checkpoint).unwrap();
         }

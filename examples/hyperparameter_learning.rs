@@ -4,8 +4,8 @@
 //! The system learns optimal mutation rates based on observed fitness improvements.
 
 use fugue_evo::prelude::*;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Bayesian Hyperparameter Learning ===\n");
@@ -37,7 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initial mutation rate from prior
     let mut current_mutation_rate = mutation_posterior.mean();
 
-    println!("Initial mutation rate (prior mean): {:.4}", current_mutation_rate);
+    println!(
+        "Initial mutation rate (prior mean): {:.4}",
+        current_mutation_rate
+    );
     println!();
 
     let max_generations = 200;
@@ -68,10 +71,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let p2_idx = selection.select(&selection_pool, &mut rng);
 
             let (mut c1, mut c2) = crossover
-                .crossover(&selection_pool[p1_idx].0, &selection_pool[p2_idx].0, &mut rng)
+                .crossover(
+                    &selection_pool[p1_idx].0,
+                    &selection_pool[p2_idx].0,
+                    &mut rng,
+                )
                 .genome()
                 .unwrap_or_else(|| {
-                    (selection_pool[p1_idx].0.clone(), selection_pool[p2_idx].0.clone())
+                    (
+                        selection_pool[p1_idx].0.clone(),
+                        selection_pool[p2_idx].0.clone(),
+                    )
                 });
 
             let parent1_fitness = selection_pool[p1_idx].1;
@@ -94,8 +104,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mutation_posterior.observe(improved2);
 
             total_mutations += 2;
-            if improved1 { successful_mutations += 1; }
-            if improved2 { successful_mutations += 1; }
+            if improved1 {
+                successful_mutations += 1;
+            }
+            if improved2 {
+                successful_mutations += 1;
+            }
 
             new_pop.push(Individual::with_fitness(c1, child1_fitness));
             if new_pop.len() < 100 {
@@ -114,7 +128,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     println!("Learned hyperparameters:");
-    println!("  Final mutation rate (posterior mean): {:.4}", mutation_posterior.mean());
+    println!(
+        "  Final mutation rate (posterior mean): {:.4}",
+        mutation_posterior.mean()
+    );
     let ci = mutation_posterior.credible_interval(0.95);
     println!("  95% credible interval: [{:.4}, {:.4}]", ci.0, ci.1);
     println!();
@@ -145,7 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_with_fixed_rate(rate: f64, dim: usize) -> Result<f64, Box<dyn std::error::Error>> {
-    let mut rng = StdRng::seed_from_u64(42);  // Same seed for fair comparison
+    let mut rng = StdRng::seed_from_u64(42); // Same seed for fair comparison
 
     let fitness = Rastrigin::new(dim);
     let bounds = MultiBounds::symmetric(5.12, dim);
@@ -170,10 +187,17 @@ fn run_with_fixed_rate(rate: f64, dim: usize) -> Result<f64, Box<dyn std::error:
             let p2_idx = selection.select(&selection_pool, &mut rng);
 
             let (mut c1, mut c2) = crossover
-                .crossover(&selection_pool[p1_idx].0, &selection_pool[p2_idx].0, &mut rng)
+                .crossover(
+                    &selection_pool[p1_idx].0,
+                    &selection_pool[p2_idx].0,
+                    &mut rng,
+                )
                 .genome()
                 .unwrap_or_else(|| {
-                    (selection_pool[p1_idx].0.clone(), selection_pool[p2_idx].0.clone())
+                    (
+                        selection_pool[p1_idx].0.clone(),
+                        selection_pool[p2_idx].0.clone(),
+                    )
                 });
 
             mutation.mutate(&mut c1, &mut rng);

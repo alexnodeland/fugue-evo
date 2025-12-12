@@ -2,10 +2,10 @@
 //!
 //! These mechanisms adapt parameters based on feedback from the search process.
 
-use std::collections::VecDeque;
-use rand::Rng;
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
+use rand::Rng;
+use std::collections::VecDeque;
 
 /// Rechenberg's 1/5 success rule for step-size adaptation
 ///
@@ -479,7 +479,9 @@ mod tests {
 
     #[test]
     fn test_one_fifth_rule_at_target() {
-        let mut rule = OneFifthRule::new().with_window_size(5).with_target_rate(0.2);
+        let mut rule = OneFifthRule::new()
+            .with_window_size(5)
+            .with_target_rate(0.2);
 
         // Exactly 1/5 success rate
         rule.record(true);

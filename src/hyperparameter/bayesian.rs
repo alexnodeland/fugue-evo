@@ -3,9 +3,9 @@
 //! Online Bayesian inference for learning optimal hyperparameters using
 //! conjugate prior distributions.
 
-use std::collections::VecDeque;
 use rand::Rng;
-use rand_distr::{Beta, Gamma, Distribution};
+use rand_distr::{Beta, Distribution, Gamma};
+use std::collections::VecDeque;
 
 /// Beta distribution posterior for probability parameters (e.g., mutation rate)
 #[derive(Clone, Debug)]
@@ -19,12 +19,18 @@ pub struct BetaPosterior {
 impl BetaPosterior {
     /// Create with uniform prior (α = β = 1)
     pub fn uniform() -> Self {
-        Self { alpha: 1.0, beta: 1.0 }
+        Self {
+            alpha: 1.0,
+            beta: 1.0,
+        }
     }
 
     /// Create with Jeffreys prior (α = β = 0.5)
     pub fn jeffreys() -> Self {
-        Self { alpha: 0.5, beta: 0.5 }
+        Self {
+            alpha: 0.5,
+            beta: 0.5,
+        }
     }
 
     /// Create with custom prior
@@ -124,7 +130,10 @@ pub struct GammaPosterior {
 impl GammaPosterior {
     /// Create with vague prior
     pub fn vague() -> Self {
-        Self { shape: 1.0, rate: 0.01 }
+        Self {
+            shape: 1.0,
+            rate: 0.01,
+        }
     }
 
     /// Create with custom prior
@@ -217,7 +226,8 @@ impl LogNormalPosterior {
         self.mu += delta / self.n as f64;
         // Note: This is a simplified update, not fully Bayesian
         if self.n > 1 {
-            self.sigma_sq = (self.sigma_sq * (self.n - 1) as f64 + delta * (log_sigma - self.mu)) / self.n as f64;
+            self.sigma_sq = (self.sigma_sq * (self.n - 1) as f64 + delta * (log_sigma - self.mu))
+                / self.n as f64;
         }
     }
 
@@ -328,11 +338,29 @@ impl OperatorParams {
     /// Get MAP (maximum a posteriori) estimate from posteriors
     pub fn map_estimate(posteriors: &HyperparameterPosteriors) -> Self {
         Self {
-            mutation_rate: posteriors.mutation_rate.mode().unwrap_or(posteriors.mutation_rate.mean()),
-            crossover_prob: posteriors.crossover_prob.mode().unwrap_or(posteriors.crossover_prob.mean()),
-            temperature: posteriors.temperature.mode().unwrap_or(posteriors.temperature.mean()).max(0.01),
-            sbx_eta: posteriors.sbx_eta.mode().unwrap_or(posteriors.sbx_eta.mean()).max(1.0),
-            pm_eta: posteriors.pm_eta.mode().unwrap_or(posteriors.pm_eta.mean()).max(1.0),
+            mutation_rate: posteriors
+                .mutation_rate
+                .mode()
+                .unwrap_or(posteriors.mutation_rate.mean()),
+            crossover_prob: posteriors
+                .crossover_prob
+                .mode()
+                .unwrap_or(posteriors.crossover_prob.mean()),
+            temperature: posteriors
+                .temperature
+                .mode()
+                .unwrap_or(posteriors.temperature.mean())
+                .max(0.01),
+            sbx_eta: posteriors
+                .sbx_eta
+                .mode()
+                .unwrap_or(posteriors.sbx_eta.mean())
+                .max(1.0),
+            pm_eta: posteriors
+                .pm_eta
+                .mode()
+                .unwrap_or(posteriors.pm_eta.mean())
+                .max(1.0),
         }
     }
 }
@@ -464,7 +492,11 @@ fn normal_quantile(p: f64) -> f64 {
 
     let q = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
 
-    if p < 0.5 { -q } else { q }
+    if p < 0.5 {
+        -q
+    } else {
+        q
+    }
 }
 
 #[cfg(test)]
@@ -500,7 +532,7 @@ mod tests {
 
         for _ in 0..100 {
             let sample = posterior.sample(&mut rng);
-            assert!(sample >= 0.0 && sample <= 1.0);
+            assert!((0.0..=1.0).contains(&sample));
         }
     }
 

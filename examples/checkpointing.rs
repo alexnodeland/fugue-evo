@@ -5,8 +5,8 @@
 //! that may need to be interrupted and resumed.
 
 use fugue_evo::prelude::*;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,8 +52,8 @@ fn run_with_checkpoints(checkpoint_dir: &PathBuf) -> Result<(), Box<dyn std::err
 
     // Create checkpoint manager
     let mut manager = CheckpointManager::new(checkpoint_dir, "evolution")
-        .every(50)  // Save every 50 generations
-        .keep(3);   // Keep last 3 checkpoints
+        .every(50) // Save every 50 generations
+        .keep(3); // Keep last 3 checkpoints
 
     let max_generations = 200;
 
@@ -72,10 +72,17 @@ fn run_with_checkpoints(checkpoint_dir: &PathBuf) -> Result<(), Box<dyn std::err
             let p2_idx = selection.select(&selection_pool, &mut rng);
 
             let (mut c1, mut c2) = crossover
-                .crossover(&selection_pool[p1_idx].0, &selection_pool[p2_idx].0, &mut rng)
+                .crossover(
+                    &selection_pool[p1_idx].0,
+                    &selection_pool[p2_idx].0,
+                    &mut rng,
+                )
                 .genome()
                 .unwrap_or_else(|| {
-                    (selection_pool[p1_idx].0.clone(), selection_pool[p2_idx].0.clone())
+                    (
+                        selection_pool[p1_idx].0.clone(),
+                        selection_pool[p2_idx].0.clone(),
+                    )
                 });
 
             mutation.mutate(&mut c1, &mut rng);
@@ -102,8 +109,8 @@ fn run_with_checkpoints(checkpoint_dir: &PathBuf) -> Result<(), Box<dyn std::err
 
             // Create checkpoint with current population
             let individuals: Vec<Individual<RealVector>> = population.iter().cloned().collect();
-            let checkpoint = Checkpoint::new(gen + 1, individuals)
-                .with_evaluations((gen + 1) * 100);
+            let checkpoint =
+                Checkpoint::new(gen + 1, individuals).with_evaluations((gen + 1) * 100);
 
             manager.save(&checkpoint)?;
         }
@@ -121,7 +128,7 @@ fn resume_from_checkpoint(checkpoint_dir: &PathBuf) -> Result<(), Box<dyn std::e
     // Find the latest checkpoint file
     let entries: Vec<_> = std::fs::read_dir(checkpoint_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "ckpt"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "ckpt"))
         .collect();
 
     if entries.is_empty() {
@@ -145,7 +152,9 @@ fn resume_from_checkpoint(checkpoint_dir: &PathBuf) -> Result<(), Box<dyn std::e
     println!("  Evaluations: {}", checkpoint.evaluations);
 
     // Find best in loaded population
-    let best_individual = checkpoint.population.iter()
+    let best_individual = checkpoint
+        .population
+        .iter()
         .filter_map(|ind| ind.fitness.as_ref().map(|f| (ind, f.to_f64())))
         .max_by(|(_, f1), (_, f2)| f1.partial_cmp(f2).unwrap());
 
@@ -154,11 +163,12 @@ fn resume_from_checkpoint(checkpoint_dir: &PathBuf) -> Result<(), Box<dyn std::e
     }
 
     // Continue evolution...
-    let mut rng = StdRng::seed_from_u64(12345);  // Different seed for continuation
+    let mut rng = StdRng::seed_from_u64(12345); // Different seed for continuation
     let fitness = Sphere::new(10);
 
     // Reconstruct population from checkpoint
-    let mut population: Population<RealVector, f64> = Population::with_capacity(checkpoint.population.len());
+    let mut population: Population<RealVector, f64> =
+        Population::with_capacity(checkpoint.population.len());
     for ind in checkpoint.population {
         population.push(ind);
     }
@@ -183,10 +193,17 @@ fn resume_from_checkpoint(checkpoint_dir: &PathBuf) -> Result<(), Box<dyn std::e
             let p2_idx = selection.select(&selection_pool, &mut rng);
 
             let (mut c1, mut c2) = crossover
-                .crossover(&selection_pool[p1_idx].0, &selection_pool[p2_idx].0, &mut rng)
+                .crossover(
+                    &selection_pool[p1_idx].0,
+                    &selection_pool[p2_idx].0,
+                    &mut rng,
+                )
                 .genome()
                 .unwrap_or_else(|| {
-                    (selection_pool[p1_idx].0.clone(), selection_pool[p2_idx].0.clone())
+                    (
+                        selection_pool[p1_idx].0.clone(),
+                        selection_pool[p2_idx].0.clone(),
+                    )
                 });
 
             mutation.mutate(&mut c1, &mut rng);

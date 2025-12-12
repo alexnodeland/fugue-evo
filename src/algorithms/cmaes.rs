@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use rand::Rng;
 use rand_distr::{Distribution, StandardNormal};
 
-use crate::error::{EvolutionError, EvoResult};
+use crate::error::{EvoResult, EvolutionError};
 use crate::genome::bounds::MultiBounds;
 use crate::genome::real_vector::RealVector;
 use crate::genome::traits::RealValuedGenome;
@@ -137,8 +137,8 @@ impl CmaEsState {
         let c_mu = c_mu.min(1.0 - c_1); // Ensure c_1 + c_mu <= 1
 
         // Damping for step-size
-        let d_sigma = 1.0 + 2.0 * (0.0_f64.max(((mu_eff - 1.0) / (n as f64 + 1.0)).sqrt() - 1.0))
-            + c_sigma;
+        let d_sigma =
+            1.0 + 2.0 * (0.0_f64.max(((mu_eff - 1.0) / (n as f64 + 1.0)).sqrt() - 1.0)) + c_sigma;
 
         // Expected length of a N(0,I) random vector
         let chi_n =
@@ -294,8 +294,7 @@ impl CmaEsState {
         // Update evolution path for C (p_c)
         let c_c_factor = (self.c_c * (2.0 - self.c_c) * self.mu_eff).sqrt();
         for i in 0..n {
-            self.path_c[i] =
-                (1.0 - self.c_c) * self.path_c[i] + h_sigma * c_c_factor * y_w[i];
+            self.path_c[i] = (1.0 - self.c_c) * self.path_c[i] + h_sigma * c_c_factor * y_w[i];
         }
 
         // Update covariance matrix
@@ -548,7 +547,11 @@ impl<F: CmaEsFitness> CmaEs<F> {
     }
 
     /// Run a single generation
-    pub fn step<R: Rng>(&mut self, fitness: &F, rng: &mut R) -> EvoResult<Vec<Individual<RealVector>>> {
+    pub fn step<R: Rng>(
+        &mut self,
+        fitness: &F,
+        rng: &mut R,
+    ) -> EvoResult<Vec<Individual<RealVector>>> {
         // Sample offspring
         let mut offspring = self.state.sample_population(rng);
 
@@ -761,8 +764,8 @@ impl Default for CmaEsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approx::assert_relative_eq;
     use crate::genome::traits::EvolutionaryGenome;
+    use approx::assert_relative_eq;
 
     // Simple sphere function for testing (minimization: lower is better)
     struct Sphere;
@@ -846,8 +849,7 @@ mod tests {
         let fitness = Sphere;
         let bounds = MultiBounds::symmetric(10.0, 3);
 
-        let mut cmaes: CmaEs<Sphere> = CmaEs::new(vec![5.0, 5.0, 5.0], 2.0)
-            .with_bounds(bounds);
+        let mut cmaes: CmaEs<Sphere> = CmaEs::new(vec![5.0, 5.0, 5.0], 2.0).with_bounds(bounds);
 
         let result = cmaes.run_generations(&fitness, 30, &mut rng).unwrap();
 
@@ -885,10 +887,7 @@ mod tests {
     #[test]
     fn test_jacobi_eigendecomposition() {
         // Test with a known symmetric matrix
-        let a = vec![
-            vec![4.0, 1.0],
-            vec![1.0, 3.0],
-        ];
+        let a = vec![vec![4.0, 1.0], vec![1.0, 3.0]];
 
         let (eigenvalues, _eigenvectors) = jacobi_eigendecomposition(&a);
 

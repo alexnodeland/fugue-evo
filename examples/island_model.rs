@@ -7,8 +7,8 @@
 //! Island models can help maintain diversity and escape local optima.
 
 use fugue_evo::prelude::*;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Island Model Parallelism ===\n");
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bounds2 = MultiBounds::symmetric(5.12, DIM);
 
     let single_result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
-        .population_size(200)  // Same total population
+        .population_size(200) // Same total population
         .bounds(bounds2)
         .selection(TournamentSelection::new(3))
         .crossover(SbxCrossover::new(15.0))

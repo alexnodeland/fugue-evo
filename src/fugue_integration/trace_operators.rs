@@ -143,10 +143,7 @@ impl UniformCrossoverMask {
             .cloned()
             .collect();
 
-        Self {
-            bias,
-            selected,
-        }
+        Self { bias, selected }
     }
 
     /// Create with 50/50 probability
@@ -301,14 +298,30 @@ where
         let (val_for_child1, val_for_child2) = if mask.from_parent1(&addr) {
             // Child1 gets parent1, child2 gets parent2
             (
-                trace1.choices.get(&addr).map(|c| c.value.clone()).unwrap_or(ChoiceValue::F64(0.0)),
-                trace2.choices.get(&addr).map(|c| c.value.clone()).unwrap_or(ChoiceValue::F64(0.0)),
+                trace1
+                    .choices
+                    .get(&addr)
+                    .map(|c| c.value.clone())
+                    .unwrap_or(ChoiceValue::F64(0.0)),
+                trace2
+                    .choices
+                    .get(&addr)
+                    .map(|c| c.value.clone())
+                    .unwrap_or(ChoiceValue::F64(0.0)),
             )
         } else {
             // Child1 gets parent2, child2 gets parent1
             (
-                trace2.choices.get(&addr).map(|c| c.value.clone()).unwrap_or(ChoiceValue::F64(0.0)),
-                trace1.choices.get(&addr).map(|c| c.value.clone()).unwrap_or(ChoiceValue::F64(0.0)),
+                trace2
+                    .choices
+                    .get(&addr)
+                    .map(|c| c.value.clone())
+                    .unwrap_or(ChoiceValue::F64(0.0)),
+                trace1
+                    .choices
+                    .get(&addr)
+                    .map(|c| c.value.clone())
+                    .unwrap_or(ChoiceValue::F64(0.0)),
             )
         };
 
@@ -451,12 +464,16 @@ mod tests {
             assert!(
                 (c1_val - p1_val).abs() < 1e-10 || (c1_val - p2_val).abs() < 1e-10,
                 "Child1 value {} not from either parent ({} or {})",
-                c1_val, p1_val, p2_val
+                c1_val,
+                p1_val,
+                p2_val
             );
             assert!(
                 (c2_val - p1_val).abs() < 1e-10 || (c2_val - p2_val).abs() < 1e-10,
                 "Child2 value {} not from either parent ({} or {})",
-                c2_val, p1_val, p2_val
+                c2_val,
+                p1_val,
+                p2_val
             );
         }
     }
