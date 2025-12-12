@@ -51,6 +51,7 @@ pub mod fitness;
 pub mod fugue_integration;
 pub mod genome;
 pub mod hyperparameter;
+pub mod interactive;
 pub mod operators;
 pub mod population;
 pub mod termination;
@@ -65,6 +66,7 @@ pub mod prelude {
     pub use crate::fugue_integration::prelude::*;
     pub use crate::genome::prelude::*;
     pub use crate::hyperparameter::prelude::*;
+    pub use crate::interactive::prelude::*;
     pub use crate::operators::prelude::*;
     pub use crate::population::prelude::*;
     pub use crate::termination::prelude::*;
