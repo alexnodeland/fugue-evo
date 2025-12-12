@@ -512,7 +512,7 @@ where
             step_count += 1;
 
             // Record statistics at generation boundaries
-            if step_count % self.config.steps_per_generation == 0 {
+            if step_count.is_multiple_of(self.config.steps_per_generation) {
                 generation += 1;
                 population.set_generation(generation);
 
@@ -677,7 +677,7 @@ where
             step_count += 1;
 
             // Record statistics at generation boundaries
-            if step_count % self.config.steps_per_generation == 0 {
+            if step_count.is_multiple_of(self.config.steps_per_generation) {
                 generation += 1;
                 population.set_generation(generation);
 
