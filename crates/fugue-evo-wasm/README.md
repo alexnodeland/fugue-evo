@@ -167,7 +167,7 @@ while (true) {
 | `new(dimensions)` | Create optimizer with given dimensions |
 | `setPopulationSize(n)` | Set population size |
 | `setBounds(min, max)` | Set search bounds |
-| `setFitness(name)` | Use built-in fitness: "sphere", "rastrigin", "rosenbrock", "ackley" |
+| `setFitness(name)` | Use built-in fitness: "sphere", "rastrigin", "rosenbrock", "ackley", "griewank", "schwefel", "levy", "dixon-price", "styblinski-tang" |
 | `setCustomFitness(fn)` | Set JavaScript fitness function |
 | `optimize(generations)` | Run optimization |
 
@@ -202,7 +202,39 @@ while (true) {
 | `providePairwiseChoice(id)` | Submit pairwise choice |
 | `provideBatchSelection(ids)` | Submit batch selections |
 
-## Running the Example
+### UmdaOptimizer
+
+| Method | Description |
+|--------|-------------|
+| `new(dimensions)` | Create UMDA optimizer |
+| `setSelectionRatio(ratio)` | Set selection ratio (0.1-0.9) |
+| `setMinVariance(variance)` | Prevent distribution collapse |
+| `setLearningRate(rate)` | Model update rate (0-1) |
+| `optimize(fitnessName)` | Run with built-in fitness |
+
+### BitStringOptimizer
+
+| Method | Description |
+|--------|-------------|
+| `new(length)` | Create optimizer for bit strings |
+| `solveOneMax()` | Maximize number of 1s |
+| `solveLeadingOnes()` | Maximize leading 1s |
+| `solveRoyalRoad(schemaSize)` | Complete schema blocks |
+| `optimize(fn)` | Custom fitness function |
+
+### ZDT Multi-Objective Problems
+
+```javascript
+import { Nsga2Optimizer, ZdtProblem } from 'fugue-evo-wasm';
+
+const optimizer = new Nsga2Optimizer(10, 2);
+const result = optimizer.optimizeZdt(ZdtProblem.Zdt1);
+// ZdtProblem.Zdt1 - Convex Pareto front
+// ZdtProblem.Zdt2 - Non-convex Pareto front
+// ZdtProblem.Zdt3 - Disconnected Pareto front
+```
+
+## Running the Examples
 
 ```bash
 # Build the WASM package
@@ -214,6 +246,45 @@ python -m http.server 8080 --directory examples
 
 # Open http://localhost:8080 in your browser
 ```
+
+### Web Worker Example
+
+For long-running optimizations, use Web Workers to keep the UI responsive:
+
+```javascript
+// Create worker
+const worker = new Worker('./worker.js', { type: 'module' });
+
+// Handle messages
+worker.onmessage = (e) => {
+    if (e.data.type === 'ready') {
+        console.log('Worker ready!');
+    } else if (e.data.type === 'result') {
+        console.log('Best fitness:', e.data.result.bestFitness);
+    }
+};
+
+// Run optimization in background
+worker.postMessage({
+    id: 1,
+    action: 'optimize-real-vector',
+    params: {
+        dimension: 20,
+        populationSize: 100,
+        maxGenerations: 500,
+        fitness: 'rastrigin'
+    }
+});
+```
+
+See `examples/worker_example.html` for a complete demo with UI responsiveness testing.
+
+## Bundle Size
+
+The package uses `wasm-opt` for optimization, resulting in ~20-30% smaller bundle sizes. The release build enables:
+- Size optimization (`-Os`)
+- LTO (Link Time Optimization)
+- Reference types for better performance
 
 ## License
 

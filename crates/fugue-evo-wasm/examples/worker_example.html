@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>fugue-evo Web Worker Example</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        h1 {
+            color: #4ec9b0;
+            border-bottom: 2px solid #4ec9b0;
+            padding-bottom: 10px;
+        }
+        h2 { color: #569cd6; margin-top: 30px; }
+        .card {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 15px 0;
+            border: 1px solid #0f3460;
+        }
+        button {
+            background: #4ec9b0;
+            color: #1a1a2e;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            margin-right: 10px;
+            margin-bottom: 10px;
+            transition: background 0.2s;
+        }
+        button:hover { background: #3db89f; }
+        button:disabled {
+            background: #555;
+            color: #888;
+            cursor: not-allowed;
+        }
+        .output {
+            background: #0f0f23;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 10px;
+            border: 1px solid #333;
+        }
+        .status {
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+        .status.loading { background: #3d3d00; color: #ffcc00; }
+        .status.ready { background: #003d00; color: #00ff00; }
+        .status.running { background: #003d3d; color: #00ffff; }
+        .status.error { background: #3d0000; color: #ff6666; }
+        label {
+            display: block;
+            margin: 10px 0 5px;
+            color: #9cdcfe;
+        }
+        input, select {
+            padding: 8px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            font-size: 14px;
+            background: #0f0f23;
+            color: #eee;
+        }
+        .param-group {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .highlight { color: #4ec9b0; }
+        .number { color: #b5cea8; }
+        .warning { color: #dcdcaa; }
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #4ec9b0;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .info-box {
+            background: #0f3460;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            border-left: 4px solid #4ec9b0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Web Worker Optimization</h1>
+
+    <div class="info-box">
+        <strong>Why Web Workers?</strong><br>
+        Running optimization in a Web Worker keeps the UI responsive during long computations.
+        The main thread remains free to handle user interactions while optimization runs in the background.
+    </div>
+
+    <div id="status" class="status loading">Loading Web Worker...</div>
+
+    <!-- Real Vector Optimization -->
+    <div class="card">
+        <h2>Real Vector Optimization (Worker)</h2>
+        <p>Run optimization in background - UI stays responsive!</p>
+
+        <div class="param-group">
+            <div>
+                <label>Dimensions:</label>
+                <input type="number" id="dims" value="20" min="1" max="100">
+            </div>
+            <div>
+                <label>Population:</label>
+                <input type="number" id="pop" value="200" min="10" max="1000">
+            </div>
+            <div>
+                <label>Generations:</label>
+                <input type="number" id="gens" value="500" min="10" max="5000">
+            </div>
+            <div>
+                <label>Fitness:</label>
+                <select id="fitness">
+                    <option value="rastrigin">Rastrigin</option>
+                    <option value="sphere">Sphere</option>
+                    <option value="ackley">Ackley</option>
+                    <option value="griewank">Griewank</option>
+                    <option value="schwefel">Schwefel</option>
+                </select>
+            </div>
+        </div>
+
+        <button id="btn-run" disabled>Run Optimization</button>
+        <button id="btn-stress" disabled>Stress Test (5 parallel)</button>
+
+        <div id="output" class="output">Click "Run Optimization" to start...</div>
+    </div>
+
+    <!-- UI Responsiveness Test -->
+    <div class="card">
+        <h2>UI Responsiveness Test</h2>
+        <p>This counter continues to update even during optimization:</p>
+
+        <div style="font-size: 48px; font-family: monospace; color: #4ec9b0; margin: 20px 0;">
+            <span id="counter">0</span>
+        </div>
+
+        <button id="btn-counter">Toggle Counter</button>
+        <span id="counter-status" style="margin-left: 10px; color: #888;">Stopped</span>
+    </div>
+
+    <!-- Multi-Objective Optimization -->
+    <div class="card">
+        <h2>Multi-Objective (ZDT Benchmarks)</h2>
+        <p>Run NSGA-II on standard multi-objective test problems.</p>
+
+        <div class="param-group">
+            <div>
+                <label>Problem:</label>
+                <select id="zdt-problem">
+                    <option value="zdt1">ZDT1 (Convex)</option>
+                    <option value="zdt2">ZDT2 (Non-convex)</option>
+                    <option value="zdt3">ZDT3 (Disconnected)</option>
+                </select>
+            </div>
+            <div>
+                <label>Dimensions:</label>
+                <input type="number" id="zdt-dims" value="10" min="2" max="30">
+            </div>
+            <div>
+                <label>Generations:</label>
+                <input type="number" id="zdt-gens" value="100" min="10" max="500">
+            </div>
+        </div>
+
+        <button id="btn-zdt" disabled>Run ZDT</button>
+
+        <div id="zdt-output" class="output">Click "Run ZDT" to start...</div>
+    </div>
+
+    <script type="module">
+        // Create worker with module type
+        const worker = new Worker('./worker.js', { type: 'module' });
+
+        let requestId = 0;
+        const pending = new Map();
+        let workerReady = false;
+        let counterInterval = null;
+        let counterValue = 0;
+
+        // Handle worker messages
+        worker.onmessage = (e) => {
+            const { id, type, result, elapsed, message, version } = e.data;
+
+            if (type === 'ready') {
+                workerReady = true;
+                document.getElementById('status').className = 'status ready';
+                document.getElementById('status').textContent = `Worker ready! (v${version})`;
+                document.querySelectorAll('button').forEach(btn => {
+                    if (btn.id !== 'btn-counter') btn.disabled = false;
+                });
+                return;
+            }
+
+            const callback = pending.get(id);
+            if (callback) {
+                pending.delete(id);
+                if (type === 'error') {
+                    callback.reject(new Error(message));
+                } else {
+                    callback.resolve({ result, elapsed });
+                }
+            }
+        };
+
+        // Send request to worker
+        function sendRequest(action, params) {
+            return new Promise((resolve, reject) => {
+                const id = ++requestId;
+                pending.set(id, { resolve, reject });
+                worker.postMessage({ id, action, params });
+            });
+        }
+
+        // Format number
+        function fmt(n) {
+            if (Math.abs(n) < 0.0001 || Math.abs(n) > 10000) return n.toExponential(4);
+            return n.toFixed(6);
+        }
+
+        // Real Vector Optimization
+        document.getElementById('btn-run').addEventListener('click', async () => {
+            const output = document.getElementById('output');
+            const status = document.getElementById('status');
+            const btn = document.getElementById('btn-run');
+
+            const params = {
+                dimension: parseInt(document.getElementById('dims').value),
+                populationSize: parseInt(document.getElementById('pop').value),
+                maxGenerations: parseInt(document.getElementById('gens').value),
+                fitness: document.getElementById('fitness').value
+            };
+
+            btn.disabled = true;
+            status.className = 'status running';
+            status.innerHTML = '<span class="spinner"></span>Optimization running...';
+            output.innerHTML = `<span class="warning">Starting optimization...</span>
+Dimensions: ${params.dimension}
+Population: ${params.populationSize}
+Generations: ${params.maxGenerations}
+Fitness: ${params.fitness}
+
+<span class="highlight">Running in background - UI stays responsive!</span>`;
+
+            try {
+                const { result, elapsed } = await sendRequest('optimize-real-vector', params);
+
+                output.innerHTML = `<span class="highlight">Optimization Complete!</span>
+
+<span class="highlight">Best Fitness:</span> <span class="number">${fmt(result.bestFitness)}</span>
+<span class="highlight">Generations:</span> <span class="number">${result.generations}</span>
+<span class="highlight">Evaluations:</span> <span class="number">${result.evaluations.toLocaleString()}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Best Solution (first 5):</span>
+[${result.bestGenome.slice(0, 5).map(fmt).join(', ')}${result.bestGenome.length > 5 ? ', ...' : ''}]`;
+
+                status.className = 'status ready';
+                status.textContent = 'Worker ready!';
+            } catch (e) {
+                output.innerHTML = `<span style="color: #ff6666;">Error: ${e.message}</span>`;
+                status.className = 'status error';
+                status.textContent = 'Error occurred';
+            }
+
+            btn.disabled = false;
+        });
+
+        // Stress Test - run 5 optimizations in parallel
+        document.getElementById('btn-stress').addEventListener('click', async () => {
+            const output = document.getElementById('output');
+            const status = document.getElementById('status');
+            const btn = document.getElementById('btn-stress');
+
+            btn.disabled = true;
+            status.className = 'status running';
+            status.innerHTML = '<span class="spinner"></span>Running 5 parallel optimizations...';
+
+            const fitness = ['sphere', 'rastrigin', 'ackley', 'griewank', 'schwefel'];
+            output.innerHTML = '<span class="warning">Starting 5 parallel optimizations...</span>\n';
+
+            const startTime = performance.now();
+
+            try {
+                // Note: With a single worker, these run sequentially
+                // For true parallelism, you'd need multiple workers
+                const promises = fitness.map((f, i) =>
+                    sendRequest('optimize-real-vector', {
+                        dimension: 10,
+                        populationSize: 50,
+                        maxGenerations: 100,
+                        fitness: f,
+                        seed: i + 1
+                    })
+                );
+
+                const results = await Promise.all(promises);
+                const totalTime = performance.now() - startTime;
+
+                output.innerHTML = `<span class="highlight">All 5 Optimizations Complete!</span>
+<span class="highlight">Total Time:</span> <span class="number">${totalTime.toFixed(2)}ms</span>
+
+`;
+                results.forEach(({ result, elapsed }, i) => {
+                    output.innerHTML += `<span class="highlight">${fitness[i].padEnd(10)}</span> fitness=${fmt(result.bestFitness).padStart(12)} time=${elapsed.toFixed(0)}ms\n`;
+                });
+
+                status.className = 'status ready';
+                status.textContent = 'Worker ready!';
+            } catch (e) {
+                output.innerHTML += `\n<span style="color: #ff6666;">Error: ${e.message}</span>`;
+                status.className = 'status error';
+                status.textContent = 'Error occurred';
+            }
+
+            btn.disabled = false;
+        });
+
+        // Counter toggle
+        document.getElementById('btn-counter').addEventListener('click', () => {
+            const statusEl = document.getElementById('counter-status');
+            if (counterInterval) {
+                clearInterval(counterInterval);
+                counterInterval = null;
+                statusEl.textContent = 'Stopped';
+                statusEl.style.color = '#888';
+            } else {
+                counterInterval = setInterval(() => {
+                    counterValue++;
+                    document.getElementById('counter').textContent = counterValue;
+                }, 16); // ~60fps
+                statusEl.textContent = 'Running';
+                statusEl.style.color = '#4ec9b0';
+            }
+        });
+
+        // ZDT Optimization
+        document.getElementById('btn-zdt').addEventListener('click', async () => {
+            const output = document.getElementById('zdt-output');
+            const status = document.getElementById('status');
+            const btn = document.getElementById('btn-zdt');
+
+            const params = {
+                problem: document.getElementById('zdt-problem').value,
+                dimension: parseInt(document.getElementById('zdt-dims').value),
+                maxGenerations: parseInt(document.getElementById('zdt-gens').value)
+            };
+
+            btn.disabled = true;
+            status.className = 'status running';
+            status.innerHTML = '<span class="spinner"></span>Running NSGA-II...';
+
+            try {
+                const { result, elapsed } = await sendRequest('optimize-zdt', params);
+
+                output.innerHTML = `<span class="highlight">${params.problem.toUpperCase()} Complete!</span>
+
+<span class="highlight">Pareto Front Size:</span> <span class="number">${result.frontSize}</span>
+<span class="highlight">Evaluations:</span> <span class="number">${result.evaluations.toLocaleString()}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Sample Solutions:</span>
+${result.paretoFront.slice(0, 5).map((sol, i) =>
+    `  [${i+1}] f1=${fmt(sol.objectives[0])}, f2=${fmt(sol.objectives[1])}`
+).join('\n')}`;
+
+                status.className = 'status ready';
+                status.textContent = 'Worker ready!';
+            } catch (e) {
+                output.innerHTML = `<span style="color: #ff6666;">Error: ${e.message}</span>`;
+                status.className = 'status error';
+                status.textContent = 'Error occurred';
+            }
+
+            btn.disabled = false;
+        });
+    </script>
+</body>
+</html>
