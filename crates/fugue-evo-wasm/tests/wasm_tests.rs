@@ -364,3 +364,211 @@ fn test_zero_seed_uses_entropy() {
         .expect("Should succeed with entropy seed");
     assert!(result.evaluations() > 0);
 }
+
+// ============================================================================
+// New Fitness Functions Tests
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_ackley_optimization() {
+    let mut optimizer = RealVectorOptimizer::new(3);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(50);
+    optimizer.set_bounds(-5.0, 5.0);
+    optimizer.set_fitness("ackley");
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize()
+        .expect("Ackley optimization should succeed");
+    assert!(result.best_fitness() >= 0.0);
+}
+
+#[wasm_bindgen_test]
+fn test_griewank_optimization() {
+    let mut optimizer = RealVectorOptimizer::new(2);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(50);
+    optimizer.set_bounds(-10.0, 10.0);
+    optimizer.set_fitness("griewank");
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize()
+        .expect("Griewank optimization should succeed");
+    assert!(result.best_fitness() >= 0.0);
+}
+
+#[wasm_bindgen_test]
+fn test_schwefel_optimization() {
+    let mut optimizer = RealVectorOptimizer::new(2);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(50);
+    optimizer.set_bounds(-500.0, 500.0);
+    optimizer.set_fitness("schwefel");
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize()
+        .expect("Schwefel optimization should succeed");
+    assert!(result.evaluations() > 0);
+}
+
+#[wasm_bindgen_test]
+fn test_levy_optimization() {
+    let mut optimizer = RealVectorOptimizer::new(2);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(50);
+    optimizer.set_bounds(-10.0, 10.0);
+    optimizer.set_fitness("levy");
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize()
+        .expect("Levy optimization should succeed");
+    assert!(result.best_fitness() >= 0.0);
+}
+
+// ============================================================================
+// BitString Extended Tests
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_bitstring_leading_ones() {
+    let mut optimizer = BitStringOptimizer::new(20);
+    optimizer.set_population_size(50);
+    optimizer.set_max_generations(100);
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .solve_leading_ones()
+        .expect("LeadingOnes should succeed");
+    assert!(result.best_fitness() <= 20.0);
+    assert!(result.best_fitness() >= 0.0);
+}
+
+#[wasm_bindgen_test]
+fn test_bitstring_royal_road() {
+    let mut optimizer = BitStringOptimizer::new(32);
+    optimizer.set_population_size(100);
+    optimizer.set_max_generations(100);
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .solve_royal_road(8)
+        .expect("RoyalRoad should succeed");
+    // With 32 bits and schema_size=8, max fitness is 4
+    assert!(result.best_fitness() <= 4.0);
+    assert!(result.best_fitness() >= 0.0);
+}
+
+// ============================================================================
+// UMDA Tests
+// ============================================================================
+
+use fugue_evo_wasm::UmdaOptimizer;
+
+#[wasm_bindgen_test]
+fn test_umda_creation() {
+    let _optimizer = UmdaOptimizer::new(5);
+}
+
+#[wasm_bindgen_test]
+fn test_umda_configuration() {
+    let mut optimizer = UmdaOptimizer::new(5);
+    optimizer.set_population_size(50);
+    optimizer.set_max_generations(50);
+    optimizer.set_selection_ratio(0.3);
+    optimizer.set_min_variance(0.001);
+    optimizer.set_learning_rate(0.8);
+    optimizer.set_bounds(-5.0, 5.0);
+    optimizer.set_seed(42);
+    // Configuration verified by not panicking
+}
+
+#[wasm_bindgen_test]
+fn test_umda_sphere_optimization() {
+    let mut optimizer = UmdaOptimizer::new(3);
+    optimizer.set_population_size(50);
+    optimizer.set_max_generations(100);
+    optimizer.set_bounds(-5.0, 5.0);
+    optimizer.set_seed(42);
+
+    let result = optimizer.optimize("sphere").expect("UMDA should succeed");
+    assert!(result.best_fitness() >= 0.0);
+    assert_eq!(result.best_genome().len(), 3);
+}
+
+// ============================================================================
+// ZDT Multi-Objective Tests
+// ============================================================================
+
+use fugue_evo_wasm::ZdtProblem;
+
+#[wasm_bindgen_test]
+fn test_nsga2_zdt1() {
+    let mut optimizer = Nsga2Optimizer::new(10, 2);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(20);
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize_zdt(ZdtProblem::Zdt1)
+        .expect("ZDT1 should succeed");
+    assert!(result.front_size() > 0);
+}
+
+#[wasm_bindgen_test]
+fn test_nsga2_zdt2() {
+    let mut optimizer = Nsga2Optimizer::new(10, 2);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(20);
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize_zdt(ZdtProblem::Zdt2)
+        .expect("ZDT2 should succeed");
+    assert!(result.front_size() > 0);
+}
+
+#[wasm_bindgen_test]
+fn test_nsga2_zdt3() {
+    let mut optimizer = Nsga2Optimizer::new(10, 2);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(20);
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize_zdt(ZdtProblem::Zdt3)
+        .expect("ZDT3 should succeed");
+    assert!(result.front_size() > 0);
+}
+
+// ============================================================================
+// Fitness Info Tests
+// ============================================================================
+
+use fugue_evo_wasm::{get_available_fitness_functions, get_fitness_info};
+
+#[wasm_bindgen_test]
+fn test_available_fitness_functions() {
+    let functions = get_available_fitness_functions();
+    assert!(functions.contains(&"sphere".to_string()));
+    assert!(functions.contains(&"rastrigin".to_string()));
+    assert!(functions.contains(&"ackley".to_string()));
+    assert!(functions.contains(&"griewank".to_string()));
+    assert!(functions.len() >= 9); // We have at least 9 functions
+}
+
+#[wasm_bindgen_test]
+fn test_fitness_info() {
+    let info = get_fitness_info("sphere").expect("Should get sphere info");
+    assert!(info.contains("Sphere"));
+    assert!(info.contains("bounds"));
+
+    let info = get_fitness_info("ackley").expect("Should get ackley info");
+    assert!(info.contains("Ackley"));
+
+    let err = get_fitness_info("unknown_function");
+    assert!(err.is_err());
+}

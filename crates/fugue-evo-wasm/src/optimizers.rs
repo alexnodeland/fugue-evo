@@ -349,6 +349,38 @@ impl BitStringOptimizer {
         self.run_with_fitness(fitness)
     }
 
+    /// Solve LeadingOnes problem (maximize leading 1s before first 0)
+    #[wasm_bindgen(js_name = solveLeadingOnes)]
+    pub fn solve_leading_ones(&self) -> Result<BitStringResult, JsValue> {
+        let fitness = BitStringFitness::new(|genome: &BitString| {
+            genome.bits().iter().take_while(|&&b| b).count() as f64
+        });
+        self.run_with_fitness(fitness)
+    }
+
+    /// Solve Royal Road problem (maximize complete schema blocks)
+    /// schema_size: size of each block (default 8)
+    #[wasm_bindgen(js_name = solveRoyalRoad)]
+    pub fn solve_royal_road(&self, schema_size: usize) -> Result<BitStringResult, JsValue> {
+        let length = self.config.dimension;
+        let num_schemas = length / schema_size.max(1);
+        let schema_size = schema_size.max(1);
+
+        let fitness = BitStringFitness::new(move |genome: &BitString| {
+            let bits = genome.bits();
+            let mut complete = 0;
+            for schema_idx in 0..num_schemas {
+                let start = schema_idx * schema_size;
+                let end = (start + schema_size).min(bits.len());
+                if bits[start..end].iter().all(|&b| b) {
+                    complete += 1;
+                }
+            }
+            complete as f64
+        });
+        self.run_with_fitness(fitness)
+    }
+
     fn run_with_fitness<F: Fitness<Genome = BitString, Value = f64>>(
         &self,
         fitness: F,
@@ -1003,5 +1035,223 @@ impl SymbolicRegressionOptimizer {
             tree_size: result.best_genome.size(),
             fitness_history: result.stats.best_fitness_history(),
         })
+    }
+}
+
+// ============================================================================
+// UMDA (Estimation of Distribution Algorithm)
+// ============================================================================
+
+use fugue_evo::algorithms::eda::umda::UMDABuilder;
+
+/// UMDA optimizer for continuous optimization
+/// Uses probability distribution estimation instead of crossover/mutation
+#[wasm_bindgen]
+pub struct UmdaOptimizer {
+    config: OptimizationConfig,
+    selection_ratio: f64,
+    min_variance: f64,
+    learning_rate: f64,
+}
+
+impl_optimizer_config!(UmdaOptimizer, with_bounds);
+
+#[wasm_bindgen]
+impl UmdaOptimizer {
+    /// Create a new UMDA optimizer
+    #[wasm_bindgen(constructor)]
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            config: OptimizationConfig::new(dimension),
+            selection_ratio: 0.5,
+            min_variance: 0.01,
+            learning_rate: 1.0,
+        }
+    }
+
+    /// Set the selection ratio (top proportion selected for model learning)
+    #[wasm_bindgen(js_name = setSelectionRatio)]
+    pub fn set_selection_ratio(&mut self, ratio: f64) {
+        self.selection_ratio = ratio.clamp(0.1, 0.9);
+    }
+
+    /// Set the minimum variance to prevent collapse
+    #[wasm_bindgen(js_name = setMinVariance)]
+    pub fn set_min_variance(&mut self, variance: f64) {
+        self.min_variance = variance.max(0.001);
+    }
+
+    /// Set the learning rate for model update (1.0 = replace, <1.0 = blend)
+    #[wasm_bindgen(js_name = setLearningRate)]
+    pub fn set_learning_rate(&mut self, rate: f64) {
+        self.learning_rate = rate.clamp(0.0, 1.0);
+    }
+
+    /// Run optimization with a built-in fitness function
+    #[wasm_bindgen]
+    pub fn optimize(&self, fitness_name: &str) -> Result<OptimizationResult, JsValue> {
+        let mut rng = create_rng(self.config.seed);
+        let bounds = MultiBounds::uniform(
+            Bounds::new(self.config.lower_bound, self.config.upper_bound),
+            self.config.dimension,
+        );
+
+        let fitness_wrapper = FitnessWrapper::from_name(fitness_name, self.config.dimension)
+            .ok_or_else(|| {
+                JsValue::from_str(&format!("Unknown fitness function: {}", fitness_name))
+            })?;
+
+        let fitness = FitnessEvaluator::new(fitness_wrapper);
+
+        let umda = UMDABuilder::<RealVector, f64, _, _>::new()
+            .population_size(self.config.population_size)
+            .selection_ratio(self.selection_ratio)
+            .min_variance(self.min_variance)
+            .learning_rate(self.learning_rate)
+            .bounds(bounds)
+            .fitness(fitness)
+            .max_generations(self.config.max_generations)
+            .build()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let result = umda
+            .run(&mut rng)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(OptimizationResult::new(
+            result.best_genome.genes().to_vec(),
+            result.best_fitness,
+            result.generations,
+            result.evaluations,
+            result.stats.best_fitness_history(),
+        ))
+    }
+
+    // Note: Custom fitness functions are not supported for UMDA because
+    // UMDA requires Sync which JS functions don't provide.
+    // Use the built-in fitness functions via the `optimize` method.
+}
+
+// ============================================================================
+// ZDT Multi-Objective Test Problems
+// ============================================================================
+
+use fugue_evo::fitness::benchmarks::{Zdt1, Zdt2, Zdt3};
+
+/// Multi-objective test problem type
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug)]
+pub enum ZdtProblem {
+    /// ZDT1: Convex Pareto front
+    Zdt1,
+    /// ZDT2: Non-convex Pareto front
+    Zdt2,
+    /// ZDT3: Disconnected Pareto front
+    Zdt3,
+}
+
+/// NSGA-II optimizer with built-in ZDT test problems
+#[wasm_bindgen]
+impl Nsga2Optimizer {
+    /// Optimize a ZDT test problem
+    #[wasm_bindgen(js_name = optimizeZdt)]
+    pub fn optimize_zdt(&self, problem: ZdtProblem) -> Result<MultiObjectiveResult, JsValue> {
+        let mut rng = create_rng(self.config.seed);
+        let bounds = MultiBounds::uniform(Bounds::new(0.0, 1.0), self.config.dimension);
+
+        match problem {
+            ZdtProblem::Zdt1 => {
+                let zdt = Zdt1::new(self.config.dimension.max(2));
+                self.run_zdt(zdt, bounds, &mut rng)
+            }
+            ZdtProblem::Zdt2 => {
+                let zdt = Zdt2::new(self.config.dimension.max(2));
+                self.run_zdt(zdt, bounds, &mut rng)
+            }
+            ZdtProblem::Zdt3 => {
+                let zdt = Zdt3::new(self.config.dimension.max(2));
+                self.run_zdt(zdt, bounds, &mut rng)
+            }
+        }
+    }
+
+    fn run_zdt<Z: ZdtEvaluator>(
+        &self,
+        zdt: Z,
+        bounds: MultiBounds,
+        rng: &mut rand::rngs::StdRng,
+    ) -> Result<MultiObjectiveResult, JsValue> {
+        let fitness = ZdtFitness::new(zdt);
+
+        let nsga2 = Nsga2::<RealVector, _, _, _>::new(self.config.population_size)
+            .with_bounds(bounds.clone());
+
+        let result = nsga2
+            .run(
+                &fitness,
+                &SbxCrossover::new(self.crossover_eta),
+                &PolynomialMutation::new(self.mutation_eta),
+                &bounds,
+                self.config.max_generations,
+                rng,
+            )
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let pareto_front: Vec<ParetoSolution> = result
+            .iter()
+            .filter(|ind| ind.rank == 0)
+            .map(|ind| ParetoSolution::new(ind.genome.genes().to_vec(), ind.objectives.clone()))
+            .collect();
+
+        Ok(MultiObjectiveResult::new(
+            pareto_front,
+            self.config.max_generations,
+            self.config.population_size * self.config.max_generations * 2,
+        ))
+    }
+}
+
+/// Trait for ZDT evaluators
+trait ZdtEvaluator: Send + Sync {
+    fn evaluate(&self, x: &[f64]) -> [f64; 2];
+}
+
+impl ZdtEvaluator for Zdt1 {
+    fn evaluate(&self, x: &[f64]) -> [f64; 2] {
+        Zdt1::evaluate(self, x)
+    }
+}
+
+impl ZdtEvaluator for Zdt2 {
+    fn evaluate(&self, x: &[f64]) -> [f64; 2] {
+        Zdt2::evaluate(self, x)
+    }
+}
+
+impl ZdtEvaluator for Zdt3 {
+    fn evaluate(&self, x: &[f64]) -> [f64; 2] {
+        Zdt3::evaluate(self, x)
+    }
+}
+
+/// Multi-objective fitness for ZDT problems
+struct ZdtFitness<Z> {
+    zdt: Z,
+}
+
+impl<Z> ZdtFitness<Z> {
+    fn new(zdt: Z) -> Self {
+        Self { zdt }
+    }
+}
+
+impl<Z: ZdtEvaluator> MultiObjectiveFitness<RealVector> for ZdtFitness<Z> {
+    fn num_objectives(&self) -> usize {
+        2
+    }
+
+    fn evaluate(&self, genome: &RealVector) -> Vec<f64> {
+        let [f1, f2] = self.zdt.evaluate(genome.genes());
+        vec![f1, f2]
     }
 }
