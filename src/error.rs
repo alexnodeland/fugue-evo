@@ -121,6 +121,19 @@ pub enum EvolutionError {
     /// Empty population
     #[error("Empty population")]
     EmptyPopulation,
+
+    /// Interactive evaluation error
+    #[error("Interactive evaluation error: {0}")]
+    InteractiveEvaluation(String),
+
+    /// Insufficient evaluation coverage
+    #[error("Insufficient coverage: {coverage:.1}% (need {required:.1}%)")]
+    InsufficientCoverage {
+        /// Actual coverage achieved
+        coverage: f64,
+        /// Required coverage threshold
+        required: f64,
+    },
 }
 
 /// Result type alias for evolution operations

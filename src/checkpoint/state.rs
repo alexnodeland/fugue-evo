@@ -135,6 +135,15 @@ pub enum AlgorithmState {
         island_populations: Vec<Vec<usize>>,
         migration_count: usize,
     },
+    /// Interactive GA state
+    Interactive {
+        /// Serialized aggregator state (JSON)
+        aggregator_state: String,
+        /// Number of pending evaluations
+        pending_evaluations: usize,
+        /// Evaluation mode
+        evaluation_mode: String,
+    },
     /// Custom algorithm state (JSON serialized)
     Custom(String),
 }
