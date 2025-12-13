@@ -608,3 +608,392 @@ fn call_js_multi_objective(
         Err(_) => vec![f64::INFINITY; num_objectives],
     }
 }
+
+// ============================================================================
+// Evolution Strategy Optimizer
+// ============================================================================
+
+use fugue_evo::algorithms::evolution_strategy::{ESBuilder, ESSelectionStrategy, RecombinationType};
+
+/// Selection strategy for Evolution Strategy
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, Default)]
+pub enum ESSelection {
+    /// (μ+λ): Parents compete with offspring
+    #[default]
+    MuPlusLambda,
+    /// (μ,λ): Only offspring compete
+    MuCommaLambda,
+}
+
+/// Evolution Strategy optimizer (μ+λ)-ES or (μ,λ)-ES
+#[wasm_bindgen]
+pub struct EvolutionStrategyOptimizer {
+    config: OptimizationConfig,
+    mu: usize,
+    lambda: usize,
+    selection_strategy: ESSelection,
+    initial_sigma: f64,
+    self_adaptive: bool,
+}
+
+impl_optimizer_config!(EvolutionStrategyOptimizer, with_bounds);
+
+#[wasm_bindgen]
+impl EvolutionStrategyOptimizer {
+    /// Create a new (μ+λ)-ES optimizer
+    #[wasm_bindgen(constructor)]
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            config: OptimizationConfig::new(dimension),
+            mu: 15,
+            lambda: 100,
+            selection_strategy: ESSelection::MuPlusLambda,
+            initial_sigma: 1.0,
+            self_adaptive: true,
+        }
+    }
+
+    /// Set μ (number of parents)
+    #[wasm_bindgen(js_name = setMu)]
+    pub fn set_mu(&mut self, mu: usize) {
+        self.mu = mu;
+    }
+
+    /// Set λ (number of offspring)
+    #[wasm_bindgen(js_name = setLambda)]
+    pub fn set_lambda(&mut self, lambda: usize) {
+        self.lambda = lambda;
+    }
+
+    /// Set the selection strategy
+    #[wasm_bindgen(js_name = setSelectionStrategy)]
+    pub fn set_selection_strategy(&mut self, strategy: ESSelection) {
+        self.selection_strategy = strategy;
+    }
+
+    /// Set the initial step size (σ)
+    #[wasm_bindgen(js_name = setInitialSigma)]
+    pub fn set_initial_sigma(&mut self, sigma: f64) {
+        self.initial_sigma = sigma;
+    }
+
+    /// Enable or disable self-adaptive mutation
+    #[wasm_bindgen(js_name = setSelfAdaptive)]
+    pub fn set_self_adaptive(&mut self, enabled: bool) {
+        self.self_adaptive = enabled;
+    }
+
+    /// Run the optimization with a custom fitness function
+    #[wasm_bindgen]
+    pub fn optimize(&self, fitness_fn: &js_sys::Function) -> Result<OptimizationResult, JsValue> {
+        let mut rng = create_rng(self.config.seed);
+        let bounds = MultiBounds::uniform(
+            Bounds::new(self.config.lower_bound, self.config.upper_bound),
+            self.config.dimension,
+        );
+
+        let fitness_fn = fitness_fn.clone();
+        let fitness = RealVectorFitness::new(move |genome: &RealVector| {
+            call_js_fitness_f64(&fitness_fn, genome.genes())
+        });
+
+        let selection = match self.selection_strategy {
+            ESSelection::MuPlusLambda => ESSelectionStrategy::MuPlusLambda,
+            ESSelection::MuCommaLambda => ESSelectionStrategy::MuCommaLambda,
+        };
+
+        let es = ESBuilder::<RealVector, f64, _, _>::new()
+            .mu(self.mu)
+            .lambda(self.lambda)
+            .selection_strategy(selection)
+            .initial_sigma(self.initial_sigma)
+            .self_adaptive(self.self_adaptive)
+            .recombination(RecombinationType::Intermediate)
+            .bounds(bounds)
+            .fitness(fitness)
+            .max_generations(self.config.max_generations)
+            .build()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let result = es
+            .run(&mut rng)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(OptimizationResult::new(
+            result.best_genome.genes().to_vec(),
+            result.best_fitness,
+            result.generations,
+            result.evaluations,
+            result.stats.best_fitness_history(),
+        ))
+    }
+}
+
+// Note: SteadyStateGA requires Sync for fitness functions, which JS functions
+// don't support. Use SimpleGA or CmaEs as alternatives in WASM.
+
+// ============================================================================
+// Symbolic Regression (Tree-Based Genetic Programming)
+// ============================================================================
+
+use fugue_evo::genome::tree::{ArithmeticFunction, ArithmeticTerminal, TreeGenome};
+use serde::{Deserialize, Serialize};
+
+/// Type alias for arithmetic trees
+pub type ArithmeticTree = TreeGenome<ArithmeticTerminal, ArithmeticFunction>;
+
+/// Result of a symbolic regression optimization
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[wasm_bindgen]
+pub struct SymbolicRegressionResult {
+    /// The best tree expression as S-expression string
+    expression: String,
+    /// Best fitness value
+    best_fitness: f64,
+    /// Generations completed
+    generations: usize,
+    /// Total evaluations
+    evaluations: usize,
+    /// Tree depth
+    tree_depth: usize,
+    /// Tree size (number of nodes)
+    tree_size: usize,
+    /// Fitness history
+    #[wasm_bindgen(skip)]
+    pub fitness_history: Vec<f64>,
+}
+
+#[wasm_bindgen]
+impl SymbolicRegressionResult {
+    /// Get the best expression as S-expression
+    #[wasm_bindgen(getter)]
+    pub fn expression(&self) -> String {
+        self.expression.clone()
+    }
+
+    /// Get the best fitness
+    #[wasm_bindgen(js_name = bestFitness, getter)]
+    pub fn best_fitness(&self) -> f64 {
+        self.best_fitness
+    }
+
+    /// Get the number of generations
+    #[wasm_bindgen(getter)]
+    pub fn generations(&self) -> usize {
+        self.generations
+    }
+
+    /// Get the number of evaluations
+    #[wasm_bindgen(getter)]
+    pub fn evaluations(&self) -> usize {
+        self.evaluations
+    }
+
+    /// Get the tree depth
+    #[wasm_bindgen(js_name = treeDepth, getter)]
+    pub fn tree_depth(&self) -> usize {
+        self.tree_depth
+    }
+
+    /// Get the tree size (number of nodes)
+    #[wasm_bindgen(js_name = treeSize, getter)]
+    pub fn tree_size(&self) -> usize {
+        self.tree_size
+    }
+
+    /// Get the fitness history
+    #[wasm_bindgen(js_name = fitnessHistory)]
+    pub fn fitness_history(&self) -> Vec<f64> {
+        self.fitness_history.clone()
+    }
+
+    /// Serialize to JSON
+    #[wasm_bindgen(js_name = toJson)]
+    pub fn to_json(&self) -> Result<String, JsValue> {
+        serde_json::to_string(self).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+}
+
+/// Symbolic Regression optimizer using tree-based genetic programming
+///
+/// Evolves mathematical expressions to fit data points.
+#[wasm_bindgen]
+pub struct SymbolicRegressionOptimizer {
+    population_size: usize,
+    max_generations: usize,
+    tournament_size: usize,
+    max_tree_depth: usize,
+    seed: u64,
+}
+
+#[wasm_bindgen]
+impl SymbolicRegressionOptimizer {
+    /// Create a new symbolic regression optimizer
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            population_size: 100,
+            max_generations: 100,
+            tournament_size: 3,
+            max_tree_depth: 6,
+            seed: 0,
+        }
+    }
+
+    /// Set the population size
+    #[wasm_bindgen(js_name = setPopulationSize)]
+    pub fn set_population_size(&mut self, size: usize) {
+        self.population_size = size;
+    }
+
+    /// Set the maximum generations
+    #[wasm_bindgen(js_name = setMaxGenerations)]
+    pub fn set_max_generations(&mut self, gens: usize) {
+        self.max_generations = gens;
+    }
+
+    /// Set the tournament size
+    #[wasm_bindgen(js_name = setTournamentSize)]
+    pub fn set_tournament_size(&mut self, size: usize) {
+        self.tournament_size = size;
+    }
+
+    /// Set the maximum tree depth
+    #[wasm_bindgen(js_name = setMaxTreeDepth)]
+    pub fn set_max_tree_depth(&mut self, depth: usize) {
+        self.max_tree_depth = depth;
+    }
+
+    /// Set the random seed
+    #[wasm_bindgen(js_name = setSeed)]
+    pub fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
+    }
+
+    /// Run symbolic regression with provided data points
+    /// x_data: flat array of input values (num_points * num_vars)
+    /// y_data: array of target output values
+    /// num_vars: number of input variables
+    #[wasm_bindgen(js_name = optimizeData)]
+    pub fn optimize_data(
+        &self,
+        x_data: &[f64],
+        y_data: &[f64],
+        num_vars: usize,
+    ) -> Result<SymbolicRegressionResult, JsValue> {
+        use fugue_evo::operators::crossover::SubtreeCrossover;
+        use fugue_evo::operators::mutation::SubtreeMutation;
+
+        let num_points = y_data.len();
+        if x_data.len() != num_points * num_vars {
+            return Err(JsValue::from_str(&format!(
+                "x_data length ({}) must be num_points ({}) * num_vars ({})",
+                x_data.len(),
+                num_points,
+                num_vars
+            )));
+        }
+
+        // Convert flat array to 2D data
+        let data_points: Vec<Vec<f64>> = (0..num_points)
+            .map(|i| x_data[i * num_vars..(i + 1) * num_vars].to_vec())
+            .collect();
+        let targets: Vec<f64> = y_data.to_vec();
+
+        let mut rng = create_rng(self.seed);
+        let bounds = MultiBounds::symmetric(1.0, self.max_tree_depth);
+
+        // Create fitness function: minimize mean squared error
+        let fitness = GenericFitness::<ArithmeticTree, _>::new(move |tree: &ArithmeticTree| {
+            let mse: f64 = data_points
+                .iter()
+                .zip(targets.iter())
+                .map(|(x, &y)| {
+                    let pred = tree.evaluate(x);
+                    let diff = pred - y;
+                    diff * diff
+                })
+                .sum::<f64>()
+                / num_points as f64;
+
+            // Return negative MSE (we're maximizing)
+            -mse
+        });
+
+        let ga = SimpleGABuilder::<ArithmeticTree, f64, _, _, _, _, _>::new()
+            .population_size(self.population_size)
+            .bounds(bounds)
+            .selection(TournamentSelection::new(self.tournament_size))
+            .crossover(SubtreeCrossover::new().with_max_depth(self.max_tree_depth))
+            .mutation(SubtreeMutation::new().with_max_depth(self.max_tree_depth))
+            .fitness(fitness)
+            .max_generations(self.max_generations)
+            .build()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let result = ga
+            .run(&mut rng)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(SymbolicRegressionResult {
+            expression: result.best_genome.to_sexpr(),
+            best_fitness: result.best_fitness,
+            generations: result.generations,
+            evaluations: result.evaluations,
+            tree_depth: result.best_genome.depth(),
+            tree_size: result.best_genome.size(),
+            fitness_history: result.stats.best_fitness_history(),
+        })
+    }
+
+    /// Run symbolic regression with a custom fitness function
+    /// The JS function receives the tree expression as a string and should return fitness
+    #[wasm_bindgen(js_name = optimizeCustom)]
+    pub fn optimize_custom(
+        &self,
+        fitness_fn: &js_sys::Function,
+    ) -> Result<SymbolicRegressionResult, JsValue> {
+        use fugue_evo::operators::crossover::SubtreeCrossover;
+        use fugue_evo::operators::mutation::SubtreeMutation;
+
+        let mut rng = create_rng(self.seed);
+        let bounds = MultiBounds::symmetric(1.0, self.max_tree_depth);
+
+        let fitness_fn = fitness_fn.clone();
+        let fitness = GenericFitness::<ArithmeticTree, _>::new(move |tree: &ArithmeticTree| {
+            let expr = tree.to_sexpr();
+            let this = JsValue::null();
+            let js_expr = JsValue::from_str(&expr);
+            match fitness_fn.call1(&this, &js_expr) {
+                Ok(result) => result.as_f64().unwrap_or(f64::NEG_INFINITY),
+                Err(_) => f64::NEG_INFINITY,
+            }
+        });
+
+        let ga = SimpleGABuilder::<ArithmeticTree, f64, _, _, _, _, _>::new()
+            .population_size(self.population_size)
+            .bounds(bounds)
+            .selection(TournamentSelection::new(self.tournament_size))
+            .crossover(SubtreeCrossover::new().with_max_depth(self.max_tree_depth))
+            .mutation(SubtreeMutation::new().with_max_depth(self.max_tree_depth))
+            .fitness(fitness)
+            .max_generations(self.max_generations)
+            .build()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let result = ga
+            .run(&mut rng)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(SymbolicRegressionResult {
+            expression: result.best_genome.to_sexpr(),
+            best_fitness: result.best_fitness,
+            generations: result.generations,
+            evaluations: result.evaluations,
+            tree_depth: result.best_genome.depth(),
+            tree_size: result.best_genome.size(),
+            fitness_history: result.stats.best_fitness_history(),
+        })
+    }
+}
