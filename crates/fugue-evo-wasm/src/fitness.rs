@@ -20,6 +20,7 @@ pub enum FitnessType {
 }
 
 /// Fitness function wrapper that can hold different function types
+#[allow(clippy::type_complexity)]
 pub enum FitnessWrapper {
     Sphere(Sphere),
     Rastrigin(Rastrigin),

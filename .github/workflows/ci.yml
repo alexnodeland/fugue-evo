@@ -122,10 +122,44 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
 
+  wasm:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+
+      - name: Check WASM crate compiles
+        run: cargo check -p fugue-evo-wasm --target wasm32-unknown-unknown
+
+      - name: Build WASM package
+        run: wasm-pack build crates/fugue-evo-wasm --target web
+
+      - name: Run WASM tests (Node.js)
+        run: wasm-pack test --node crates/fugue-evo-wasm
+
   # Summary job that depends on all other jobs
   ci-success:
     name: CI Success
-    needs: [check, fmt, clippy, test, doc]
+    needs: [check, fmt, clippy, test, doc, wasm]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -135,7 +169,8 @@ jobs:
              [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.doc.result }}" != "success" ]]; then
+             [[ "${{ needs.doc.result }}" != "success" ]] || \
+             [[ "${{ needs.wasm.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi

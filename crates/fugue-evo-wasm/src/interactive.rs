@@ -342,6 +342,7 @@ impl InteractiveOptimizer {
 
     /// Create with custom configuration
     #[wasm_bindgen(js_name = withConfig)]
+    #[allow(clippy::field_reassign_with_default)]
     pub fn with_config(
         dimension: usize,
         population_size: usize,
@@ -368,7 +369,7 @@ impl InteractiveOptimizer {
 
     /// Create with extended configuration
     #[wasm_bindgen(js_name = withExtendedConfig)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::field_reassign_with_default)]
     pub fn with_extended_config(
         dimension: usize,
         population_size: usize,
@@ -475,7 +476,7 @@ impl InteractiveOptimizer {
     /// ratings: array of [candidate_id, rating] pairs
     #[wasm_bindgen(js_name = provideRatings)]
     pub fn provide_ratings(&mut self, ratings: &[f64]) -> Result<(), JsValue> {
-        if ratings.len() % 2 != 0 {
+        if !ratings.len().is_multiple_of(2) {
             return Err(JsValue::from_str(
                 "Ratings array must have even length (id, rating pairs)",
             ));
