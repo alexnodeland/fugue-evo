@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 
 use super::aggregation::{AggregationModel, FitnessAggregator};
 use super::evaluator::{Candidate, CandidateId, EvaluationRequest, EvaluationResponse};
+use super::selection_strategy::SelectionStrategy;
 use super::session::{CoverageStats, InteractiveSession};
 use super::traits::EvaluationMode;
 use crate::error::EvolutionError;
@@ -41,6 +42,9 @@ pub struct InteractiveGAConfig {
     pub max_generations: usize,
     /// Aggregation model for fitness computation
     pub aggregation_model: AggregationModel,
+    /// Active learning strategy for candidate selection
+    #[serde(default)]
+    pub selection_strategy: SelectionStrategy,
 }
 
 impl Default for InteractiveGAConfig {
@@ -59,6 +63,7 @@ impl Default for InteractiveGAConfig {
             aggregation_model: AggregationModel::DirectRating {
                 default_rating: 5.0,
             },
+            selection_strategy: SelectionStrategy::Sequential,
         }
     }
 }
@@ -289,27 +294,34 @@ where
     }
 
     /// Create an evaluation request based on the current mode
-    fn create_evaluation_request(&mut self) -> Option<EvaluationRequest<G>> {
-        if self.unevaluated_indices.is_empty() {
-            return None;
-        }
-
+    fn create_evaluation_request<R: Rng>(&mut self, rng: &mut R) -> Option<EvaluationRequest<G>> {
         match self.config.evaluation_mode {
-            EvaluationMode::Rating => self.create_rating_request(),
-            EvaluationMode::Pairwise => self.create_pairwise_request(),
-            EvaluationMode::BatchSelection => self.create_batch_request(),
-            EvaluationMode::Adaptive => self.create_adaptive_request(),
+            EvaluationMode::Rating => self.create_rating_request(rng),
+            EvaluationMode::Pairwise => self.create_pairwise_request(rng),
+            EvaluationMode::BatchSelection => self.create_batch_request(rng),
+            EvaluationMode::Adaptive => self.create_adaptive_request(rng),
         }
     }
 
-    fn create_rating_request(&mut self) -> Option<EvaluationRequest<G>> {
-        let batch_size = self.config.batch_size.min(self.unevaluated_indices.len());
+    fn create_rating_request<R: Rng>(&mut self, rng: &mut R) -> Option<EvaluationRequest<G>> {
+        let batch_size = self.config.batch_size.min(self.session.population.len());
         if batch_size == 0 {
             return None;
         }
 
-        let indices: Vec<usize> = self.unevaluated_indices.drain(..batch_size).collect();
-        let candidates: Vec<Candidate<G>> = indices
+        // Use selection strategy to pick candidates
+        let selected_indices = self.config.selection_strategy.select_batch(
+            &self.session.population,
+            &self.session.aggregator,
+            batch_size,
+            rng,
+        );
+
+        if selected_indices.is_empty() {
+            return None;
+        }
+
+        let candidates: Vec<Candidate<G>> = selected_indices
             .iter()
             .filter_map(|&i| self.session.population.get(i).cloned())
             .collect();
@@ -322,15 +334,29 @@ where
         Some(EvaluationRequest::rate(candidates))
     }
 
-    fn create_pairwise_request(&mut self) -> Option<EvaluationRequest<G>> {
+    fn create_pairwise_request<R: Rng>(&mut self, rng: &mut R) -> Option<EvaluationRequest<G>> {
         let pop_size = self.session.population.len();
         if pop_size < 2 {
             return None;
         }
 
-        // Simple round-robin pairing
-        let idx_a = self.comparison_index % pop_size;
-        let idx_b = (self.comparison_index + 1) % pop_size;
+        // Use selection strategy for intelligent pair selection
+        let pair = self.config.selection_strategy.select_pair(
+            &self.session.population,
+            &self.session.aggregator,
+            rng,
+        );
+
+        let (idx_a, idx_b) = match pair {
+            Some(p) => p,
+            None => {
+                // Fallback to round-robin if strategy returns None
+                let idx_a = self.comparison_index % pop_size;
+                let idx_b = (self.comparison_index + 1) % pop_size;
+                (idx_a, idx_b)
+            }
+        };
+
         self.comparison_index += 1;
 
         let candidate_a = self.session.population.get(idx_a)?.clone();
@@ -344,15 +370,26 @@ where
         Some(EvaluationRequest::compare(candidate_a, candidate_b))
     }
 
-    fn create_batch_request(&mut self) -> Option<EvaluationRequest<G>> {
-        let batch_size = self.config.batch_size.min(self.unevaluated_indices.len());
+    fn create_batch_request<R: Rng>(&mut self, rng: &mut R) -> Option<EvaluationRequest<G>> {
+        let batch_size = self.config.batch_size.min(self.session.population.len());
         if batch_size < 2 {
             // Need at least 2 for selection
-            return self.create_rating_request(); // Fall back
+            return self.create_rating_request(rng); // Fall back
         }
 
-        let indices: Vec<usize> = self.unevaluated_indices.drain(..batch_size).collect();
-        let candidates: Vec<Candidate<G>> = indices
+        // Use selection strategy to pick candidates
+        let selected_indices = self.config.selection_strategy.select_batch(
+            &self.session.population,
+            &self.session.aggregator,
+            batch_size,
+            rng,
+        );
+
+        if selected_indices.len() < 2 {
+            return self.create_rating_request(rng);
+        }
+
+        let candidates: Vec<Candidate<G>> = selected_indices
             .iter()
             .filter_map(|&i| self.session.population.get(i).cloned())
             .collect();
@@ -369,14 +406,14 @@ where
         ))
     }
 
-    fn create_adaptive_request(&mut self) -> Option<EvaluationRequest<G>> {
+    fn create_adaptive_request<R: Rng>(&mut self, rng: &mut R) -> Option<EvaluationRequest<G>> {
         // Simple adaptive strategy: use rating for initial coverage,
         // then switch to pairwise for refinement
         let coverage = self.session.coverage_stats().coverage;
         if coverage < 0.5 {
-            self.create_rating_request()
+            self.create_rating_request(rng)
         } else {
-            self.create_pairwise_request()
+            self.create_pairwise_request(rng)
         }
     }
 
@@ -440,9 +477,12 @@ where
             EvaluationResponse::Skip => Vec::new(),
         };
 
-        // Update candidate fitness estimates
+        // Update candidate fitness estimates with uncertainty
         for id in updated {
-            if let Some(fitness) = self.session.aggregator.get_fitness(&id) {
+            if let Some(estimate) = self.session.aggregator.get_fitness_estimate(&id) {
+                self.session.update_fitness_with_uncertainty(id, estimate);
+            } else if let Some(fitness) = self.session.aggregator.get_fitness(&id) {
+                // Fallback to point estimate only
                 self.session.update_fitness(id, fitness);
             }
         }
@@ -507,7 +547,7 @@ where
                     }
 
                     // Create next evaluation request
-                    if let Some(request) = self.create_evaluation_request() {
+                    if let Some(request) = self.create_evaluation_request(rng) {
                         self.session.record_request(&request);
                         return StepResult::NeedsEvaluation(request);
                     } else {
@@ -772,6 +812,20 @@ where
     /// Set the aggregation model
     pub fn aggregation_model(mut self, model: AggregationModel) -> Self {
         self.config.aggregation_model = model;
+        self
+    }
+
+    /// Set the active learning selection strategy
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// .selection_strategy(SelectionStrategy::UncertaintySampling {
+    ///     uncertainty_weight: 1.0,
+    /// })
+    /// ```
+    pub fn selection_strategy(mut self, strategy: SelectionStrategy) -> Self {
+        self.config.selection_strategy = strategy;
         self
     }
 

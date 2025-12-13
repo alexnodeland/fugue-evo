@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use super::uncertainty::FitnessEstimate;
 use crate::genome::traits::EvolutionaryGenome;
 
 /// Unique identifier for a candidate in an interactive session
@@ -51,6 +52,9 @@ where
     pub genome: G,
     /// Current fitness estimate (updated as feedback arrives)
     pub fitness_estimate: Option<f64>,
+    /// Full fitness estimate with uncertainty quantification
+    #[serde(default)]
+    pub fitness_with_uncertainty: Option<FitnessEstimate>,
     /// Generation when this candidate was created
     pub birth_generation: usize,
     /// Number of times this candidate has been evaluated
@@ -67,6 +71,7 @@ where
             id,
             genome,
             fitness_estimate: None,
+            fitness_with_uncertainty: None,
             birth_generation: 0,
             evaluation_count: 0,
         }
@@ -78,19 +83,36 @@ where
             id,
             genome,
             fitness_estimate: None,
+            fitness_with_uncertainty: None,
             birth_generation: generation,
             evaluation_count: 0,
         }
     }
 
-    /// Set the fitness estimate
+    /// Set the fitness estimate (point estimate only)
     pub fn set_fitness(&mut self, fitness: f64) {
         self.fitness_estimate = Some(fitness);
     }
 
-    /// Get the fitness estimate, if available
+    /// Set the full fitness estimate with uncertainty
+    pub fn set_fitness_with_uncertainty(&mut self, estimate: FitnessEstimate) {
+        self.fitness_estimate = Some(estimate.mean);
+        self.fitness_with_uncertainty = Some(estimate);
+    }
+
+    /// Get the fitness estimate (point estimate), if available
     pub fn fitness(&self) -> Option<f64> {
         self.fitness_estimate
+    }
+
+    /// Get the full fitness estimate with uncertainty, if available
+    pub fn fitness_uncertainty(&self) -> Option<&FitnessEstimate> {
+        self.fitness_with_uncertainty.as_ref()
+    }
+
+    /// Get the variance of the fitness estimate, if available
+    pub fn fitness_variance(&self) -> Option<f64> {
+        self.fitness_with_uncertainty.as_ref().map(|e| e.variance)
     }
 
     /// Check if this candidate has been evaluated at least once
@@ -106,6 +128,16 @@ where
     /// Get the age of this candidate (generations since birth)
     pub fn age(&self, current_generation: usize) -> usize {
         current_generation.saturating_sub(self.birth_generation)
+    }
+
+    /// Check if this candidate has high uncertainty (needs more evaluation)
+    ///
+    /// Returns true if variance is infinite or observation count is below threshold.
+    pub fn is_uncertain(&self, min_observations: usize) -> bool {
+        self.fitness_with_uncertainty
+            .as_ref()
+            .map(|e| e.is_uncertain(min_observations))
+            .unwrap_or(true) // No estimate = uncertain
     }
 }
 

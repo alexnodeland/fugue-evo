@@ -9,11 +9,18 @@
 //! - **Elo**: Classic Elo rating system from pairwise comparisons
 //! - **BradleyTerry**: Maximum likelihood estimation for pairwise data
 //! - **ImplicitRanking**: Bonus/penalty system from batch selections
+//!
+//! # Uncertainty Quantification
+//!
+//! All models support uncertainty estimation via `get_fitness_estimate()`,
+//! which returns a `FitnessEstimate` with variance and confidence intervals.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::bradley_terry::{BradleyTerryModel, BradleyTerryOptimizer};
 use super::evaluator::{CandidateId, EvaluationResponse};
+use super::uncertainty::FitnessEstimate;
 
 /// Aggregation model for converting user feedback to fitness
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,12 +49,25 @@ pub enum AggregationModel {
     ///
     /// Maximum likelihood estimation for pairwise comparison data.
     /// Provides more statistically principled estimates than Elo.
+    /// Now supports proper MLE with Newton-Raphson or MM algorithms.
     BradleyTerry {
+        /// Initial strength parameter
+        initial_strength: f64,
+        /// Optimizer configuration (Newton-Raphson or MM)
+        #[serde(default)]
+        optimizer: BradleyTerryOptimizer,
+    },
+
+    /// Legacy Bradley-Terry model (for backward compatibility)
+    ///
+    /// Uses the simplified iterative MM approach from earlier versions.
+    #[serde(alias = "BradleyTerryLegacy")]
+    BradleyTerrySimple {
         /// Initial strength parameter
         initial_strength: f64,
         /// Learning rate for iterative updates
         learning_rate: f64,
-        /// Number of iterations for MLE
+        /// Number of iterations
         iterations: usize,
     },
 
@@ -78,10 +98,16 @@ impl Default for AggregationModel {
 pub struct CandidateStats {
     /// Sum of all ratings received
     pub rating_sum: f64,
+    /// Sum of squared ratings (for variance calculation)
+    #[serde(default)]
+    pub rating_sum_squares: f64,
     /// Count of ratings received
     pub rating_count: usize,
     /// Current model-based score (Elo, Bradley-Terry strength, etc.)
     pub model_score: f64,
+    /// Variance of the model score (for uncertainty quantification)
+    #[serde(default = "default_variance")]
+    pub model_variance: f64,
     /// Number of wins in pairwise comparisons
     pub wins: usize,
     /// Number of losses in pairwise comparisons
@@ -94,11 +120,16 @@ pub struct CandidateStats {
     pub times_passed: usize,
 }
 
+fn default_variance() -> f64 {
+    f64::INFINITY
+}
+
 impl CandidateStats {
     /// Create new stats with the given initial model score
     pub fn new(initial_score: f64) -> Self {
         Self {
             model_score: initial_score,
+            model_variance: f64::INFINITY,
             ..Default::default()
         }
     }
@@ -110,6 +141,25 @@ impl CandidateStats {
         } else {
             None
         }
+    }
+
+    /// Get the sample variance of ratings
+    pub fn rating_variance(&self) -> Option<f64> {
+        if self.rating_count < 2 {
+            return None;
+        }
+        let n = self.rating_count as f64;
+        let mean = self.rating_sum / n;
+        // Var = E[X²] - E[X]²
+        let var = (self.rating_sum_squares / n) - (mean * mean);
+        // Convert to sample variance (Bessel's correction)
+        Some(var * n / (n - 1.0))
+    }
+
+    /// Get the variance of the mean (standard error squared)
+    pub fn rating_variance_of_mean(&self) -> Option<f64> {
+        self.rating_variance()
+            .map(|var| var / self.rating_count as f64)
     }
 
     /// Get total number of comparisons
@@ -192,6 +242,9 @@ impl FitnessAggregator {
                 AggregationModel::BradleyTerry {
                     initial_strength, ..
                 } => *initial_strength,
+                AggregationModel::BradleyTerrySimple {
+                    initial_strength, ..
+                } => *initial_strength,
                 AggregationModel::ImplicitRanking { base_fitness, .. } => *base_fitness,
             };
             self.candidate_stats
@@ -204,7 +257,9 @@ impl FitnessAggregator {
         self.candidate_stats.get(id)
     }
 
-    /// Get current fitness estimate for a candidate
+    /// Get current fitness estimate for a candidate (point estimate only)
+    ///
+    /// For uncertainty information, use `get_fitness_estimate()` instead.
     pub fn get_fitness(&self, id: &CandidateId) -> Option<f64> {
         let stats = self.candidate_stats.get(id)?;
 
@@ -214,6 +269,7 @@ impl FitnessAggregator {
             }
             AggregationModel::Elo { .. } => stats.model_score,
             AggregationModel::BradleyTerry { .. } => stats.model_score,
+            AggregationModel::BradleyTerrySimple { .. } => stats.model_score,
             AggregationModel::ImplicitRanking { .. } => {
                 // Score is base + cumulative bonuses/penalties
                 stats.model_score
@@ -221,11 +277,73 @@ impl FitnessAggregator {
         })
     }
 
+    /// Get fitness estimate with uncertainty quantification
+    ///
+    /// Returns a `FitnessEstimate` containing the point estimate, variance,
+    /// and confidence intervals.
+    pub fn get_fitness_estimate(&self, id: &CandidateId) -> Option<FitnessEstimate> {
+        let stats = self.candidate_stats.get(id)?;
+
+        Some(match &self.model {
+            AggregationModel::DirectRating { default_rating } => {
+                if stats.rating_count == 0 {
+                    FitnessEstimate::uninformative(*default_rating)
+                } else {
+                    let mean = stats.rating_sum / stats.rating_count as f64;
+                    let variance = stats.rating_variance_of_mean().unwrap_or(f64::INFINITY);
+                    FitnessEstimate::new(mean, variance, stats.rating_count)
+                }
+            }
+            AggregationModel::Elo { k_factor, .. } => {
+                // Elo variance approximation based on K-factor and game count
+                let n_games = stats.total_comparisons();
+                let variance = if n_games == 0 {
+                    f64::INFINITY
+                } else {
+                    // Approximate variance: decreases with games, proportional to K²
+                    let base_var = k_factor * k_factor * 0.25; // Bernoulli variance factor
+                    base_var / n_games as f64
+                };
+                FitnessEstimate::new(stats.model_score, variance, n_games)
+            }
+            AggregationModel::BradleyTerry { .. } | AggregationModel::BradleyTerrySimple { .. } => {
+                // Use stored variance from MLE computation
+                let n_comparisons = stats.total_comparisons();
+                let variance = if stats.model_variance.is_finite() {
+                    stats.model_variance
+                } else if n_comparisons == 0 {
+                    f64::INFINITY
+                } else {
+                    // Fallback: approximate variance
+                    1.0 / n_comparisons as f64
+                };
+                FitnessEstimate::new(stats.model_score, variance, n_comparisons)
+            }
+            AggregationModel::ImplicitRanking { .. } => {
+                // Binomial variance on selection rate
+                let n = stats.times_selected + stats.times_passed;
+                if n == 0 {
+                    FitnessEstimate::uninformative(stats.model_score)
+                } else {
+                    let p = stats.times_selected as f64 / n as f64;
+                    let variance = p * (1.0 - p) / n as f64;
+                    FitnessEstimate::new(stats.model_score, variance, n)
+                }
+            }
+        })
+    }
+
+    /// Get access to comparison records (for Bradley-Terry MLE)
+    pub fn comparisons(&self) -> &[ComparisonRecord] {
+        &self.comparisons
+    }
+
     /// Record a rating for a candidate
     pub fn record_rating(&mut self, id: CandidateId, rating: f64) {
         self.ensure_stats(id);
         if let Some(stats) = self.candidate_stats.get_mut(&id) {
             stats.rating_sum += rating;
+            stats.rating_sum_squares += rating * rating;
             stats.rating_count += 1;
         }
     }
@@ -384,13 +502,18 @@ impl FitnessAggregator {
     /// This is useful for Bradley-Terry model which uses batch MLE,
     /// or after loading a session from checkpoint.
     pub fn recompute_all(&mut self) -> HashMap<CandidateId, f64> {
-        if let AggregationModel::BradleyTerry {
-            initial_strength,
-            learning_rate,
-            iterations,
-        } = &self.model
-        {
-            self.recompute_bradley_terry(*initial_strength, *learning_rate, *iterations);
+        match &self.model {
+            AggregationModel::BradleyTerry { optimizer, .. } => {
+                self.recompute_bradley_terry_mle(optimizer.clone());
+            }
+            AggregationModel::BradleyTerrySimple {
+                initial_strength,
+                learning_rate,
+                iterations,
+            } => {
+                self.recompute_bradley_terry_simple(*initial_strength, *learning_rate, *iterations);
+            }
+            _ => {}
         }
 
         // Return current fitness estimates
@@ -400,8 +523,33 @@ impl FitnessAggregator {
             .collect()
     }
 
-    /// Recompute Bradley-Terry strength parameters using MLE
-    fn recompute_bradley_terry(
+    /// Recompute Bradley-Terry using proper MLE (Newton-Raphson or MM)
+    fn recompute_bradley_terry_mle(&mut self, optimizer: BradleyTerryOptimizer) {
+        let ids: Vec<CandidateId> = self.candidate_stats.keys().copied().collect();
+        if ids.is_empty() || self.comparisons.is_empty() {
+            return;
+        }
+
+        let model = BradleyTerryModel::new(optimizer);
+        let result = model.fit(&self.comparisons, &ids);
+
+        // Update stats with MLE results
+        for (&id, &strength) in &result.strengths {
+            if let Some(stats) = self.candidate_stats.get_mut(&id) {
+                stats.model_score = strength;
+
+                // Update variance from covariance matrix
+                if let Some(&idx) = result.id_to_index.get(&id) {
+                    if idx < result.covariance.nrows() {
+                        stats.model_variance = result.covariance[(idx, idx)];
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recompute Bradley-Terry using simplified iterative MM (legacy)
+    fn recompute_bradley_terry_simple(
         &mut self,
         initial_strength: f64,
         learning_rate: f64,
@@ -687,8 +835,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bradley_terry_recompute() {
-        let mut agg = FitnessAggregator::new(AggregationModel::BradleyTerry {
+    fn test_bradley_terry_simple_recompute() {
+        let mut agg = FitnessAggregator::new(AggregationModel::BradleyTerrySimple {
             initial_strength: 1.0,
             learning_rate: 0.5,
             iterations: 10,
@@ -709,6 +857,62 @@ mod tests {
         assert!(fitness[&CandidateId(0)] > fitness[&CandidateId(1)]);
         // B should beat C
         assert!(fitness[&CandidateId(1)] > fitness[&CandidateId(2)]);
+    }
+
+    #[test]
+    fn test_bradley_terry_mle_recompute() {
+        use crate::interactive::bradley_terry::BradleyTerryOptimizer;
+
+        let mut agg = FitnessAggregator::new(AggregationModel::BradleyTerry {
+            initial_strength: 1.0,
+            optimizer: BradleyTerryOptimizer::default(),
+        });
+
+        // A beats B multiple times, B beats C
+        agg.ensure_stats(CandidateId(0));
+        agg.ensure_stats(CandidateId(1));
+        agg.ensure_stats(CandidateId(2));
+
+        agg.record_comparison(CandidateId(0), CandidateId(1));
+        agg.record_comparison(CandidateId(0), CandidateId(1));
+        agg.record_comparison(CandidateId(1), CandidateId(2));
+
+        let fitness = agg.recompute_all();
+
+        // A should have highest strength
+        assert!(fitness[&CandidateId(0)] > fitness[&CandidateId(1)]);
+        // B should beat C
+        assert!(fitness[&CandidateId(1)] > fitness[&CandidateId(2)]);
+
+        // MLE should also provide variance estimates
+        let estimate_a = agg.get_fitness_estimate(&CandidateId(0)).unwrap();
+        assert!(estimate_a.variance.is_finite());
+        assert!(estimate_a.observation_count > 0);
+    }
+
+    #[test]
+    fn test_fitness_estimate_direct_rating() {
+        let mut agg = FitnessAggregator::new(AggregationModel::DirectRating {
+            default_rating: 5.0,
+        });
+
+        let id = CandidateId(0);
+        agg.ensure_stats(id);
+
+        // Initially should be uninformative
+        let estimate = agg.get_fitness_estimate(&id).unwrap();
+        assert_eq!(estimate.mean, 5.0);
+        assert!(estimate.variance.is_infinite());
+
+        // After ratings, should have finite variance
+        agg.record_rating(id, 8.0);
+        agg.record_rating(id, 6.0);
+        agg.record_rating(id, 7.0);
+
+        let estimate = agg.get_fitness_estimate(&id).unwrap();
+        assert_eq!(estimate.mean, 7.0);
+        assert!(estimate.variance.is_finite());
+        assert_eq!(estimate.observation_count, 3);
     }
 
     #[test]

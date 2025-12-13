@@ -11,6 +11,7 @@ use std::path::Path;
 
 use super::aggregation::FitnessAggregator;
 use super::evaluator::{Candidate, CandidateId, EvaluationRequest};
+use super::uncertainty::FitnessEstimate;
 use crate::error::CheckpointError;
 use crate::genome::traits::EvolutionaryGenome;
 
@@ -248,6 +249,91 @@ where
             candidate.set_fitness(fitness);
             candidate.record_evaluation();
         }
+    }
+
+    /// Update fitness with full uncertainty information
+    pub fn update_fitness_with_uncertainty(&mut self, id: CandidateId, estimate: FitnessEstimate) {
+        if let Some(candidate) = self.get_candidate_mut(id) {
+            candidate.set_fitness_with_uncertainty(estimate);
+            candidate.record_evaluation();
+        }
+    }
+
+    /// Sync candidate fitness estimates from the aggregator
+    ///
+    /// Updates all candidates with their current fitness estimates including uncertainty.
+    /// Call this after processing responses to ensure candidates have up-to-date estimates.
+    pub fn sync_fitness_estimates(&mut self) {
+        for candidate in &mut self.population {
+            if let Some(estimate) = self.aggregator.get_fitness_estimate(&candidate.id) {
+                candidate.fitness_estimate = Some(estimate.mean);
+                candidate.fitness_with_uncertainty = Some(estimate);
+            }
+        }
+    }
+
+    /// Get fitness estimates with uncertainty for all candidates
+    ///
+    /// Returns a vector of (CandidateId, FitnessEstimate) pairs.
+    pub fn all_fitness_estimates(&self) -> Vec<(CandidateId, FitnessEstimate)> {
+        self.population
+            .iter()
+            .filter_map(|c| {
+                self.aggregator
+                    .get_fitness_estimate(&c.id)
+                    .map(|e| (c.id, e))
+            })
+            .collect()
+    }
+
+    /// Get candidates sorted by uncertainty (most uncertain first)
+    ///
+    /// Useful for identifying which candidates need more evaluation.
+    pub fn candidates_by_uncertainty(&self) -> Vec<&Candidate<G>> {
+        let mut candidates: Vec<_> = self.population.iter().collect();
+        candidates.sort_by(|a, b| {
+            let var_a = self
+                .aggregator
+                .get_fitness_estimate(&a.id)
+                .map(|e| e.variance)
+                .unwrap_or(f64::INFINITY);
+            let var_b = self
+                .aggregator
+                .get_fitness_estimate(&b.id)
+                .map(|e| e.variance)
+                .unwrap_or(f64::INFINITY);
+            // Sort descending - most uncertain first
+            var_b
+                .partial_cmp(&var_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates
+    }
+
+    /// Get the average uncertainty across all candidates
+    pub fn average_uncertainty(&self) -> f64 {
+        let estimates: Vec<_> = self
+            .population
+            .iter()
+            .filter_map(|c| self.aggregator.get_fitness_estimate(&c.id))
+            .collect();
+
+        if estimates.is_empty() {
+            return f64::INFINITY;
+        }
+
+        let total_variance: f64 = estimates
+            .iter()
+            .map(|e| {
+                if e.variance.is_finite() {
+                    e.variance
+                } else {
+                    1e6 // Large but finite for averaging
+                }
+            })
+            .sum();
+
+        total_variance / estimates.len() as f64
     }
 
     /// Replace the population with new candidates

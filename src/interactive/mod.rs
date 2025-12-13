@@ -50,9 +50,12 @@
 
 pub mod aggregation;
 pub mod algorithm;
+pub mod bradley_terry;
 pub mod evaluator;
+pub mod selection_strategy;
 pub mod session;
 pub mod traits;
+pub mod uncertainty;
 
 /// Prelude for convenient imports
 pub mod prelude {
@@ -60,9 +63,12 @@ pub mod prelude {
     pub use super::algorithm::{
         InteractiveGA, InteractiveGABuilder, InteractiveGAConfig, InteractiveResult, StepResult,
     };
+    pub use super::bradley_terry::{BradleyTerryModel, BradleyTerryOptimizer, BradleyTerryResult};
     pub use super::evaluator::{
         Candidate, CandidateId, EvaluationRequest, EvaluationResponse, RatingScale,
     };
+    pub use super::selection_strategy::SelectionStrategy;
     pub use super::session::{CoverageStats, InteractiveSession};
     pub use super::traits::{EvaluationMode, InteractiveFitness};
+    pub use super::uncertainty::FitnessEstimate;
 }
