@@ -829,6 +829,12 @@ pub struct SymbolicRegressionOptimizer {
     seed: u64,
 }
 
+impl Default for SymbolicRegressionOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[wasm_bindgen]
 impl SymbolicRegressionOptimizer {
     /// Create a new symbolic regression optimizer

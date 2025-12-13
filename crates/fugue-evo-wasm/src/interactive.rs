@@ -368,6 +368,7 @@ impl InteractiveOptimizer {
 
     /// Create with extended configuration
     #[wasm_bindgen(js_name = withExtendedConfig)]
+    #[allow(clippy::too_many_arguments)]
     pub fn with_extended_config(
         dimension: usize,
         population_size: usize,
