@@ -3,8 +3,12 @@
 //! Provides serialization to/from files with compression and versioning.
 
 use serde::{de::DeserializeOwned, Serialize};
+
+#[cfg(feature = "checkpoint")]
 use std::fs::File;
+#[cfg(feature = "checkpoint")]
 use std::io::{BufReader, BufWriter, Read, Write};
+#[cfg(feature = "checkpoint")]
 use std::path::Path;
 
 use super::state::{Checkpoint, CHECKPOINT_VERSION};
@@ -28,6 +32,7 @@ impl Default for CheckpointFormat {
 }
 
 /// Save a checkpoint to a file
+#[cfg(feature = "checkpoint")]
 pub fn save_checkpoint<G>(
     checkpoint: &Checkpoint<G>,
     path: impl AsRef<Path>,
@@ -74,6 +79,7 @@ where
 }
 
 /// Load a checkpoint from a file
+#[cfg(feature = "checkpoint")]
 pub fn load_checkpoint<G>(path: impl AsRef<Path>) -> Result<Checkpoint<G>, CheckpointError>
 where
     G: Clone + Serialize + DeserializeOwned + crate::genome::traits::EvolutionaryGenome,
@@ -139,6 +145,7 @@ where
 }
 
 /// Simple compression using run-length encoding for repeated bytes
+#[cfg(feature = "checkpoint")]
 fn compress_data(data: &[u8]) -> Vec<u8> {
     if data.is_empty() {
         return Vec::new();
@@ -182,6 +189,7 @@ fn compress_data(data: &[u8]) -> Vec<u8> {
 }
 
 /// Decompress RLE-encoded data
+#[cfg(feature = "checkpoint")]
 fn decompress_data(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut decompressed = Vec::new();
     let mut i = 0;
@@ -207,6 +215,7 @@ fn decompress_data(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// Checkpoint manager for automatic saving
+#[cfg(feature = "checkpoint")]
 pub struct CheckpointManager {
     /// Directory for checkpoint files
     pub directory: std::path::PathBuf,
@@ -222,6 +231,7 @@ pub struct CheckpointManager {
     current_index: usize,
 }
 
+#[cfg(feature = "checkpoint")]
 impl CheckpointManager {
     /// Create a new checkpoint manager
     pub fn new(directory: impl Into<std::path::PathBuf>, base_name: impl Into<String>) -> Self {

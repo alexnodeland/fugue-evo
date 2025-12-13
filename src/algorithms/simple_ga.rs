@@ -239,6 +239,8 @@ where
     }
 }
 
+// Builder build() method - parallel version with Send + Sync bounds
+#[cfg(feature = "parallel")]
 impl<G, F, S, C, M, Fit, Term> SimpleGABuilder<G, F, S, C, M, Fit, Term>
 where
     G: EvolutionaryGenome + Send + Sync,
@@ -247,6 +249,58 @@ where
     C: CrossoverOperator<G>,
     M: MutationOperator<G>,
     Fit: Fitness<Genome = G, Value = F> + Sync,
+    Term: TerminationCriterion<G, F>,
+{
+    /// Build the SimpleGA instance
+    #[allow(clippy::type_complexity)]
+    pub fn build(self) -> Result<SimpleGA<G, F, S, C, M, Fit, Term>, EvolutionError> {
+        let bounds = self
+            .bounds
+            .ok_or_else(|| EvolutionError::Configuration("Bounds must be specified".to_string()))?;
+
+        let selection = self.selection.ok_or_else(|| {
+            EvolutionError::Configuration("Selection operator must be specified".to_string())
+        })?;
+
+        let crossover = self.crossover.ok_or_else(|| {
+            EvolutionError::Configuration("Crossover operator must be specified".to_string())
+        })?;
+
+        let mutation = self.mutation.ok_or_else(|| {
+            EvolutionError::Configuration("Mutation operator must be specified".to_string())
+        })?;
+
+        let fitness = self.fitness.ok_or_else(|| {
+            EvolutionError::Configuration("Fitness function must be specified".to_string())
+        })?;
+
+        let termination = self.termination.ok_or_else(|| {
+            EvolutionError::Configuration("Termination criterion must be specified".to_string())
+        })?;
+
+        Ok(SimpleGA {
+            config: self.config,
+            bounds,
+            selection,
+            crossover,
+            mutation,
+            fitness,
+            termination,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+}
+
+// Builder build() method - non-parallel version without Send + Sync bounds
+#[cfg(not(feature = "parallel"))]
+impl<G, F, S, C, M, Fit, Term> SimpleGABuilder<G, F, S, C, M, Fit, Term>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+    S: SelectionOperator<G>,
+    C: CrossoverOperator<G>,
+    M: MutationOperator<G>,
+    Fit: Fitness<Genome = G, Value = F>,
     Term: TerminationCriterion<G, F>,
 {
     /// Build the SimpleGA instance
@@ -307,6 +361,8 @@ where
     _phantom: std::marker::PhantomData<(G, F)>,
 }
 
+// Parallel version with Send + Sync bounds
+#[cfg(feature = "parallel")]
 impl<G, F, S, C, M, Fit, Term> SimpleGA<G, F, S, C, M, Fit, Term>
 where
     G: EvolutionaryGenome + Send + Sync,
@@ -495,7 +551,8 @@ where
     }
 }
 
-// Implement bounded operators version
+// Bounded operators version - parallel with Send + Sync
+#[cfg(feature = "parallel")]
 impl<G, F, S, C, M, Fit, Term> SimpleGA<G, F, S, C, M, Fit, Term>
 where
     G: EvolutionaryGenome + Send + Sync,
@@ -615,6 +672,336 @@ where
             } else {
                 new_population.evaluate(&self.fitness);
             }
+            evaluations += new_population.len()
+                - (if self.config.elitism {
+                    self.config.elite_count
+                } else {
+                    0
+                });
+
+            new_population.set_generation(population.generation() + 1);
+            population = new_population;
+
+            if let Some(best) = population.best() {
+                if best.is_better_than(&best_individual) {
+                    best_individual = best.clone();
+                }
+            }
+
+            let gen_stats =
+                GenerationStats::from_population(&population, population.generation(), evaluations);
+            fitness_history.push(gen_stats.best_fitness);
+            stats.record(gen_stats);
+        }
+
+        stats.set_runtime(start_time.elapsed());
+
+        Ok(EvolutionResult::new(
+            best_individual.genome,
+            best_individual.fitness.unwrap(),
+            population.generation(),
+            evaluations,
+        )
+        .with_stats(stats))
+    }
+}
+
+// Non-parallel version without Send + Sync bounds
+#[cfg(not(feature = "parallel"))]
+impl<G, F, S, C, M, Fit, Term> SimpleGA<G, F, S, C, M, Fit, Term>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+    S: SelectionOperator<G>,
+    C: CrossoverOperator<G>,
+    M: MutationOperator<G>,
+    Fit: Fitness<Genome = G, Value = F>,
+    Term: TerminationCriterion<G, F>,
+{
+    /// Create a builder for SimpleGA
+    pub fn builder() -> SimpleGABuilder<G, F, (), (), (), (), ()> {
+        SimpleGABuilder::new()
+    }
+
+    /// Run the genetic algorithm
+    pub fn run<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<G, F>, EvolutionError> {
+        let start_time = Instant::now();
+
+        // Initialize population
+        let mut population: Population<G, F> =
+            Population::random(self.config.population_size, &self.bounds, rng);
+
+        // Evaluate initial population (sequential only)
+        let eval_start = Instant::now();
+        population.evaluate(&self.fitness);
+        let eval_time = eval_start.elapsed();
+
+        let mut stats = EvolutionStats::new();
+        let mut evaluations = population.len();
+        let mut fitness_history: Vec<f64> = Vec::new();
+
+        // Track best individual
+        let mut best_individual = population
+            .best()
+            .ok_or(EvolutionError::EmptyPopulation)?
+            .clone();
+
+        // Record initial statistics
+        let gen_stats = GenerationStats::from_population(&population, 0, evaluations)
+            .with_timing(TimingStats::new().with_evaluation(eval_time));
+        fitness_history.push(gen_stats.best_fitness);
+        stats.record(gen_stats);
+
+        // Main evolution loop
+        loop {
+            // Check termination
+            let state = EvolutionState {
+                generation: population.generation(),
+                evaluations,
+                best_fitness: best_individual.fitness_value().to_f64(),
+                population: &population,
+                fitness_history: &fitness_history,
+            };
+
+            if self.termination.should_terminate(&state) {
+                stats.set_termination_reason(self.termination.reason());
+                break;
+            }
+
+            let gen_start = Instant::now();
+
+            // Create new generation
+            let mut new_population: Population<G, F> =
+                Population::with_capacity(self.config.population_size);
+
+            // Elitism: copy best individuals
+            if self.config.elitism {
+                let mut sorted = population.clone();
+                sorted.sort_by_fitness();
+                for i in 0..self.config.elite_count.min(sorted.len()) {
+                    new_population.push(sorted[i].clone());
+                }
+            }
+
+            // Selection pool
+            let selection_pool: Vec<(G, f64)> = population.as_fitness_pairs();
+
+            // Generate offspring
+            let _selection_start = Instant::now();
+            let mut selection_time = std::time::Duration::ZERO;
+            let mut crossover_time = std::time::Duration::ZERO;
+            let mut mutation_time = std::time::Duration::ZERO;
+
+            while new_population.len() < self.config.population_size {
+                // Selection
+                let sel_start = Instant::now();
+                let parent1_idx = self.selection.select(&selection_pool, rng);
+                let parent2_idx = self.selection.select(&selection_pool, rng);
+                selection_time += sel_start.elapsed();
+
+                let parent1 = &selection_pool[parent1_idx].0;
+                let parent2 = &selection_pool[parent2_idx].0;
+
+                // Crossover
+                let cross_start = Instant::now();
+                let (mut child1, mut child2) =
+                    if rng.gen::<f64>() < self.config.crossover_probability {
+                        match self.crossover.crossover(parent1, parent2, rng).genome() {
+                            Some((c1, c2)) => (c1, c2),
+                            None => (parent1.clone(), parent2.clone()),
+                        }
+                    } else {
+                        (parent1.clone(), parent2.clone())
+                    };
+                crossover_time += cross_start.elapsed();
+
+                // Mutation
+                let mut_start = Instant::now();
+                self.mutation.mutate(&mut child1, rng);
+                self.mutation.mutate(&mut child2, rng);
+                mutation_time += mut_start.elapsed();
+
+                // Add to new population
+                new_population.push(Individual::with_generation(
+                    child1,
+                    population.generation() + 1,
+                ));
+                if new_population.len() < self.config.population_size {
+                    new_population.push(Individual::with_generation(
+                        child2,
+                        population.generation() + 1,
+                    ));
+                }
+            }
+
+            // Truncate to exact size
+            while new_population.len() > self.config.population_size {
+                new_population.pop();
+            }
+
+            // Evaluate new population (sequential only)
+            let eval_start = Instant::now();
+            new_population.evaluate(&self.fitness);
+            let eval_time = eval_start.elapsed();
+            evaluations += new_population.len()
+                - (if self.config.elitism {
+                    self.config.elite_count
+                } else {
+                    0
+                });
+
+            // Update generation counter
+            new_population.set_generation(population.generation() + 1);
+            population = new_population;
+
+            // Update best individual
+            if let Some(best) = population.best() {
+                if best.is_better_than(&best_individual) {
+                    best_individual = best.clone();
+                }
+            }
+
+            // Record statistics
+            let timing = TimingStats::new()
+                .with_selection(selection_time)
+                .with_crossover(crossover_time)
+                .with_mutation(mutation_time)
+                .with_evaluation(eval_time)
+                .with_total(gen_start.elapsed());
+
+            let gen_stats =
+                GenerationStats::from_population(&population, population.generation(), evaluations)
+                    .with_timing(timing);
+            fitness_history.push(gen_stats.best_fitness);
+            stats.record(gen_stats);
+        }
+
+        stats.set_runtime(start_time.elapsed());
+
+        Ok(EvolutionResult::new(
+            best_individual.genome,
+            best_individual.fitness.unwrap(),
+            population.generation(),
+            evaluations,
+        )
+        .with_stats(stats))
+    }
+}
+
+// Bounded operators version - non-parallel without Send + Sync
+#[cfg(not(feature = "parallel"))]
+impl<G, F, S, C, M, Fit, Term> SimpleGA<G, F, S, C, M, Fit, Term>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+    S: SelectionOperator<G>,
+    C: BoundedCrossoverOperator<G>,
+    M: BoundedMutationOperator<G>,
+    Fit: Fitness<Genome = G, Value = F>,
+    Term: TerminationCriterion<G, F>,
+{
+    /// Run the genetic algorithm with bounded operators
+    pub fn run_bounded<R: Rng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<EvolutionResult<G, F>, EvolutionError> {
+        let start_time = Instant::now();
+
+        // Initialize population
+        let mut population: Population<G, F> =
+            Population::random(self.config.population_size, &self.bounds, rng);
+
+        // Evaluate initial population (sequential only)
+        population.evaluate(&self.fitness);
+
+        let mut stats = EvolutionStats::new();
+        let mut evaluations = population.len();
+        let mut fitness_history: Vec<f64> = Vec::new();
+
+        // Track best individual
+        let mut best_individual = population
+            .best()
+            .ok_or(EvolutionError::EmptyPopulation)?
+            .clone();
+
+        // Record initial statistics
+        let gen_stats = GenerationStats::from_population(&population, 0, evaluations);
+        fitness_history.push(gen_stats.best_fitness);
+        stats.record(gen_stats);
+
+        // Main evolution loop
+        loop {
+            // Check termination
+            let state = EvolutionState {
+                generation: population.generation(),
+                evaluations,
+                best_fitness: best_individual.fitness_value().to_f64(),
+                population: &population,
+                fitness_history: &fitness_history,
+            };
+
+            if self.termination.should_terminate(&state) {
+                stats.set_termination_reason(self.termination.reason());
+                break;
+            }
+
+            // Create new generation
+            let mut new_population: Population<G, F> =
+                Population::with_capacity(self.config.population_size);
+
+            // Elitism
+            if self.config.elitism {
+                let mut sorted = population.clone();
+                sorted.sort_by_fitness();
+                for i in 0..self.config.elite_count.min(sorted.len()) {
+                    new_population.push(sorted[i].clone());
+                }
+            }
+
+            let selection_pool: Vec<(G, f64)> = population.as_fitness_pairs();
+
+            while new_population.len() < self.config.population_size {
+                let parent1_idx = self.selection.select(&selection_pool, rng);
+                let parent2_idx = self.selection.select(&selection_pool, rng);
+
+                let parent1 = &selection_pool[parent1_idx].0;
+                let parent2 = &selection_pool[parent2_idx].0;
+
+                let (mut child1, mut child2) =
+                    if rng.gen::<f64>() < self.config.crossover_probability {
+                        match self
+                            .crossover
+                            .crossover_bounded(parent1, parent2, &self.bounds, rng)
+                            .genome()
+                        {
+                            Some((c1, c2)) => (c1, c2),
+                            None => (parent1.clone(), parent2.clone()),
+                        }
+                    } else {
+                        (parent1.clone(), parent2.clone())
+                    };
+
+                self.mutation.mutate_bounded(&mut child1, &self.bounds, rng);
+                self.mutation.mutate_bounded(&mut child2, &self.bounds, rng);
+
+                new_population.push(Individual::with_generation(
+                    child1,
+                    population.generation() + 1,
+                ));
+                if new_population.len() < self.config.population_size {
+                    new_population.push(Individual::with_generation(
+                        child2,
+                        population.generation() + 1,
+                    ));
+                }
+            }
+
+            while new_population.len() > self.config.population_size {
+                new_population.pop();
+            }
+
+            // Evaluate (sequential only)
+            new_population.evaluate(&self.fitness);
             evaluations += new_population.len()
                 - (if self.config.elitism {
                     self.config.elite_count

@@ -150,7 +150,36 @@ impl FitnessValue for ParetoFitness {
 /// Fitness evaluation trait
 ///
 /// Defines how to evaluate the fitness of a genome.
+#[cfg(feature = "parallel")]
 pub trait Fitness: Send + Sync {
+    /// The genome type being evaluated
+    type Genome: EvolutionaryGenome;
+
+    /// The fitness value type
+    type Value: FitnessValue;
+
+    /// Evaluate fitness (higher = better by convention)
+    fn evaluate(&self, genome: &Self::Genome) -> Self::Value;
+
+    /// Convert fitness to log-likelihood for probabilistic selection
+    ///
+    /// Uses Boltzmann distribution: P(x) ∝ exp(f(x) / T)
+    fn as_log_likelihood(&self, genome: &Self::Genome, temperature: f64) -> f64 {
+        let fitness = self.evaluate(genome).to_f64();
+        fitness / temperature
+    }
+
+    /// Optional: Provide gradient for gradient-assisted mutation
+    fn gradient(&self, _genome: &Self::Genome) -> Option<Vec<f64>> {
+        None
+    }
+}
+
+/// Fitness evaluation trait (non-parallel version)
+///
+/// Defines how to evaluate the fitness of a genome.
+#[cfg(not(feature = "parallel"))]
+pub trait Fitness {
     /// The genome type being evaluated
     type Genome: EvolutionaryGenome;
 

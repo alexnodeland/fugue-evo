@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>fugue-evo WASM Demo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #4a90d9;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #4a90d9;
+            margin-top: 30px;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #4a90d9;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover {
+            background: #357abd;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .output {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+        .status {
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .status.loading {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status.ready {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        label {
+            display: block;
+            margin: 10px 0 5px;
+            font-weight: 500;
+        }
+        input, select {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        input[type="number"] {
+            width: 100px;
+        }
+        .param-group {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .highlight {
+            color: #4ec9b0;
+        }
+        .number {
+            color: #b5cea8;
+        }
+    </style>
+</head>
+<body>
+    <h1>fugue-evo WASM Demo</h1>
+
+    <div id="status" class="status loading">Loading WASM module...</div>
+
+    <!-- Real Vector Optimization -->
+    <div class="card">
+        <h2>Real Vector Optimization</h2>
+        <p>Minimize benchmark functions using genetic algorithms.</p>
+
+        <div class="param-group">
+            <div>
+                <label>Dimensions:</label>
+                <input type="number" id="rv-dims" value="10" min="1" max="100">
+            </div>
+            <div>
+                <label>Population Size:</label>
+                <input type="number" id="rv-pop" value="100" min="10" max="1000">
+            </div>
+            <div>
+                <label>Generations:</label>
+                <input type="number" id="rv-gens" value="100" min="10" max="1000">
+            </div>
+            <div>
+                <label>Fitness Function:</label>
+                <select id="rv-fitness">
+                    <option value="sphere">Sphere</option>
+                    <option value="rastrigin">Rastrigin</option>
+                    <option value="rosenbrock">Rosenbrock</option>
+                    <option value="ackley">Ackley</option>
+                    <option value="griewank">Griewank</option>
+                    <option value="schwefel">Schwefel</option>
+                    <option value="levy">Levy</option>
+                    <option value="dixon-price">Dixon-Price</option>
+                    <option value="styblinski-tang">Styblinski-Tang</option>
+                </select>
+            </div>
+        </div>
+
+        <button id="btn-rv-optimize" disabled>Run Optimization</button>
+        <button id="btn-rv-custom" disabled>Custom Fitness</button>
+
+        <div id="rv-output" class="output">Results will appear here...</div>
+    </div>
+
+    <!-- CMA-ES Optimization -->
+    <div class="card">
+        <h2>CMA-ES Optimization</h2>
+        <p>Covariance Matrix Adaptation Evolution Strategy for continuous optimization.</p>
+
+        <div class="param-group">
+            <div>
+                <label>Dimensions:</label>
+                <input type="number" id="cma-dims" value="5" min="1" max="50">
+            </div>
+            <div>
+                <label>Generations:</label>
+                <input type="number" id="cma-gens" value="200" min="10" max="1000">
+            </div>
+            <div>
+                <label>Initial Sigma:</label>
+                <input type="number" id="cma-sigma" value="0.5" min="0.01" max="5" step="0.1">
+            </div>
+        </div>
+
+        <button id="btn-cma-optimize" disabled>Run CMA-ES</button>
+
+        <div id="cma-output" class="output">Results will appear here...</div>
+    </div>
+
+    <!-- NSGA-II Multi-Objective -->
+    <div class="card">
+        <h2>NSGA-II Multi-Objective Optimization</h2>
+        <p>Non-dominated Sorting Genetic Algorithm for multi-objective problems.</p>
+
+        <div class="param-group">
+            <div>
+                <label>Dimensions:</label>
+                <input type="number" id="nsga-dims" value="5" min="1" max="20">
+            </div>
+            <div>
+                <label>Population Size:</label>
+                <input type="number" id="nsga-pop" value="50" min="20" max="500">
+            </div>
+            <div>
+                <label>Generations:</label>
+                <input type="number" id="nsga-gens" value="100" min="10" max="500">
+            </div>
+        </div>
+
+        <button id="btn-nsga-optimize" disabled>Run NSGA-II</button>
+        <button id="btn-nsga-zdt" disabled>Run ZDT1 Benchmark</button>
+
+        <div id="nsga-output" class="output">Results will appear here...</div>
+    </div>
+
+    <!-- UMDA Optimization -->
+    <div class="card">
+        <h2>UMDA (Estimation of Distribution)</h2>
+        <p>Univariate Marginal Distribution Algorithm - uses probability distributions instead of crossover/mutation.</p>
+
+        <div class="param-group">
+            <div>
+                <label>Dimensions:</label>
+                <input type="number" id="umda-dims" value="5" min="1" max="50">
+            </div>
+            <div>
+                <label>Population Size:</label>
+                <input type="number" id="umda-pop" value="100" min="20" max="500">
+            </div>
+            <div>
+                <label>Generations:</label>
+                <input type="number" id="umda-gens" value="100" min="10" max="500">
+            </div>
+            <div>
+                <label>Selection Ratio:</label>
+                <input type="number" id="umda-sel" value="0.5" min="0.1" max="0.9" step="0.1">
+            </div>
+        </div>
+
+        <button id="btn-umda-optimize" disabled>Run UMDA</button>
+
+        <div id="umda-output" class="output">Results will appear here...</div>
+    </div>
+
+    <!-- BitString Optimization -->
+    <div class="card">
+        <h2>BitString Optimization</h2>
+        <p>Discrete optimization with binary genomes.</p>
+
+        <div class="param-group">
+            <div>
+                <label>Length:</label>
+                <input type="number" id="bit-len" value="50" min="10" max="200">
+            </div>
+            <div>
+                <label>Population Size:</label>
+                <input type="number" id="bit-pop" value="100" min="20" max="500">
+            </div>
+            <div>
+                <label>Generations:</label>
+                <input type="number" id="bit-gens" value="100" min="10" max="500">
+            </div>
+            <div>
+                <label>Problem:</label>
+                <select id="bit-problem">
+                    <option value="onemax">OneMax</option>
+                    <option value="leadingones">LeadingOnes</option>
+                    <option value="royalroad">Royal Road (8-block)</option>
+                </select>
+            </div>
+        </div>
+
+        <button id="btn-bit-optimize" disabled>Run Optimization</button>
+
+        <div id="bit-output" class="output">Results will appear here...</div>
+    </div>
+
+    <!-- Interactive Evolution Demo -->
+    <div class="card">
+        <h2>Interactive Evolution (Demo)</h2>
+        <p>Human-in-the-loop optimization with simulated user feedback.</p>
+
+        <div class="param-group">
+            <div>
+                <label>Dimensions:</label>
+                <input type="number" id="iga-dims" value="3" min="1" max="10">
+            </div>
+            <div>
+                <label>Population Size:</label>
+                <input type="number" id="iga-pop" value="8" min="4" max="20">
+            </div>
+            <div>
+                <label>Evaluation Mode:</label>
+                <select id="iga-mode">
+                    <option value="rating">Rating</option>
+                    <option value="pairwise">Pairwise Comparison</option>
+                    <option value="batch">Batch Selection</option>
+                </select>
+            </div>
+        </div>
+
+        <button id="btn-iga-run" disabled>Run Interactive Demo</button>
+
+        <div id="iga-output" class="output">Results will appear here...</div>
+    </div>
+
+    <script type="module">
+        import init, {
+            RealVectorOptimizer,
+            Nsga2Optimizer,
+            InteractiveOptimizer,
+            UmdaOptimizer,
+            BitStringOptimizer,
+            ZdtProblem,
+            version
+        } from '../pkg/fugue_evo_wasm.js';
+
+        let wasmReady = false;
+
+        // Initialize WASM
+        async function initWasm() {
+            try {
+                await init();
+                wasmReady = true;
+                document.getElementById('status').className = 'status ready';
+                document.getElementById('status').textContent = `WASM loaded successfully! (v${version()})`;
+
+                // Enable all buttons
+                document.querySelectorAll('button').forEach(btn => btn.disabled = false);
+            } catch (e) {
+                document.getElementById('status').className = 'status error';
+                document.getElementById('status').textContent = `Error loading WASM: ${e.message}`;
+                console.error(e);
+            }
+        }
+
+        // Format number for display
+        function formatNum(n) {
+            if (Math.abs(n) < 0.0001 || Math.abs(n) > 10000) {
+                return n.toExponential(4);
+            }
+            return n.toFixed(6);
+        }
+
+        // Real Vector Optimization
+        document.getElementById('btn-rv-optimize').addEventListener('click', () => {
+            const dims = parseInt(document.getElementById('rv-dims').value);
+            const popSize = parseInt(document.getElementById('rv-pop').value);
+            const gens = parseInt(document.getElementById('rv-gens').value);
+            const fitness = document.getElementById('rv-fitness').value;
+            const output = document.getElementById('rv-output');
+
+            try {
+                const optimizer = new RealVectorOptimizer(dims);
+                optimizer.setPopulationSize(popSize);
+                optimizer.setBounds(-5.12, 5.12);
+                optimizer.setFitness(fitness);
+
+                const start = performance.now();
+                const result = optimizer.optimize(gens);
+                const elapsed = performance.now() - start;
+
+                output.innerHTML = `<span class="highlight">Optimization Complete!</span>
+
+Fitness Function: ${fitness}
+Dimensions: ${dims}
+Population: ${popSize}
+Generations: ${gens}
+
+<span class="highlight">Best Fitness:</span> <span class="number">${formatNum(result.best_fitness)}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Best Solution:</span>
+[${result.best_genome.slice(0, 5).map(formatNum).join(', ')}${dims > 5 ? ', ...' : ''}]`;
+
+                optimizer.free();
+            } catch (e) {
+                output.textContent = `Error: ${e.message}`;
+            }
+        });
+
+        // Custom fitness function
+        document.getElementById('btn-rv-custom').addEventListener('click', () => {
+            const dims = parseInt(document.getElementById('rv-dims').value);
+            const popSize = parseInt(document.getElementById('rv-pop').value);
+            const gens = parseInt(document.getElementById('rv-gens').value);
+            const output = document.getElementById('rv-output');
+
+            try {
+                const optimizer = new RealVectorOptimizer(dims);
+                optimizer.setPopulationSize(popSize);
+                optimizer.setBounds(-10, 10);
+
+                // Custom fitness: sum of absolute values (minimum at origin)
+                optimizer.setCustomFitness((genome) => {
+                    return genome.reduce((sum, x) => sum + Math.abs(x), 0);
+                });
+
+                const start = performance.now();
+                const result = optimizer.optimize(gens);
+                const elapsed = performance.now() - start;
+
+                output.innerHTML = `<span class="highlight">Custom Fitness Optimization Complete!</span>
+
+Custom Function: sum(|x_i|)
+Dimensions: ${dims}
+
+<span class="highlight">Best Fitness:</span> <span class="number">${formatNum(result.best_fitness)}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Best Solution:</span>
+[${result.best_genome.slice(0, 5).map(formatNum).join(', ')}${dims > 5 ? ', ...' : ''}]`;
+
+                optimizer.free();
+            } catch (e) {
+                output.textContent = `Error: ${e.message}`;
+            }
+        });
+
+        // CMA-ES Optimization
+        document.getElementById('btn-cma-optimize').addEventListener('click', () => {
+            const dims = parseInt(document.getElementById('cma-dims').value);
+            const gens = parseInt(document.getElementById('cma-gens').value);
+            const sigma = parseFloat(document.getElementById('cma-sigma').value);
+            const output = document.getElementById('cma-output');
+
+            try {
+                const optimizer = new CmaEsOptimizer(dims);
+                optimizer.setSigma(sigma);
+
+                // Rastrigin function via custom fitness
+                optimizer.setCustomFitness((x) => {
+                    const A = 10;
+                    let sum = A * x.length;
+                    for (let i = 0; i < x.length; i++) {
+                        sum += x[i] * x[i] - A * Math.cos(2 * Math.PI * x[i]);
+                    }
+                    return sum;
+                });
+
+                const start = performance.now();
+                const result = optimizer.optimize(gens);
+                const elapsed = performance.now() - start;
+
+                output.innerHTML = `<span class="highlight">CMA-ES Optimization Complete!</span>
+
+Fitness: Rastrigin (optimum = 0)
+Dimensions: ${dims}
+Initial Sigma: ${sigma}
+Generations: ${gens}
+
+<span class="highlight">Best Fitness:</span> <span class="number">${formatNum(result.best_fitness)}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Best Solution:</span>
+[${result.best_genome.map(formatNum).join(', ')}]`;
+
+                optimizer.free();
+            } catch (e) {
+                output.textContent = `Error: ${e.message}`;
+            }
+        });
+
+        // NSGA-II Multi-Objective
+        document.getElementById('btn-nsga-optimize').addEventListener('click', () => {
+            const dims = parseInt(document.getElementById('nsga-dims').value);
+            const popSize = parseInt(document.getElementById('nsga-pop').value);
+            const gens = parseInt(document.getElementById('nsga-gens').value);
+            const output = document.getElementById('nsga-output');
+
+            try {
+                const optimizer = new Nsga2Optimizer(dims);
+                optimizer.setPopulationSize(popSize);
+                optimizer.setBounds(-5, 5);
+
+                // Two objectives: sphere and shifted sphere
+                optimizer.setObjectives([
+                    (x) => x.reduce((sum, xi) => sum + xi * xi, 0),
+                    (x) => x.reduce((sum, xi) => sum + (xi - 2) * (xi - 2), 0)
+                ]);
+
+                const start = performance.now();
+                const result = optimizer.optimize(gens);
+                const elapsed = performance.now() - start;
+
+                const paretoSize = result.pareto_front.length;
+                output.innerHTML = `<span class="highlight">NSGA-II Optimization Complete!</span>
+
+Objectives: sphere(x), sphere(x-2)
+Dimensions: ${dims}
+Population: ${popSize}
+Generations: ${gens}
+
+<span class="highlight">Pareto Front Size:</span> <span class="number">${paretoSize}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Sample Pareto Solutions (first 3):</span>
+${result.pareto_front.slice(0, 3).map((sol, i) =>
+    `  [${i+1}] f1=${formatNum(sol.objectives[0])}, f2=${formatNum(sol.objectives[1])}`
+).join('\n')}`;
+
+                optimizer.free();
+            } catch (e) {
+                output.textContent = `Error: ${e.message}`;
+            }
+        });
+
+        // Interactive Evolution Demo
+        document.getElementById('btn-iga-run').addEventListener('click', () => {
+            const dims = parseInt(document.getElementById('iga-dims').value);
+            const popSize = parseInt(document.getElementById('iga-pop').value);
+            const modeStr = document.getElementById('iga-mode').value;
+            const output = document.getElementById('iga-output');
+
+            try {
+                // Map mode string to enum
+                let mode;
+                if (modeStr === 'rating') mode = 0;
+                else if (modeStr === 'pairwise') mode = 1;
+                else mode = 2;
+
+                const optimizer = InteractiveOptimizer.withConfig(dims, popSize, mode);
+                optimizer.setBounds(-5, 5);
+
+                let steps = 0;
+                let generations = 0;
+                const maxSteps = 100;
+
+                output.innerHTML = `<span class="highlight">Running Interactive Evolution Demo...</span>\n`;
+
+                // Simulated optimization loop
+                while (steps < maxSteps) {
+                    const stepResult = optimizer.step();
+                    steps++;
+
+                    if (stepResult.result_type === 'complete') {
+                        output.innerHTML += `\n<span class="highlight">Evolution Complete!</span>
+Generations: ${generations}
+Steps: ${steps}
+
+<span class="highlight">Best Solution:</span>
+[${stepResult.best_genome.map(formatNum).join(', ')}]`;
+                        break;
+                    }
+
+                    if (stepResult.result_type === 'generation_complete') {
+                        generations++;
+                        if (generations >= 5) {
+                            // Stop after 5 generations for demo
+                            output.innerHTML += `\n<span class="highlight">Demo stopped after ${generations} generations</span>
+Steps: ${steps}
+
+<span class="highlight">Current Best:</span>
+[${stepResult.best_genome.map(formatNum).join(', ')}]`;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    // Provide simulated user feedback
+                    const request = stepResult.request;
+                    if (request) {
+                        if (request.request_type === 'rating') {
+                            // Simulate rating based on distance to origin
+                            const ratings = request.candidates.map(c => {
+                                const dist = Math.sqrt(c.genome.reduce((s, x) => s + x*x, 0));
+                                return Math.max(1, Math.min(5, 5 - dist));
+                            });
+                            optimizer.provideRatings(ratings);
+                        } else if (request.request_type === 'pairwise') {
+                            // Pick the one closer to origin
+                            const c1 = request.candidates[0];
+                            const c2 = request.candidates[1];
+                            const d1 = c1.genome.reduce((s, x) => s + x*x, 0);
+                            const d2 = c2.genome.reduce((s, x) => s + x*x, 0);
+                            optimizer.providePairwiseChoice(d1 <= d2 ? c1.id : c2.id);
+                        } else {
+                            // Batch: select top half closest to origin
+                            const sorted = [...request.candidates].sort((a, b) => {
+                                const da = a.genome.reduce((s, x) => s + x*x, 0);
+                                const db = b.genome.reduce((s, x) => s + x*x, 0);
+                                return da - db;
+                            });
+                            const selectCount = Math.ceil(sorted.length / 2);
+                            optimizer.provideBatchSelection(sorted.slice(0, selectCount).map(c => c.id));
+                        }
+                    }
+                }
+
+                optimizer.free();
+            } catch (e) {
+                output.textContent = `Error: ${e.message}`;
+                console.error(e);
+            }
+        });
+
+        // NSGA-II ZDT1 Benchmark
+        document.getElementById('btn-nsga-zdt').addEventListener('click', () => {
+            const dims = parseInt(document.getElementById('nsga-dims').value);
+            const popSize = parseInt(document.getElementById('nsga-pop').value);
+            const gens = parseInt(document.getElementById('nsga-gens').value);
+            const output = document.getElementById('nsga-output');
+
+            try {
+                const optimizer = new Nsga2Optimizer(dims, 2);
+                optimizer.setPopulationSize(popSize);
+                optimizer.setMaxGenerations(gens);
+
+                const start = performance.now();
+                const result = optimizer.optimizeZdt(ZdtProblem.Zdt1);
+                const elapsed = performance.now() - start;
+
+                output.innerHTML = `<span class="highlight">ZDT1 Benchmark Complete!</span>
+
+ZDT1: Convex Pareto front
+Dimensions: ${dims}
+Population: ${popSize}
+Generations: ${gens}
+
+<span class="highlight">Pareto Front Size:</span> <span class="number">${result.frontSize}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Sample Pareto Solutions:</span>
+${Array.from({length: Math.min(3, result.frontSize)}, (_, i) => {
+    const sol = result.getSolution(i);
+    return `  [${i+1}] f1=${formatNum(sol.objectives[0])}, f2=${formatNum(sol.objectives[1])}`;
+}).join('\n')}`;
+
+                optimizer.free();
+            } catch (e) {
+                output.textContent = `Error: ${e.message}`;
+                console.error(e);
+            }
+        });
+
+        // UMDA Optimization
+        document.getElementById('btn-umda-optimize').addEventListener('click', () => {
+            const dims = parseInt(document.getElementById('umda-dims').value);
+            const popSize = parseInt(document.getElementById('umda-pop').value);
+            const gens = parseInt(document.getElementById('umda-gens').value);
+            const selRatio = parseFloat(document.getElementById('umda-sel').value);
+            const output = document.getElementById('umda-output');
+
+            try {
+                const optimizer = new UmdaOptimizer(dims);
+                optimizer.setPopulationSize(popSize);
+                optimizer.setMaxGenerations(gens);
+                optimizer.setSelectionRatio(selRatio);
+                optimizer.setBounds(-5.12, 5.12);
+
+                const start = performance.now();
+                const result = optimizer.optimize("sphere");
+                const elapsed = performance.now() - start;
+
+                output.innerHTML = `<span class="highlight">UMDA Optimization Complete!</span>
+
+Fitness: Sphere (optimum = 0)
+Dimensions: ${dims}
+Population: ${popSize}
+Generations: ${gens}
+Selection Ratio: ${selRatio}
+
+<span class="highlight">Best Fitness:</span> <span class="number">${formatNum(result.bestFitness)}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Best Solution:</span>
+[${result.bestGenome.slice(0, 5).map(formatNum).join(', ')}${dims > 5 ? ', ...' : ''}]`;
+
+                optimizer.free();
+            } catch (e) {
+                output.textContent = `Error: ${e.message}`;
+                console.error(e);
+            }
+        });
+
+        // BitString Optimization
+        document.getElementById('btn-bit-optimize').addEventListener('click', () => {
+            const len = parseInt(document.getElementById('bit-len').value);
+            const popSize = parseInt(document.getElementById('bit-pop').value);
+            const gens = parseInt(document.getElementById('bit-gens').value);
+            const problem = document.getElementById('bit-problem').value;
+            const output = document.getElementById('bit-output');
+
+            try {
+                const optimizer = new BitStringOptimizer(len);
+                optimizer.setPopulationSize(popSize);
+                optimizer.setMaxGenerations(gens);
+
+                const start = performance.now();
+                let result;
+                let problemName;
+
+                if (problem === 'onemax') {
+                    result = optimizer.solveOneMax();
+                    problemName = 'OneMax';
+                } else if (problem === 'leadingones') {
+                    result = optimizer.solveLeadingOnes();
+                    problemName = 'LeadingOnes';
+                } else {
+                    result = optimizer.solveRoyalRoad(8);
+                    problemName = 'Royal Road (8-block)';
+                }
+
+                const elapsed = performance.now() - start;
+
+                output.innerHTML = `<span class="highlight">BitString Optimization Complete!</span>
+
+Problem: ${problemName}
+Length: ${len}
+Population: ${popSize}
+Generations: ${gens}
+
+<span class="highlight">Best Fitness:</span> <span class="number">${result.bestFitness}</span>
+<span class="highlight">Time:</span> <span class="number">${elapsed.toFixed(2)}ms</span>
+
+<span class="highlight">Best Solution (first 50 bits):</span>
+${result.bestGenomeString().slice(0, 50)}${len > 50 ? '...' : ''}`;
+
+                optimizer.free();
+            } catch (e) {
+                output.textContent = `Error: ${e.message}`;
+                console.error(e);
+            }
+        });
+
+        // Initialize on load
+        initWasm();
+    </script>
+</body>
+</html>

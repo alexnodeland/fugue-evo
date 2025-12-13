@@ -2,6 +2,8 @@
 //!
 //! Implements a distributed evolutionary algorithm where multiple populations
 //! (islands) evolve independently with periodic migration of individuals.
+//!
+//! Note: This module requires the `parallel` feature to be enabled.
 
 use rand::SeedableRng;
 use rayon::prelude::*;
