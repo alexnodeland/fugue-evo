@@ -371,6 +371,45 @@ impl InteractiveOptimizer {
         Self { iga, rng }
     }
 
+    /// Create with extended configuration
+    #[wasm_bindgen(js_name = withExtendedConfig)]
+    pub fn with_extended_config(
+        dimension: usize,
+        population_size: usize,
+        evaluation_mode: WasmEvaluationMode,
+        batch_size: usize,
+        select_count: usize,
+        max_generations: usize,
+        elitism_count: usize,
+        min_coverage: f64,
+        crossover_probability: f64,
+        mutation_probability: f64,
+        lower_bound: f64,
+        upper_bound: f64,
+    ) -> Self {
+        let mut config = InteractiveGAConfig::default();
+        config.population_size = population_size;
+        config.evaluation_mode = evaluation_mode.into();
+        config.batch_size = batch_size;
+        config.select_count = select_count;
+        config.max_generations = max_generations;
+        config.elitism_count = elitism_count;
+        config.min_coverage = min_coverage.clamp(0.0, 1.0);
+        config.crossover_probability = crossover_probability.clamp(0.0, 1.0);
+        config.mutation_probability = mutation_probability.clamp(0.0, 1.0);
+
+        use fugue_evo::genome::bounds::Bounds;
+        let bounds = MultiBounds::uniform(Bounds::new(lower_bound, upper_bound), dimension);
+        let selection = TournamentSelection::new(2);
+        let crossover = SbxCrossover::new(15.0);
+        let mutation = PolynomialMutation::new(20.0);
+
+        let iga = InteractiveGA::new(config, Some(bounds), selection, crossover, mutation);
+        let rng = rand::rngs::StdRng::from_entropy();
+
+        Self { iga, rng }
+    }
+
     /// Set the random seed
     #[wasm_bindgen(js_name = setSeed)]
     pub fn set_seed(&mut self, seed: u64) {
