@@ -327,4 +327,174 @@ mod tests {
             panic!("Expected CmaEs state");
         }
     }
+
+    #[test]
+    fn test_checkpoint_with_methods() {
+        let population: Vec<Individual<RealVector>> =
+            vec![Individual::new(RealVector::new(vec![1.0, 2.0]))];
+        let best = Individual::with_fitness(RealVector::new(vec![0.5, 0.5]), 10.0);
+
+        let checkpoint = Checkpoint::new(5, population)
+            .with_evaluations(500)
+            .with_best(best.clone())
+            .with_algorithm_state(AlgorithmState::SteadyState {
+                replacement_count: 10,
+            })
+            .with_metadata("run_id", "test123")
+            .with_rng_state(vec![1, 2, 3, 4]);
+
+        assert_eq!(checkpoint.evaluations, 500);
+        assert!(checkpoint.best.is_some());
+        assert_eq!(
+            checkpoint.metadata.get("run_id"),
+            Some(&"test123".to_string())
+        );
+        assert!(checkpoint.rng_state.is_some());
+    }
+
+    #[test]
+    fn test_checkpoint_with_hyperparameters() {
+        let population: Vec<Individual<RealVector>> = vec![];
+        let hp_state = HyperparameterState {
+            mutation_rate_posterior: Some((2.0, 8.0)),
+            crossover_prob_posterior: Some((5.0, 5.0)),
+            ..Default::default()
+        };
+
+        let checkpoint = Checkpoint::new(0, population).with_hyperparameter_state(hp_state);
+
+        assert!(checkpoint.hyperparameter_state.is_some());
+        let hp = checkpoint.hyperparameter_state.unwrap();
+        assert_eq!(hp.mutation_rate_posterior, Some((2.0, 8.0)));
+    }
+
+    #[test]
+    fn test_checkpoint_with_statistics() {
+        use crate::diagnostics::{GenerationStats, TimingStats};
+
+        let population: Vec<Individual<RealVector>> = vec![];
+        let stats = vec![
+            GenerationStats {
+                generation: 0,
+                evaluations: 100,
+                best_fitness: 10.0,
+                worst_fitness: 1.0,
+                mean_fitness: 5.0,
+                median_fitness: 5.0,
+                fitness_std: 2.0,
+                diversity: 0.5,
+                timing: TimingStats::default(),
+            },
+            GenerationStats {
+                generation: 1,
+                evaluations: 200,
+                best_fitness: 15.0,
+                worst_fitness: 2.0,
+                mean_fitness: 7.0,
+                median_fitness: 7.0,
+                fitness_std: 1.5,
+                diversity: 0.4,
+                timing: TimingStats::default(),
+            },
+        ];
+
+        let checkpoint = Checkpoint::new(2, population).with_statistics(stats.clone());
+
+        assert_eq!(checkpoint.statistics.len(), 2);
+    }
+
+    #[test]
+    fn test_checkpoint_version() {
+        let population: Vec<Individual<RealVector>> = vec![];
+        let checkpoint = Checkpoint::new(0, population);
+
+        assert_eq!(checkpoint.version(), CHECKPOINT_VERSION);
+    }
+
+    #[test]
+    fn test_checkpoint_builder_full() {
+        use crate::diagnostics::{GenerationStats, TimingStats};
+
+        let population: Vec<Individual<RealVector>> =
+            vec![Individual::new(RealVector::new(vec![1.0]))];
+        let best = Individual::with_fitness(RealVector::new(vec![0.0]), 100.0);
+        let hp_state = HyperparameterState::default();
+        let stats = vec![GenerationStats {
+            generation: 0,
+            evaluations: 100,
+            best_fitness: 100.0,
+            worst_fitness: 10.0,
+            mean_fitness: 50.0,
+            median_fitness: 50.0,
+            fitness_std: 10.0,
+            diversity: 0.5,
+            timing: TimingStats::default(),
+        }];
+
+        let checkpoint = CheckpointBuilder::new(10, population)
+            .evaluations(5000)
+            .best(best)
+            .algorithm_state(AlgorithmState::Nsga2 {
+                pareto_front_indices: vec![0, 1, 2],
+            })
+            .hyperparameters(hp_state)
+            .statistics(stats)
+            .metadata("version", "1.0")
+            .rng_state(vec![0, 1, 2, 3])
+            .build();
+
+        assert_eq!(checkpoint.generation, 10);
+        assert_eq!(checkpoint.evaluations, 5000);
+        assert!(checkpoint.best.is_some());
+        assert!(checkpoint.hyperparameter_state.is_some());
+        assert_eq!(checkpoint.statistics.len(), 1);
+        assert!(checkpoint.rng_state.is_some());
+    }
+
+    #[test]
+    fn test_algorithm_state_variants() {
+        // Test all algorithm state variants
+        let simple_ga = AlgorithmState::SimpleGA;
+        let steady_state = AlgorithmState::SteadyState {
+            replacement_count: 5,
+        };
+        let nsga2 = AlgorithmState::Nsga2 {
+            pareto_front_indices: vec![0, 1],
+        };
+        let hbga = AlgorithmState::Hbga {
+            population_params: vec![1.0, 2.0],
+            temperature: 1.5,
+        };
+        let island = AlgorithmState::Island {
+            island_populations: vec![vec![0, 1], vec![2, 3]],
+            migration_count: 3,
+        };
+        let interactive = AlgorithmState::Interactive {
+            aggregator_state: "{}".to_string(),
+            pending_evaluations: 10,
+            evaluation_mode: "pairwise".to_string(),
+        };
+        let custom = AlgorithmState::Custom("custom_state".to_string());
+
+        // Verify they're all different variants (pattern matching)
+        assert!(matches!(simple_ga, AlgorithmState::SimpleGA));
+        assert!(matches!(steady_state, AlgorithmState::SteadyState { .. }));
+        assert!(matches!(nsga2, AlgorithmState::Nsga2 { .. }));
+        assert!(matches!(hbga, AlgorithmState::Hbga { .. }));
+        assert!(matches!(island, AlgorithmState::Island { .. }));
+        assert!(matches!(interactive, AlgorithmState::Interactive { .. }));
+        assert!(matches!(custom, AlgorithmState::Custom(_)));
+    }
+
+    #[test]
+    fn test_hyperparameter_state_default() {
+        let hp = HyperparameterState::default();
+
+        assert!(hp.mutation_rate_posterior.is_none());
+        assert!(hp.crossover_prob_posterior.is_none());
+        assert!(hp.temperature_posterior.is_none());
+        assert!(hp.step_size_posteriors.is_empty());
+        assert!(hp.operator_weights.is_empty());
+        assert_eq!(hp.history_size, 100);
+    }
 }
