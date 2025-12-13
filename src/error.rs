@@ -58,9 +58,15 @@ pub enum OperatorError {
 /// Error type for checkpoint operations
 #[derive(Debug, Error)]
 pub enum CheckpointError {
-    /// IO error during checkpoint
+    /// IO error during checkpoint (native only)
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Storage error (WASM-compatible alternative to IO)
+    #[cfg(target_arch = "wasm32")]
+    #[error("Storage error: {0}")]
+    Storage(String),
 
     /// Serialization error
     #[error("Serialization error: {0}")]

@@ -3,6 +3,8 @@
 //! This module provides the Population container type.
 
 use rand::Rng;
+
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crate::fitness::traits::{Fitness, FitnessValue};
@@ -302,6 +304,8 @@ where
     }
 }
 
+/// Parallel evaluation support (requires `parallel` feature)
+#[cfg(feature = "parallel")]
 impl<G, F> Population<G, F>
 where
     G: EvolutionaryGenome + Send + Sync,
@@ -319,6 +323,24 @@ where
                 let f = fitness.evaluate(&individual.genome);
                 individual.set_fitness(f);
             });
+    }
+}
+
+/// Sequential fallback for parallel evaluation (when `parallel` feature is disabled)
+#[cfg(not(feature = "parallel"))]
+impl<G, F> Population<G, F>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+{
+    /// Evaluate all individuals using the given fitness function (sequential fallback)
+    ///
+    /// Note: This is a sequential implementation used when the `parallel` feature is disabled.
+    pub fn evaluate_parallel<Fit>(&mut self, fitness: &Fit)
+    where
+        Fit: Fitness<Genome = G, Value = F>,
+    {
+        self.evaluate(fitness);
     }
 }
 
