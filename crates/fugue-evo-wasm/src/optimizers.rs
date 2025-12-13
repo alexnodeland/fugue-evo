@@ -613,7 +613,9 @@ fn call_js_multi_objective(
 // Evolution Strategy Optimizer
 // ============================================================================
 
-use fugue_evo::algorithms::evolution_strategy::{ESBuilder, ESSelectionStrategy, RecombinationType};
+use fugue_evo::algorithms::evolution_strategy::{
+    ESBuilder, ESSelectionStrategy, RecombinationType,
+};
 
 /// Selection strategy for Evolution Strategy
 #[wasm_bindgen]

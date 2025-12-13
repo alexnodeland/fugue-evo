@@ -319,12 +319,7 @@ impl WasmStepResult {
 /// Interactive evolution optimizer for human-in-the-loop optimization
 #[wasm_bindgen]
 pub struct InteractiveOptimizer {
-    iga: InteractiveGA<
-        RealVector,
-        TournamentSelection,
-        SbxCrossover,
-        PolynomialMutation,
-    >,
+    iga: InteractiveGA<RealVector, TournamentSelection, SbxCrossover, PolynomialMutation>,
     rng: rand::rngs::StdRng,
 }
 
@@ -456,8 +451,11 @@ impl InteractiveOptimizer {
                 termination_reason: None,
             },
             StepResult::Complete(result) => {
-                let best_candidates: Vec<WasmCandidate> =
-                    result.best_candidates.iter().map(WasmCandidate::from).collect();
+                let best_candidates: Vec<WasmCandidate> = result
+                    .best_candidates
+                    .iter()
+                    .map(WasmCandidate::from)
+                    .collect();
                 WasmStepResult {
                     result_type: StepResultType::Complete,
                     request: None,
@@ -477,7 +475,9 @@ impl InteractiveOptimizer {
     #[wasm_bindgen(js_name = provideRatings)]
     pub fn provide_ratings(&mut self, ratings: &[f64]) -> Result<(), JsValue> {
         if ratings.len() % 2 != 0 {
-            return Err(JsValue::from_str("Ratings array must have even length (id, rating pairs)"));
+            return Err(JsValue::from_str(
+                "Ratings array must have even length (id, rating pairs)",
+            ));
         }
 
         let ratings_vec: Vec<(CandidateId, f64)> = ratings
@@ -593,7 +593,10 @@ fn convert_request(request: &EvaluationRequest<RealVector>) -> WasmEvaluationReq
             ..
         } => WasmEvaluationRequest {
             request_type: RequestType::Pairwise,
-            candidates: vec![WasmCandidate::from(candidate_a), WasmCandidate::from(candidate_b)],
+            candidates: vec![
+                WasmCandidate::from(candidate_a),
+                WasmCandidate::from(candidate_b),
+            ],
             select_count: 1,
             scale_min: 0.0,
             scale_max: 1.0,
