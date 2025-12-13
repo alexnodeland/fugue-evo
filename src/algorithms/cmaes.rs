@@ -20,7 +20,17 @@ use crate::population::individual::Individual;
 /// Trait for fitness functions used with CMA-ES
 ///
 /// CMA-ES is a minimization algorithm, so lower values are better.
+#[cfg(feature = "parallel")]
 pub trait CmaEsFitness: Send + Sync {
+    /// Evaluate the fitness of a solution (lower is better)
+    fn evaluate(&self, x: &RealVector) -> f64;
+}
+
+/// Trait for fitness functions used with CMA-ES
+///
+/// CMA-ES is a minimization algorithm, so lower values are better.
+#[cfg(not(feature = "parallel"))]
+pub trait CmaEsFitness {
     /// Evaluate the fitness of a solution (lower is better)
     fn evaluate(&self, x: &RealVector) -> f64;
 }
@@ -501,9 +511,21 @@ fn jacobi_eigendecomposition(a: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
 }
 
 /// Implement CmaEsFitness for any Fn that matches the signature
+#[cfg(feature = "parallel")]
 impl<F> CmaEsFitness for F
 where
     F: Fn(&RealVector) -> f64 + Send + Sync,
+{
+    fn evaluate(&self, x: &RealVector) -> f64 {
+        self(x)
+    }
+}
+
+/// Implement CmaEsFitness for any Fn that matches the signature
+#[cfg(not(feature = "parallel"))]
+impl<F> CmaEsFitness for F
+where
+    F: Fn(&RealVector) -> f64,
 {
     fn evaluate(&self, x: &RealVector) -> f64 {
         self(x)

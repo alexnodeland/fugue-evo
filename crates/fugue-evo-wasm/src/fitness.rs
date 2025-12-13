@@ -1,5 +1,6 @@
 //! Fitness function support for WASM
 
+use fugue_evo::algorithms::cmaes::CmaEsFitness;
 use fugue_evo::fitness::benchmarks::{Rastrigin, Rosenbrock, Sphere};
 use fugue_evo::fitness::traits::Fitness;
 use fugue_evo::genome::real_vector::RealVector;
@@ -94,4 +95,23 @@ pub fn get_available_fitness_functions() -> Vec<String> {
         "rastrigin".to_string(),
         "rosenbrock".to_string(),
     ]
+}
+
+/// CMA-ES fitness wrapper (CMA-ES minimizes, so we negate)
+pub struct CmaEsFitnessWrapper {
+    wrapper: FitnessWrapper,
+}
+
+impl CmaEsFitnessWrapper {
+    pub fn new(wrapper: FitnessWrapper) -> Self {
+        Self { wrapper }
+    }
+}
+
+impl CmaEsFitness for CmaEsFitnessWrapper {
+    fn evaluate(&self, x: &RealVector) -> f64 {
+        // CMA-ES minimizes, our FitnessWrapper negates for maximization
+        // So we negate back to get minimization values
+        -self.wrapper.evaluate(x)
+    }
 }

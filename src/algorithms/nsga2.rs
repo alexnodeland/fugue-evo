@@ -20,6 +20,7 @@ use crate::operators::traits::{
 use crate::population::individual::Individual;
 
 /// Multi-objective fitness function trait
+#[cfg(feature = "parallel")]
 pub trait MultiObjectiveFitness<G>: Send + Sync {
     /// Number of objectives
     fn num_objectives(&self) -> usize;
@@ -28,7 +29,18 @@ pub trait MultiObjectiveFitness<G>: Send + Sync {
     fn evaluate(&self, genome: &G) -> Vec<f64>;
 }
 
+/// Multi-objective fitness function trait
+#[cfg(not(feature = "parallel"))]
+pub trait MultiObjectiveFitness<G> {
+    /// Number of objectives
+    fn num_objectives(&self) -> usize;
+
+    /// Evaluate all objectives (all to be minimized by convention)
+    fn evaluate(&self, genome: &G) -> Vec<f64>;
+}
+
 /// Implement MultiObjectiveFitness for closures
+#[cfg(feature = "parallel")]
 impl<G, F> MultiObjectiveFitness<G> for F
 where
     F: Fn(&G) -> Vec<f64> + Send + Sync,
@@ -36,6 +48,21 @@ where
     fn num_objectives(&self) -> usize {
         // This is a limitation - closure doesn't know number of objectives
         // Users should use the explicit trait implementation for better type safety
+        2 // Default assumption
+    }
+
+    fn evaluate(&self, genome: &G) -> Vec<f64> {
+        self(genome)
+    }
+}
+
+/// Implement MultiObjectiveFitness for closures
+#[cfg(not(feature = "parallel"))]
+impl<G, F> MultiObjectiveFitness<G> for F
+where
+    F: Fn(&G) -> Vec<f64>,
+{
+    fn num_objectives(&self) -> usize {
         2 // Default assumption
     }
 

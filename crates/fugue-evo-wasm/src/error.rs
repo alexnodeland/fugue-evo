@@ -18,7 +18,11 @@ pub fn evolution_error_to_js(err: fugue_evo::error::EvolutionError) -> JsValue {
 
     let obj = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&obj, &"type".into(), &JsValue::from_str(error_type));
-    let _ = js_sys::Reflect::set(&obj, &"message".into(), &JsValue::from_str(&err.to_string()));
+    let _ = js_sys::Reflect::set(
+        &obj,
+        &"message".into(),
+        &JsValue::from_str(&err.to_string()),
+    );
     obj.into()
 }
 
