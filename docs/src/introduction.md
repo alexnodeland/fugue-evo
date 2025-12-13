@@ -99,3 +99,7 @@ This documentation is organized into several sections:
 - **How-To Guides**: Task-oriented guides for specific use cases
 - **Reference**: Detailed API documentation for algorithms, genomes, and operators
 - **Architecture**: Design philosophy and system internals
+
+## API Reference
+
+For complete API documentation generated from source code, see the [Rustdoc API Reference](./api/fugue_evo/index.html).

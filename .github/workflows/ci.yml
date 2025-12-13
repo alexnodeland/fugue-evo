@@ -122,6 +122,21 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
 
+  mdbook:
+    name: mdbook
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdbook
+        run: |
+          mkdir -p $HOME/.local/bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.40/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C $HOME/.local/bin
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Build mdbook
+        run: mdbook build docs
+
   wasm:
     name: WASM Build
     runs-on: ubuntu-latest
@@ -159,7 +174,7 @@ jobs:
   # Summary job that depends on all other jobs
   ci-success:
     name: CI Success
-    needs: [check, fmt, clippy, test, doc, wasm]
+    needs: [check, fmt, clippy, test, doc, mdbook, wasm]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -170,6 +185,7 @@ jobs:
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.doc.result }}" != "success" ]] || \
+             [[ "${{ needs.mdbook.result }}" != "success" ]] || \
              [[ "${{ needs.wasm.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
