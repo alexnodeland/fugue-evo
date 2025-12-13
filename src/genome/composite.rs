@@ -369,4 +369,89 @@ mod tests {
 
         assert_eq!(combined.dimension(), 7);
     }
+
+    #[test]
+    fn test_composite_first_mut() {
+        let real = RealVector::new(vec![1.0, 2.0, 3.0]);
+        let binary = BitString::new(vec![true, false]);
+
+        let mut composite = CompositeGenome::new(real, binary);
+
+        // Modify first component through mutable reference
+        composite.first_mut().genes_mut()[0] = 10.0;
+
+        assert_eq!(composite.first().genes()[0], 10.0);
+    }
+
+    #[test]
+    fn test_composite_second_mut() {
+        let real = RealVector::new(vec![1.0, 2.0]);
+        let binary = BitString::new(vec![true, false, true]);
+
+        let mut composite = CompositeGenome::new(real, binary);
+
+        // Modify second component through mutable reference
+        composite.second_mut().bits_mut()[0] = false;
+
+        assert!(!composite.second().bits()[0]);
+    }
+
+    #[test]
+    fn test_composite_map_second() {
+        let real = RealVector::new(vec![1.0, 2.0]);
+        let second_real = RealVector::new(vec![3.0, 4.0]);
+
+        let composite = CompositeGenome::new(real, second_real);
+
+        // Map second to double values
+        let mapped = composite.map_second(|r| r.scale(2.0));
+        assert_eq!(mapped.second().genes(), &[6.0, 8.0]);
+    }
+
+    #[test]
+    fn test_composite_trace_roundtrip_real_vectors() {
+        let first = RealVector::new(vec![1.5, 2.5, 3.5]);
+        let second = RealVector::new(vec![4.5, 5.5]);
+
+        let composite = CompositeGenome::new(first.clone(), second.clone());
+        let trace = composite.to_trace();
+        let recovered: CompositeGenome<RealVector, RealVector> =
+            CompositeGenome::from_trace(&trace).expect("Should deserialize");
+
+        assert_eq!(recovered.first().genes(), first.genes());
+        assert_eq!(recovered.second().genes(), second.genes());
+    }
+
+    #[test]
+    fn test_composite_trace_roundtrip_mixed() {
+        let real = RealVector::new(vec![1.0, 2.0]);
+        let binary = BitString::new(vec![true, false, true]);
+
+        let composite = CompositeGenome::new(real.clone(), binary.clone());
+        let trace = composite.to_trace();
+
+        // Note: The trace stores data using type-specific prefixes
+        // This test verifies the trace contains the expected structure
+        assert!(trace.get_usize(&addr!("composite", "first_dim")).is_some());
+        assert!(trace.get_usize(&addr!("composite", "second_dim")).is_some());
+    }
+
+    #[test]
+    fn test_composite_trace_prefix() {
+        assert_eq!(
+            <CompositeGenome<RealVector, BitString>>::trace_prefix(),
+            "composite"
+        );
+    }
+
+    #[test]
+    fn test_composite_from_trace_missing_dim_error() {
+        use fugue::Trace;
+        let empty_trace = Trace::default();
+
+        let result: Result<CompositeGenome<RealVector, RealVector>, _> =
+            CompositeGenome::from_trace(&empty_trace);
+
+        assert!(result.is_err());
+    }
 }

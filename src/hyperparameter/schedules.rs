@@ -470,4 +470,105 @@ mod tests {
         assert_relative_eq!(schedule.value_at(20, 100), 0.0);
         assert_relative_eq!(schedule.value_at(30, 100), 1.0);
     }
+
+    #[test]
+    fn test_linear_annealing_decreasing() {
+        let schedule = LinearAnnealing::decreasing(0.9, 0.1);
+        assert_relative_eq!(schedule.value_at(0, 100), 0.9);
+        assert_relative_eq!(schedule.value_at(100, 100), 0.1);
+    }
+
+    #[test]
+    fn test_linear_annealing_zero_max_generations() {
+        let schedule = LinearAnnealing::new(1.0, 0.0);
+        assert_relative_eq!(schedule.value_at(0, 0), 1.0);
+    }
+
+    #[test]
+    fn test_step_schedule_single_step() {
+        let schedule = StepSchedule::single_step(1.0, 50, 0.5);
+        assert_relative_eq!(schedule.value_at(0, 100), 1.0);
+        assert_relative_eq!(schedule.value_at(49, 100), 1.0);
+        assert_relative_eq!(schedule.value_at(50, 100), 0.5);
+        assert_relative_eq!(schedule.value_at(100, 100), 0.5);
+    }
+
+    #[test]
+    fn test_polynomial_decay_zero_max_generations() {
+        let schedule = PolynomialDecay::new(1.0, 2.0);
+        assert_relative_eq!(schedule.value_at(0, 0), 1.0);
+    }
+
+    #[test]
+    fn test_cyclical_schedule_zero_step_size() {
+        let schedule = CyclicalSchedule::new(0.5, 1.0, 0);
+        assert_relative_eq!(schedule.value_at(0, 100), 0.5);
+        assert_relative_eq!(schedule.value_at(50, 100), 0.5);
+    }
+
+    #[test]
+    fn test_cosine_annealing_zero_max_generations() {
+        let schedule = CosineAnnealing::new(1.0, 0.0);
+        assert_relative_eq!(schedule.value_at(0, 0), 1.0);
+    }
+
+    #[test]
+    fn test_cosine_annealing_warm_restarts_zero_period() {
+        let schedule = CosineAnnealing::new(1.0, 0.0).with_warm_restarts(0);
+        // Period 0 should be treated same as no warm restarts
+        assert_relative_eq!(schedule.value_at(50, 100), 0.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_dynamic_schedule_from_conversions() {
+        let constant: DynamicSchedule = ConstantSchedule::new(0.5).into();
+        assert_relative_eq!(constant.value_at(50, 100), 0.5);
+
+        let linear: DynamicSchedule = LinearAnnealing::new(1.0, 0.0).into();
+        assert_relative_eq!(linear.value_at(50, 100), 0.5);
+
+        let exponential: DynamicSchedule = ExponentialDecay::new(1.0, 0.1).into();
+        assert!(exponential.value_at(10, 100) < 1.0);
+
+        let cosine: DynamicSchedule = CosineAnnealing::new(1.0, 0.0).into();
+        assert_relative_eq!(cosine.value_at(50, 100), 0.5, epsilon = 1e-10);
+
+        let step: DynamicSchedule = StepSchedule::new(1.0, vec![(50, 0.5)]).into();
+        assert_relative_eq!(step.value_at(50, 100), 0.5);
+
+        let polynomial: DynamicSchedule = PolynomialDecay::new(1.0, 2.0).into();
+        assert_relative_eq!(polynomial.value_at(50, 100), 0.25);
+
+        let cyclical: DynamicSchedule = CyclicalSchedule::new(0.0, 1.0, 10).into();
+        assert_relative_eq!(cyclical.value_at(10, 100), 1.0);
+    }
+
+    #[test]
+    fn test_composite_schedule() {
+        let schedule = CompositeSchedule::new()
+            .add_phase(50, ConstantSchedule::new(1.0))
+            .add_phase(100, LinearAnnealing::new(1.0, 0.0));
+
+        // First phase: constant 1.0
+        assert_relative_eq!(schedule.value_at(0, 100), 1.0);
+        assert_relative_eq!(schedule.value_at(25, 100), 1.0);
+
+        // Second phase: linear 1.0 -> 0.0
+        assert_relative_eq!(schedule.value_at(50, 100), 1.0);
+        assert_relative_eq!(schedule.value_at(75, 100), 0.5);
+    }
+
+    #[test]
+    fn test_composite_schedule_empty() {
+        let schedule = CompositeSchedule::default();
+        assert_relative_eq!(schedule.value_at(50, 100), 0.0);
+    }
+
+    #[test]
+    fn test_composite_schedule_past_all_phases() {
+        let schedule = CompositeSchedule::new().add_phase(50, ConstantSchedule::new(0.5));
+
+        // Past the end of phases
+        assert_relative_eq!(schedule.value_at(100, 100), 0.5);
+    }
 }

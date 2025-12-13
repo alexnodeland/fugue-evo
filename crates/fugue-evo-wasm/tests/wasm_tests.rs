@@ -572,3 +572,311 @@ fn test_fitness_info() {
     let err = get_fitness_info("unknown_function");
     assert!(err.is_err());
 }
+
+// ============================================================================
+// Evolution Strategy Extended Tests
+// ============================================================================
+
+use fugue_evo_wasm::ESSelection;
+
+#[wasm_bindgen_test]
+fn test_evolution_strategy_mu_plus_lambda() {
+    let mut optimizer = EvolutionStrategyOptimizer::new(3);
+    optimizer.set_mu(5);
+    optimizer.set_lambda(20);
+    optimizer.set_selection_strategy(ESSelection::MuPlusLambda);
+    optimizer.set_initial_sigma(0.5);
+    optimizer.set_self_adaptive(true);
+    optimizer.set_population_size(20);
+    optimizer.set_max_generations(30);
+    optimizer.set_bounds(-5.0, 5.0);
+    optimizer.set_seed(42);
+    // Can't actually call optimize without a JS fitness function
+    // Just verify configuration doesn't panic
+}
+
+#[wasm_bindgen_test]
+fn test_evolution_strategy_mu_comma_lambda() {
+    let mut optimizer = EvolutionStrategyOptimizer::new(3);
+    optimizer.set_mu(5);
+    optimizer.set_lambda(30);
+    optimizer.set_selection_strategy(ESSelection::MuCommaLambda);
+    optimizer.set_initial_sigma(1.0);
+    optimizer.set_self_adaptive(false);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(20);
+    optimizer.set_bounds(-10.0, 10.0);
+    optimizer.set_seed(123);
+    // Configuration verified by not panicking
+}
+
+// ============================================================================
+// BitStringResult Extended Tests
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_bitstring_result_methods() {
+    let mut optimizer = BitStringOptimizer::new(16);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(50);
+    optimizer.set_seed(42);
+
+    let result = optimizer.solve_one_max().expect("Should succeed");
+
+    // Test count_ones
+    let ones_count = result.count_ones();
+    assert!(ones_count <= 16);
+    assert!(ones_count > 0);
+
+    // Test best_genome_string
+    let genome_str = result.best_genome_string();
+    assert_eq!(genome_str.len(), 16);
+    assert!(genome_str.chars().all(|c| c == '0' || c == '1'));
+
+    // Test fitness_history
+    let history = result.fitness_history();
+    assert!(!history.is_empty());
+}
+
+// ============================================================================
+// MultiObjectiveResult Extended Tests
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_multi_objective_result_methods() {
+    let mut optimizer = Nsga2Optimizer::new(5, 2);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(20);
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize_zdt(ZdtProblem::Zdt1)
+        .expect("Should succeed");
+
+    // Test front_size
+    let front_size = result.front_size();
+    assert!(front_size > 0);
+
+    // Test generations and evaluations
+    assert_eq!(result.generations(), 20);
+    assert!(result.evaluations() > 0);
+
+    // Test get_solution
+    if front_size > 0 {
+        let solution = result.get_solution(0).expect("Should get first solution");
+        assert!(!solution.genome().is_empty());
+        assert!(!solution.objectives().is_empty());
+    }
+
+    // Test all_genomes and all_objectives
+    let all_genomes = result.all_genomes();
+    let all_objectives = result.all_objectives();
+    assert!(!all_genomes.is_empty());
+    assert!(!all_objectives.is_empty());
+
+    // Test to_json
+    let json = result.to_json().expect("Should serialize to JSON");
+    assert!(json.contains("pareto_front"));
+}
+
+// ============================================================================
+// Additional Fitness Function Tests
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_dixon_price_optimization() {
+    let mut optimizer = RealVectorOptimizer::new(3);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(50);
+    optimizer.set_bounds(-10.0, 10.0);
+    optimizer.set_fitness("dixon_price");
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize()
+        .expect("Dixon-Price optimization should succeed");
+    assert!(result.best_fitness() >= 0.0);
+}
+
+#[wasm_bindgen_test]
+fn test_styblinski_tang_optimization() {
+    let mut optimizer = RealVectorOptimizer::new(3);
+    optimizer.set_population_size(30);
+    optimizer.set_max_generations(50);
+    optimizer.set_bounds(-5.0, 5.0);
+    optimizer.set_fitness("styblinski_tang");
+    optimizer.set_seed(42);
+
+    let result = optimizer
+        .optimize()
+        .expect("Styblinski-Tang optimization should succeed");
+    // Result can be negative for Styblinski-Tang
+    assert!(result.evaluations() > 0);
+}
+
+// ============================================================================
+// Interactive Evolution Tests
+// ============================================================================
+
+use fugue_evo_wasm::{InteractiveOptimizer, StepResultType, WasmEvaluationMode};
+
+#[wasm_bindgen_test]
+fn test_interactive_optimizer_creation() {
+    let _optimizer = InteractiveOptimizer::new(5);
+}
+
+#[wasm_bindgen_test]
+fn test_interactive_optimizer_with_config() {
+    let _optimizer = InteractiveOptimizer::with_config(
+        5,                          // dimension
+        20,                         // population_size
+        WasmEvaluationMode::Rating, // evaluation_mode
+        5,                          // batch_size
+        10,                         // max_generations
+    );
+}
+
+#[wasm_bindgen_test]
+fn test_interactive_optimizer_with_extended_config() {
+    let _optimizer = InteractiveOptimizer::with_extended_config(
+        5,                            // dimension
+        20,                           // population_size
+        WasmEvaluationMode::Pairwise, // evaluation_mode
+        5,                            // batch_size
+        3,                            // select_count
+        10,                           // max_generations
+        2,                            // elitism_count
+        0.8,                          // min_coverage
+        0.9,                          // crossover_probability
+        0.1,                          // mutation_probability
+        -5.0,                         // lower_bound
+        5.0,                          // upper_bound
+    );
+}
+
+#[wasm_bindgen_test]
+fn test_interactive_optimizer_step() {
+    let mut optimizer = InteractiveOptimizer::with_config(3, 10, WasmEvaluationMode::Rating, 3, 5);
+    optimizer.set_seed(42);
+
+    // First step should request evaluation
+    let step_result = optimizer.step();
+    assert!(step_result.needs_evaluation());
+    assert!(matches!(
+        step_result.result_type(),
+        StepResultType::NeedsEvaluation
+    ));
+
+    // Verify we can get the request
+    let request = step_result.get_request().expect("Should have request");
+    assert!(request.candidate_count() > 0);
+}
+
+#[wasm_bindgen_test]
+fn test_interactive_optimizer_getters() {
+    let mut optimizer = InteractiveOptimizer::with_config(3, 10, WasmEvaluationMode::Rating, 3, 5);
+    optimizer.set_seed(42);
+
+    // Test initial state getters
+    assert_eq!(optimizer.generation(), 0);
+    assert_eq!(optimizer.population_size(), 10);
+    assert!(optimizer.get_coverage() >= 0.0);
+
+    // Get population JSON
+    let pop_json = optimizer
+        .get_population_json()
+        .expect("Should get population JSON");
+    assert!(pop_json.contains('['));
+}
+
+#[wasm_bindgen_test]
+fn test_interactive_optimizer_batch_selection_mode() {
+    let optimizer =
+        InteractiveOptimizer::with_config(3, 10, WasmEvaluationMode::BatchSelection, 5, 5);
+
+    assert_eq!(optimizer.population_size(), 10);
+}
+
+// ============================================================================
+// Evaluation Request Tests
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_evaluation_request_methods() {
+    let mut optimizer = InteractiveOptimizer::with_config(3, 10, WasmEvaluationMode::Rating, 3, 5);
+    optimizer.set_seed(42);
+
+    let step_result = optimizer.step();
+    let request = step_result.get_request().expect("Should have request");
+
+    // Test request type
+    use fugue_evo_wasm::RequestType;
+    assert!(matches!(request.request_type(), RequestType::Rating));
+
+    // Test candidate access
+    let candidate_count = request.candidate_count();
+    assert!(candidate_count > 0);
+
+    // Test get candidate
+    if candidate_count > 0 {
+        let candidate = request
+            .get_candidate(0)
+            .expect("Should get first candidate");
+        assert!(candidate.genome().len() == 3);
+        assert!(!candidate.is_evaluated());
+        assert_eq!(candidate.evaluation_count(), 0);
+    }
+
+    // Test get candidate IDs
+    let ids = request.get_candidate_ids();
+    assert_eq!(ids.len(), candidate_count);
+
+    // Test get candidates JSON
+    let json = request
+        .get_candidates_json()
+        .expect("Should serialize candidates");
+    assert!(json.contains('['));
+
+    // Test scale bounds
+    assert!(request.scale_min() <= request.scale_max());
+
+    // Test to_json
+    let request_json = request.to_json().expect("Should serialize request");
+    assert!(request_json.contains("request_type"));
+}
+
+// ============================================================================
+// WasmCandidate Tests
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_wasm_candidate_methods() {
+    let mut optimizer = InteractiveOptimizer::with_config(3, 10, WasmEvaluationMode::Rating, 3, 5);
+    optimizer.set_seed(42);
+
+    let step_result = optimizer.step();
+    let request = step_result.get_request().expect("Should have request");
+    let candidate = request.get_candidate(0).expect("Should get candidate");
+
+    // Test id
+    let id = candidate.id();
+    assert!(id < 1000); // Reasonable ID
+
+    // Test genome
+    let genome = candidate.genome();
+    assert_eq!(genome.len(), 3);
+
+    // Test fitness (should be None initially)
+    assert!(candidate.fitness().is_none());
+
+    // Test evaluation count
+    assert_eq!(candidate.evaluation_count(), 0);
+
+    // Test is_evaluated
+    assert!(!candidate.is_evaluated());
+
+    // Test to_json
+    let json = candidate.to_json().expect("Should serialize candidate");
+    assert!(json.contains("id"));
+    assert!(json.contains("genome"));
+}
