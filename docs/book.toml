@@ -1,0 +1,34 @@
+[book]
+title = "Fugue-Evo Documentation"
+authors = ["Fugue-Evo Contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/fugue-evo/fugue-evo"
+edit-url-template = "https://github.com/fugue-evo/fugue-evo/edit/main/docs/{path}"
+site-url = "/fugue-evo/"
+
+[output.html.playground]
+editable = true
+line-numbers = true
+
+[output.html.code]
+hidelines = { rust = "#" }
+
+[output.html.fold]
+enable = true
+level = 0
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+
+[preprocessor.links]
