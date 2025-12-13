@@ -415,14 +415,16 @@ where
 {
     /// Serialize session to JSON string (WASM-compatible)
     pub fn to_json(&self) -> Result<String, CheckpointError> {
-        serde_json::to_string_pretty(self)
-            .map_err(|e| CheckpointError::Serialization(format!("Failed to serialize session: {}", e)))
+        serde_json::to_string_pretty(self).map_err(|e| {
+            CheckpointError::Serialization(format!("Failed to serialize session: {}", e))
+        })
     }
 
     /// Deserialize session from JSON string (WASM-compatible)
     pub fn from_json(json: &str) -> Result<Self, CheckpointError> {
-        let session: Self = serde_json::from_str(json)
-            .map_err(|e| CheckpointError::Deserialization(format!("Failed to deserialize session: {}", e)))?;
+        let session: Self = serde_json::from_str(json).map_err(|e| {
+            CheckpointError::Deserialization(format!("Failed to deserialize session: {}", e))
+        })?;
 
         // Check version compatibility
         if session.version > SESSION_VERSION {
