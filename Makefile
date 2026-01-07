@@ -1,5 +1,5 @@
 .PHONY: all build check test lint fmt clippy doc clean ci help \
-       mdbook mdbook-serve mdbook-clean doc-all doc-serve
+       mdbook mdbook-serve mdbook-clean mdbook-test doc-all doc-serve clean-all
 
 # Default target
 all: check
@@ -60,6 +60,10 @@ mdbook-serve:
 mdbook-clean:
 	rm -rf docs/book
 
+# Test code examples in mdbook documentation
+mdbook-test:
+	mdbook test docs
+
 # Build all documentation (rustdoc + mdbook)
 doc-all: doc mdbook
 	@echo "All documentation built successfully!"
@@ -76,6 +80,10 @@ doc-serve: doc mdbook
 # Clean build artifacts
 clean:
 	cargo clean
+
+# Clean all build artifacts (cargo + mdbook)
+clean-all: clean mdbook-clean
+	@echo "All build artifacts cleaned!"
 
 # Run the full CI pipeline (same as GitHub Actions)
 ci: fmt clippy check test doc mdbook
@@ -123,9 +131,11 @@ help:
 	@echo "  mdbook       - Build mdbook documentation"
 	@echo "  mdbook-serve - Serve mdbook with live reload"
 	@echo "  mdbook-clean - Clean mdbook build artifacts"
+	@echo "  mdbook-test  - Test code examples in mdbook"
 	@echo "  doc-all      - Build all documentation (rustdoc + mdbook)"
 	@echo "  doc-serve    - Build and serve all documentation"
-	@echo "  clean        - Clean build artifacts"
+	@echo "  clean        - Clean cargo build artifacts"
+	@echo "  clean-all    - Clean all build artifacts (cargo + mdbook)"
 	@echo "  ci           - Run full CI pipeline"
 	@echo "  quick        - Run quick development checks"
 	@echo "  watch        - Watch for changes and run tests"

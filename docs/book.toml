@@ -11,8 +11,8 @@ create-missing = true
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://github.com/fugue-evo/fugue-evo"
-edit-url-template = "https://github.com/fugue-evo/fugue-evo/edit/main/docs/{path}"
+git-repository-url = "https://github.com/alexnodeland/fugue-evo"
+edit-url-template = "https://github.com/alexnodeland/fugue-evo/edit/main/docs/{path}"
 site-url = "/fugue-evo/"
 
 [output.html.playground]
