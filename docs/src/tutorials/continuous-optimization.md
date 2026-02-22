@@ -6,7 +6,7 @@ This tutorial covers optimizing functions with real-valued variables. You'll lea
 
 We'll start with the **Sphere function**, a simple unimodal benchmark:
 
-```
+```text
 f(x) = Σxᵢ² = x₁² + x₂² + ... + xₙ²
 ```
 

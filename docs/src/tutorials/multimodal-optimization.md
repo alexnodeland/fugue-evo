@@ -6,7 +6,7 @@ This tutorial tackles the **Rastrigin function**, a challenging multimodal bench
 
 The Rastrigin function is defined as:
 
-```
+```text
 f(x) = 10n + Σ[xᵢ² - 10cos(2πxᵢ)]
 ```
 

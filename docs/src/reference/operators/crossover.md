@@ -52,7 +52,7 @@ Single crossover point, swap tails.
 let crossover = OnePointCrossover::new();
 ```
 
-```
+```text
 Parent 1: A A A | B B B
 Parent 2: 1 1 1 | 2 2 2
                 ↓
@@ -70,7 +70,7 @@ Two crossover points, swap middle segment.
 let crossover = TwoPointCrossover::new();
 ```
 
-```
+```text
 Parent 1: A A | B B B | C C
 Parent 2: 1 1 | 2 2 2 | 3 3
               ↓

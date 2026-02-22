@@ -58,7 +58,7 @@ let result = UmdaBuilder::<RealVector, f64, _>::new()
 ### Model Building (Univariate)
 
 For continuous variables:
-```
+```text
 μᵢ = mean of selected individuals' gene i
 σᵢ = std dev of selected individuals' gene i
 ```
@@ -66,7 +66,7 @@ For continuous variables:
 ### Sampling
 
 New individuals sampled from:
-```
+```text
 xᵢ ~ N(μᵢ, σᵢ²)
 ```
 

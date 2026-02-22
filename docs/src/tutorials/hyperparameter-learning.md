@@ -94,7 +94,7 @@ Don't update every generation:
 
 ## Understanding the Output
 
-```
+```text
 Initial mutation rate (prior mean): 0.5000
 
 Gen  20: Sampled mutation rate = 0.4123 (posterior mean = 0.3876)

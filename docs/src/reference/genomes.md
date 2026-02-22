@@ -53,7 +53,7 @@ pub trait PermutationGenome: EvolutionaryGenome {
 
 ## Genome Selection Guide
 
-```
+```text
 What are you optimizing?
         │
         ├── Continuous variables → RealVector

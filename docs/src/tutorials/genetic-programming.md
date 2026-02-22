@@ -20,12 +20,12 @@
 Given input-output pairs, find a mathematical expression that fits the data.
 
 **Target function:**
-```
+```text
 f(x) = x² + 2x + 1
 ```
 
 **Training data:**
-```
+```text
 x: -5, -4, ..., 4, 5
 y: f(x) for each x
 ```
@@ -59,7 +59,7 @@ A tree genome consists of:
 - **Functions**: Internal nodes (operations like `+`, `*`, `sin`)
 
 **Example tree for `x² + 1`:**
-```
+```text
        +
       / \
      *   1

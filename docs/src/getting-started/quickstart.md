@@ -10,7 +10,7 @@ Ensure you have [installed fugue-evo](./installation.md).
 
 The **Sphere function** is a classic optimization benchmark:
 
-```
+```text
 f(x) = x₁² + x₂² + ... + xₙ²
 ```
 
@@ -36,7 +36,7 @@ cargo run --example sphere_optimization
 
 Expected output:
 
-```
+```text
 === Sphere Function Optimization ===
 
 Optimization complete!

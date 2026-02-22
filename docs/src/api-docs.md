@@ -8,7 +8,7 @@ The complete API documentation is generated from rustdoc comments in the source 
 
 Visit the docs.rs page (when published):
 
-```
+```text
 https://docs.rs/fugue-evo
 ```
 
@@ -30,7 +30,7 @@ Docs will be in `target/doc/fugue_evo/index.html`.
 
 ## Module Structure
 
-```
+```text
 fugue_evo
 ├── algorithms          # Optimization algorithms
 │   ├── simple_ga       # Simple Genetic Algorithm

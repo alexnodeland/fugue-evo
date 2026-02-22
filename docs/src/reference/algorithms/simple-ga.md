@@ -117,7 +117,7 @@ SimpleGABuilder::<G, F, S, C, M, Fit, Term>
 
 ## Algorithm Flow
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │           SimpleGA Flow                  │
 │                                          │

@@ -96,7 +96,7 @@ println!("Final sigma: {:.6}", cmaes.state.sigma);
 
 The example optimizes the **Rosenbrock function**:
 
-```
+```text
 f(x) = Σ[100(xᵢ₊₁ - xᵢ²)² + (1 - xᵢ)²]
 ```
 

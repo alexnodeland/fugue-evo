@@ -142,7 +142,7 @@ cargo fmt -- --check
 
 Use clear, descriptive commit messages:
 
-```
+```text
 feat: add new crossover operator for permutations
 
 - Implement cycle crossover (CX)

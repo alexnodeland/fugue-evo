@@ -155,7 +155,7 @@ let mut iga = InteractiveGABuilder::new()
 
 ## Decision Flowchart
 
-```
+```text
 START
   │
   ▼

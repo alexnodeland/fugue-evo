@@ -58,7 +58,7 @@ Algorithms support pluggable termination criteria:
 
 ## Algorithm Selection
 
-```
+```text
                   Problem Type
                        │
     ┌──────────────────┼──────────────────┐

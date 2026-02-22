@@ -13,7 +13,7 @@ default-theme = "rust"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/alexnodeland/fugue-evo"
 edit-url-template = "https://github.com/alexnodeland/fugue-evo/edit/main/docs/{path}"
-site-url = "/fugue-evo/"
+site-url = "https://evo.fugue.run/"
 
 [output.html.playground]
 editable = true

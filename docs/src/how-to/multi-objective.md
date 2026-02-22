@@ -24,7 +24,7 @@ Solution A **dominates** solution B if:
 
 The **Pareto front** contains all non-dominated solutions.
 
-```
+```text
 Objective 2
     ↑
     │   ★ ← Non-dominated (Pareto front)

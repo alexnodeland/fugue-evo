@@ -77,7 +77,7 @@ See [Island Model Tutorial](./island-model.md) for details.
 
 ## Algorithm Selection Guide
 
-```
+```text
                     ┌─────────────────────┐
                     │   Is the problem    │
                     │   multi-objective?  │

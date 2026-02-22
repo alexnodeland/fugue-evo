@@ -6,7 +6,7 @@ This guide explains the fundamental concepts and abstractions in fugue-evo. Unde
 
 At its core, genetic algorithms follow an iterative process:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                    EVOLUTIONARY LOOP                      │
 │                                                           │

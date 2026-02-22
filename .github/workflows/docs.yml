@@ -63,6 +63,8 @@ jobs:
           cp -r target/doc/* docs/book/api/
           # Create a redirect from api/index.html to the main crate
           echo '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0; url=fugue_evo/index.html"></head><body>Redirecting to <a href="fugue_evo/index.html">fugue_evo</a>...</body></html>' > docs/book/api/index.html
+          # Copy CNAME for custom domain
+          cp docs/CNAME docs/book/CNAME
 
       - name: Setup Pages
         uses: actions/configure-pages@v4

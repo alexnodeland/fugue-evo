@@ -17,7 +17,7 @@ The **Island Model** runs multiple populations (islands) in parallel with period
 
 ## How It Works
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                       ISLAND MODEL                           │
 │                                                              │
@@ -83,14 +83,14 @@ MigrationTopology::Ring
 | `FullyConnected` | Everyone connects to everyone | Maximum mixing |
 
 **Ring Topology:**
-```
+```text
     1 ←→ 2
     ↕     ↕
     4 ←→ 3
 ```
 
 **Star Topology:**
-```
+```text
     2   3
      \ /
       1
@@ -171,12 +171,12 @@ Each island should be large enough to:
 
 The effective migration rate is:
 
-```
+```text
 migration_rate = migrants_per_interval / (island_size × interval)
 ```
 
 For `Best(2)` with size 50 and interval 25:
-```
+```text
 rate = 2 / (50 × 25) = 0.16%
 ```
 

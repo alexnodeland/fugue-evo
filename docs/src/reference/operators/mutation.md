@@ -77,7 +77,7 @@ For permutations. Reverses a random segment.
 let mutation = InversionMutation::new(probability);
 ```
 
-```
+```text
 Before: [1, 2, 3, 4, 5, 6]
               ↓ reverse [2,5]
 After:  [1, 5, 4, 3, 2, 6]

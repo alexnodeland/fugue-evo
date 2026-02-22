@@ -47,14 +47,14 @@ pub enum MigrationTopology {
 ```
 
 ### Ring Topology
-```
+```text
 1 ←→ 2
 ↕     ↕
 4 ←→ 3
 ```
 
 ### Star Topology
-```
+```text
   2   3
    \ /
     1 (hub)
@@ -63,7 +63,7 @@ pub enum MigrationTopology {
 ```
 
 ### Fully Connected
-```
+```text
 1 ←→ 2
 ↕ ✕ ↕
 4 ←→ 3

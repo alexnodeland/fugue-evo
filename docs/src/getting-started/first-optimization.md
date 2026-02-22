@@ -168,7 +168,7 @@ cargo run
 
 Expected output:
 
-```
+```text
 === Box Volume Optimization ===
 
 Problem: Maximize box volume with surface area = 100
