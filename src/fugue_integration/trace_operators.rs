@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use fugue::{Address, ChoiceValue, Trace};
 use rand::Rng;
+use rand_distr::{Distribution, Normal};
 
 use crate::error::GenomeError;
 use crate::genome::traits::EvolutionaryGenome;
@@ -335,15 +336,17 @@ where
     Ok((child1, child2))
 }
 
-/// Gaussian mutation function for f64 values
+/// Gaussian mutation function for f64 values.
+///
+/// Adds a true `Normal(0, sigma)` perturbation (via `rand_distr::Normal`), so
+/// the mutation's standard deviation is exactly `sigma`.
 pub fn gaussian_mutation<R: Rng>(
     sigma: f64,
 ) -> impl Fn(&Address, &ChoiceValue, &mut R) -> ChoiceValue {
+    let normal = Normal::new(0.0, sigma.max(0.0)).expect("sigma must be finite and non-negative");
     move |_addr, value, rng| {
         if let ChoiceValue::F64(v) = value {
-            let noise: f64 = rng.gen::<f64>() * 2.0 - 1.0; // Simple uniform noise
-            let mutated = v + sigma * noise * 2.0_f64.sqrt(); // Scale to approximate gaussian
-            ChoiceValue::F64(mutated)
+            ChoiceValue::F64(v + normal.sample(rng))
         } else {
             value.clone()
         }
@@ -361,16 +364,19 @@ pub fn bit_flip_mutation<R: Rng>() -> impl Fn(&Address, &ChoiceValue, &mut R) ->
     }
 }
 
-/// Bounded mutation function that respects bounds
+/// Bounded mutation function that respects bounds.
+///
+/// Adds a true `Normal(0, sigma)` perturbation and clamps the result to
+/// `[lower, upper]`.
 pub fn bounded_mutation<R: Rng>(
     sigma: f64,
     lower: f64,
     upper: f64,
 ) -> impl Fn(&Address, &ChoiceValue, &mut R) -> ChoiceValue {
+    let normal = Normal::new(0.0, sigma.max(0.0)).expect("sigma must be finite and non-negative");
     move |_addr, value, rng| {
         if let ChoiceValue::F64(v) = value {
-            let noise: f64 = rng.gen::<f64>() * 2.0 - 1.0;
-            let mutated = (v + sigma * noise * 2.0_f64.sqrt()).clamp(lower, upper);
+            let mutated = (v + normal.sample(rng)).clamp(lower, upper);
             ChoiceValue::F64(mutated)
         } else {
             value.clone()
@@ -438,6 +444,56 @@ mod tests {
         // Should have same dimension
         assert_eq!(mutated.dimension(), genome.dimension());
         // Values should have changed (with high probability)
+    }
+
+    #[test]
+    fn test_gaussian_mutation_achieves_sigma() {
+        // regression: EV-54 — the perturbation std must equal sigma, not
+        // 0.816·sigma (the old uniform kernel scaled by sqrt(2)).
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let sigma = 1.0;
+        let mutate = gaussian_mutation::<StdRng>(sigma);
+        let mut rng = StdRng::seed_from_u64(2026);
+        let addr = fugue::addr!("gene", 0);
+        let base = ChoiceValue::F64(0.0);
+
+        let deltas: Vec<f64> = (0..50_000)
+            .map(|_| match mutate(&addr, &base, &mut rng) {
+                ChoiceValue::F64(v) => v,
+                _ => unreachable!(),
+            })
+            .collect();
+
+        let mean = deltas.iter().sum::<f64>() / deltas.len() as f64;
+        let std =
+            (deltas.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / deltas.len() as f64).sqrt();
+        assert!(mean.abs() < 0.03, "mean should be ~0, got {}", mean);
+        assert!(
+            (std - sigma).abs() < 0.03,
+            "empirical std {} should match sigma {} (old kernel gave ~0.816)",
+            std,
+            sigma
+        );
+    }
+
+    #[test]
+    fn test_bounded_mutation_respects_bounds() {
+        // regression: EV-54 — bounded_mutation also uses a true Gaussian kernel
+        // and never escapes [lower, upper].
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mutate = bounded_mutation::<StdRng>(1.0, -0.5, 0.5);
+        let mut rng = StdRng::seed_from_u64(5);
+        let addr = fugue::addr!("gene", 0);
+        let base = ChoiceValue::F64(0.0);
+        for _ in 0..10_000 {
+            if let ChoiceValue::F64(v) = mutate(&addr, &base, &mut rng) {
+                assert!((-0.5..=0.5).contains(&v));
+            }
+        }
     }
 
     #[test]
