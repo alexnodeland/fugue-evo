@@ -11,23 +11,62 @@ use crate::operators::traits::SelectionOperator;
 
 /// Tournament selection operator
 ///
-/// Selects the best individual from a random subset of the population.
+/// Selects the best individual from a randomly sampled subset (the
+/// "tournament") of the population.
+///
+/// # Sampling with vs. without replacement
+///
+/// By default competitors are sampled **with replacement** (each of the `k`
+/// competitors is drawn independently and uniformly from the whole
+/// population). This is the textbook model, for which the probability that the
+/// individual of rank `i` wins has the clean closed form and selection pressure
+/// grows smoothly with `k`; the same individual may appear more than once in a
+/// tournament. Crucially, `tournament_size >= population size` does **not**
+/// make selection deterministic under this model — a draw of `k = n`
+/// competitors with replacement includes the global best only with probability
+/// `1 - ((n-1)/n)^k` (≈ 0.63 at `k = n`).
+///
+/// The without-replacement variant (constructed via
+/// [`without_replacement`](Self::without_replacement)) instead draws `k`
+/// *distinct* individuals; there the tournament size is capped at the
+/// population size and `k >= n` degenerates to fully elitist selection (the
+/// global best is chosen every call).
 #[derive(Clone, Debug)]
 pub struct TournamentSelection {
     /// Tournament size (number of individuals competing)
     pub tournament_size: usize,
+    /// Whether competitors are sampled with replacement (canonical default) or
+    /// as distinct individuals.
+    pub with_replacement: bool,
 }
 
 impl TournamentSelection {
-    /// Create a new tournament selection with the given size
+    /// Create a new tournament selection with the given size (sampling with
+    /// replacement, the canonical model).
     pub fn new(tournament_size: usize) -> Self {
         assert!(tournament_size >= 1, "Tournament size must be at least 1");
-        Self { tournament_size }
+        Self {
+            tournament_size,
+            with_replacement: true,
+        }
     }
 
-    /// Create binary tournament selection (size = 2)
+    /// Create binary tournament selection (size = 2, with replacement)
     pub fn binary() -> Self {
         Self::new(2)
+    }
+
+    /// Create a tournament selection that samples `tournament_size` **distinct**
+    /// competitors (without replacement).
+    ///
+    /// Note that with this variant `tournament_size >= population size` selects
+    /// the global best deterministically every call.
+    pub fn without_replacement(tournament_size: usize) -> Self {
+        assert!(tournament_size >= 1, "Tournament size must be at least 1");
+        Self {
+            tournament_size,
+            with_replacement: false,
+        }
     }
 }
 
@@ -35,14 +74,22 @@ impl<G: EvolutionaryGenome> SelectionOperator<G> for TournamentSelection {
     fn select<R: Rng>(&self, population: &[(G, f64)], rng: &mut R) -> usize {
         assert!(!population.is_empty(), "Population cannot be empty");
 
-        let tournament_size = self.tournament_size.min(population.len());
+        let n = population.len();
 
-        // Select random individuals for the tournament
-        let indices: Vec<usize> = (0..population.len()).collect();
-        let tournament: Vec<usize> = indices
-            .choose_multiple(rng, tournament_size)
-            .copied()
-            .collect();
+        let tournament: Vec<usize> = if self.with_replacement {
+            // Canonical: k competitors drawn i.i.d. with replacement.
+            (0..self.tournament_size)
+                .map(|_| rng.gen_range(0..n))
+                .collect()
+        } else {
+            // Distinct competitors; cannot draw more than the population size.
+            let k = self.tournament_size.min(n);
+            (0..n)
+                .collect::<Vec<usize>>()
+                .choose_multiple(rng, k)
+                .copied()
+                .collect()
+        };
 
         // Find the best in the tournament
         tournament
@@ -314,7 +361,9 @@ mod tests {
             (RealVector::new(vec![2.0]), 0.0),
         ];
 
-        let selection = TournamentSelection::new(3); // Full tournament
+        // Without-replacement full tournament draws all distinct individuals,
+        // so it selects the best deterministically.
+        let selection = TournamentSelection::without_replacement(3);
 
         let mut best_count = 0;
         let trials = 100;
@@ -325,8 +374,65 @@ mod tests {
             }
         }
 
-        // With full tournament, should always select the best
+        // With a full without-replacement tournament, should always select the best
         assert_eq!(best_count, trials);
+    }
+
+    #[test]
+    fn test_tournament_with_replacement_is_not_deterministic_at_full_size() {
+        // regression: EV-104 — the default (with-replacement) tournament must
+        // NOT collapse to fully elitist selection when tournament_size ==
+        // population size. Pre-fix, sampling was without replacement and
+        // clamped to the population, so k >= n selected the global best on
+        // every call (best_count would equal trials). With canonical
+        // with-replacement sampling the global best is included only with
+        // probability 1 - ((n-1)/n)^k, so it is selected only part of the time.
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+
+        // Unique global maximum at index 4.
+        let population: Vec<(RealVector, f64)> = (0..5)
+            .map(|i| (RealVector::new(vec![i as f64]), i as f64))
+            .collect();
+
+        let selection = TournamentSelection::new(5); // k == n, with replacement
+        assert!(selection.with_replacement);
+
+        let trials = 300;
+        let mut best_count = 0;
+        for _ in 0..trials {
+            if selection.select(&population, &mut rng) == 4 {
+                best_count += 1;
+            }
+        }
+
+        // Expected P(best selected) = 1 - (4/5)^5 ≈ 0.672, so the count must be
+        // strictly below `trials` (the pre-fix without-replacement code would
+        // give exactly `trials`).
+        assert!(
+            best_count < trials,
+            "with-replacement tournament should not be deterministic at k == n (got {best_count}/{trials})"
+        );
+        // ...but the best should still win the clear majority of the time.
+        assert!(
+            best_count > trials / 2,
+            "expected the fittest to win most tournaments (got {best_count}/{trials})"
+        );
+    }
+
+    #[test]
+    fn test_tournament_without_replacement_full_size_is_elitist() {
+        // The retained without-replacement variant selects the global best
+        // deterministically when tournament_size >= population size.
+        let mut rng = rand::thread_rng();
+        let population: Vec<(RealVector, f64)> = (0..5)
+            .map(|i| (RealVector::new(vec![i as f64]), i as f64))
+            .collect();
+
+        let selection = TournamentSelection::without_replacement(5);
+        for _ in 0..50 {
+            assert_eq!(selection.select(&population, &mut rng), 4);
+        }
     }
 
     #[test]

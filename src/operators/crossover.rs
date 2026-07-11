@@ -21,15 +21,46 @@ use crate::operators::traits::{BoundedCrossoverOperator, CrossoverOperator};
 /// SBX generates offspring from parents using a spread factor that
 /// simulates single-point crossover for binary strings.
 ///
+/// # Two distinct probabilities
+///
+/// SBX involves two conceptually separate probabilities that used to be
+/// conflated into a single field (audit EV-72):
+///
+/// - [`crossover_probability`](Self::crossover_probability) — the *per-pair*
+///   probability that the operator is applied at all. This is the quantity
+///   reported by [`CrossoverOperator::crossover_probability`] and consumed by
+///   the driving algorithm (e.g. `SimpleGA`, `NSGA-II`) to decide, once per
+///   parent pair, whether to recombine. Canonical default: `0.9`.
+/// - [`exchange_probability`](Self::exchange_probability) — the *per-gene*
+///   probability, used *inside* SBX, that an individual variable is recombined
+///   via the spread factor (otherwise the children inherit the parents'
+///   values unchanged for that variable). Deb's canonical NSGA-II code uses
+///   `0.5`.
+///
+/// # Bounds handling
+///
+/// When bounds are supplied (via [`BoundedCrossoverOperator`]) the operator
+/// uses Deb & Agrawal's bounds-aware spread factor: for each variable the
+/// spread is drawn from the polynomial SBX distribution *truncated* to the
+/// distance to each bound, so offspring land inside `[min, max]` by
+/// construction with no probability mass piled onto the boundaries (audit
+/// EV-71). The unbounded path uses the classic (untruncated) spread factor.
+///
 /// Reference: Deb, K., & Agrawal, R. B. (1995). Simulated Binary Crossover
-/// for Continuous Search Space.
+/// for Continuous Search Space. Bounds-aware variant: Deb, K. (2001),
+/// NSGA-II `crossover.c`.
 #[derive(Clone, Debug)]
 pub struct SbxCrossover {
     /// Distribution index (typically 2-20)
     /// Higher values = offspring closer to parents
     pub eta: f64,
-    /// Per-gene crossover probability
+    /// Per-pair probability that the operator is applied (reported by
+    /// [`CrossoverOperator::crossover_probability`]). Default: `0.9`.
     pub crossover_probability: f64,
+    /// Per-gene exchange probability used inside SBX. Default: `0.5`
+    /// (canonical). This is a distinct quantity from
+    /// [`crossover_probability`](Self::crossover_probability).
+    pub exchange_probability: f64,
 }
 
 impl SbxCrossover {
@@ -39,10 +70,16 @@ impl SbxCrossover {
         Self {
             eta,
             crossover_probability: 0.9,
+            exchange_probability: 0.5,
         }
     }
 
-    /// Set the per-gene crossover probability
+    /// Set the per-pair crossover probability reported by
+    /// [`CrossoverOperator::crossover_probability`].
+    ///
+    /// This is the probability the driving algorithm uses to decide, once per
+    /// parent pair, whether to apply the operator. It is *not* the per-gene
+    /// exchange rate — for that see [`with_exchange_probability`](Self::with_exchange_probability).
     pub fn with_probability(mut self, probability: f64) -> Self {
         assert!(
             (0.0..=1.0).contains(&probability),
@@ -52,13 +89,62 @@ impl SbxCrossover {
         self
     }
 
-    /// Compute the spread factor β from a uniform random value
+    /// Set the per-gene exchange probability used inside SBX (canonical: `0.5`).
+    pub fn with_exchange_probability(mut self, probability: f64) -> Self {
+        assert!(
+            (0.0..=1.0).contains(&probability),
+            "Probability must be in [0, 1]"
+        );
+        self.exchange_probability = probability;
+        self
+    }
+
+    /// Compute the (unbounded) spread factor β from a uniform random value
     fn spread_factor(&self, u: f64) -> f64 {
         if u <= 0.5 {
             (2.0 * u).powf(1.0 / (self.eta + 1.0))
         } else {
             (1.0 / (2.0 * (1.0 - u))).powf(1.0 / (self.eta + 1.0))
         }
+    }
+
+    /// Deb & Agrawal's bounds-aware SBX draw for a single variable.
+    ///
+    /// Given ordered parents `y1 <= y2` lying inside `[yl, yu]` and a uniform
+    /// deviate `u`, returns the two offspring `(c_low, c_high)`. The spread
+    /// factor is drawn from the polynomial SBX distribution truncated at the
+    /// distance to each bound, so `c_low >= yl` and `c_high <= yu` hold *by
+    /// construction* — there is no clamping and no probability atom at the
+    /// bounds. See NSGA-II `crossover.c` (`realcross`).
+    fn sbx_bounded_pair(&self, y1: f64, y2: f64, yl: f64, yu: f64, u: f64) -> (f64, f64) {
+        let dy = y2 - y1;
+        let exp = self.eta + 1.0;
+        let power = 1.0 / exp;
+
+        // Lower child: β_l limits the spread so the child cannot fall below yl.
+        let beta_l = 1.0 + 2.0 * (y1 - yl) / dy;
+        let alpha_l = 2.0 - beta_l.powf(-exp);
+        let betaq_l = if u <= 1.0 / alpha_l {
+            (u * alpha_l).powf(power)
+        } else {
+            (1.0 / (2.0 - u * alpha_l)).powf(power)
+        };
+        let c_low = 0.5 * ((y1 + y2) - betaq_l * dy);
+
+        // Upper child: β_u limits the spread so the child cannot exceed yu.
+        let beta_u = 1.0 + 2.0 * (yu - y2) / dy;
+        let alpha_u = 2.0 - beta_u.powf(-exp);
+        let betaq_u = if u <= 1.0 / alpha_u {
+            (u * alpha_u).powf(power)
+        } else {
+            (1.0 / (2.0 - u * alpha_u)).powf(power)
+        };
+        let c_high = 0.5 * ((y1 + y2) + betaq_u * dy);
+
+        // The values are inside [yl, yu] mathematically; clamp only to absorb
+        // floating-point drift at the extreme (measure-zero) tails. This does
+        // not create a boundary atom the way the old unconditional clamp did.
+        (c_low.clamp(yl, yu), c_high.clamp(yl, yu))
     }
 
     /// Apply SBX crossover to two f64 slices
@@ -73,24 +159,39 @@ impl SbxCrossover {
         let mut child2: Vec<f64> = parent2.to_vec();
 
         for i in 0..parent1.len() {
-            if rng.gen::<f64>() < self.crossover_probability {
+            // Per-gene exchange coin (canonical 0.5). Distinct from the
+            // per-pair crossover_probability the algorithm applies.
+            if rng.gen::<f64>() < self.exchange_probability {
                 let x1 = parent1[i];
                 let x2 = parent2[i];
 
                 // Only apply if parents differ sufficiently
                 if (x1 - x2).abs() > 1e-14 {
                     let u = rng.gen::<f64>();
-                    let beta = self.spread_factor(u);
 
-                    child1[i] = 0.5 * ((1.0 + beta) * x1 + (1.0 - beta) * x2);
-                    child2[i] = 0.5 * ((1.0 - beta) * x1 + (1.0 + beta) * x2);
-
-                    // Apply bounds if provided
-                    if let Some(b) = bounds {
-                        if let Some(bound) = b.get(i) {
-                            child1[i] = bound.clamp(child1[i]);
-                            child2[i] = bound.clamp(child2[i]);
+                    let (c_low, c_high) = match bounds.and_then(|b| b.get(i)) {
+                        Some(bound) => {
+                            // Bounds-aware, truncated spread (EV-71).
+                            let (y1, y2) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
+                            self.sbx_bounded_pair(y1, y2, bound.min, bound.max, u)
                         }
+                        None => {
+                            // Classic unbounded SBX.
+                            let beta = self.spread_factor(u);
+                            let y1 = 0.5 * ((1.0 + beta) * x1 + (1.0 - beta) * x2);
+                            let y2 = 0.5 * ((1.0 - beta) * x1 + (1.0 + beta) * x2);
+                            (y1, y2)
+                        }
+                    };
+
+                    // Randomly assign the low/high offspring to child1/child2
+                    // (canonical: removes systematic bias tied to parent order).
+                    if rng.gen::<bool>() {
+                        child1[i] = c_low;
+                        child2[i] = c_high;
+                    } else {
+                        child1[i] = c_high;
+                        child2[i] = c_low;
                     }
                 }
             }
@@ -1121,7 +1222,9 @@ mod tests {
         let parent2 = RealVector::new(vec![0.3, 0.4]);
         let bounds = MultiBounds::symmetric(0.5, 2);
 
-        let sbx = SbxCrossover::new(2.0).with_probability(1.0); // Low eta = more spread, always crossover
+        // Low eta = more spread; force per-gene recombination so bounds are
+        // actually exercised.
+        let sbx = SbxCrossover::new(2.0).with_exchange_probability(1.0);
 
         // Run multiple times and check bounds
         for _ in 0..100 {
@@ -1143,6 +1246,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_sbx_default_probabilities_are_distinct() {
+        // regression: EV-72 — the per-pair crossover probability (0.9) and the
+        // per-gene SBX exchange probability (0.5) are separate quantities with
+        // canonical defaults. Previously a single 0.9 field was overloaded as
+        // both, so the reported per-pair rate equalled the per-gene mixing rate.
+        let sbx = SbxCrossover::new(20.0);
+        assert_eq!(sbx.crossover_probability, 0.9);
+        assert_eq!(sbx.exchange_probability, 0.5);
+
+        // The trait-reported probability is the per-pair rate, and setting it
+        // must not disturb the per-gene exchange rate.
+        let sbx = SbxCrossover::new(20.0).with_probability(0.7);
+        assert_eq!(
+            CrossoverOperator::<RealVector>::crossover_probability(&sbx),
+            0.7
+        );
+        assert_eq!(sbx.exchange_probability, 0.5);
+
+        // ...and vice versa.
+        let sbx = SbxCrossover::new(20.0).with_exchange_probability(0.3);
+        assert_eq!(sbx.exchange_probability, 0.3);
+        assert_eq!(
+            CrossoverOperator::<RealVector>::crossover_probability(&sbx),
+            0.9
+        );
+    }
+
+    #[test]
+    fn test_sbx_bounded_no_atom_at_bounds_mean_preserving() {
+        // regression: EV-71 — bounds-aware SBX draws children inside [min, max]
+        // by construction; it must NOT pile probability mass onto the bounds
+        // the way the old clamp-only path did. Monte Carlo: (a) every child is
+        // strictly within bounds, (b) essentially no children land exactly on a
+        // bound (pre-fix ~10% did), and (c) the mean is preserved (symmetric
+        // parents => midpoint preserved exactly per draw, so the sample mean is
+        // the parent midpoint).
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+
+        let bounds = MultiBounds::symmetric(1.0, 1); // [-1, 1]
+        let parent1 = RealVector::new(vec![-0.6]);
+        let parent2 = RealVector::new(vec![0.6]);
+        let parent_mid = 0.0;
+
+        // Low eta => wide spread => the old clamp path would frequently push
+        // offspring onto the bounds; force per-gene recombination every draw.
+        let sbx = SbxCrossover::new(2.0).with_exchange_probability(1.0);
+
+        let n = 20_000;
+        let mut atom_count = 0usize;
+        let mut sum_children = 0.0;
+        let mut child_samples = 0usize;
+        let eps = 1e-9;
+
+        for _ in 0..n {
+            let result = sbx.crossover_bounded(&parent1, &parent2, &bounds, &mut rng);
+            let (c1, c2) = result.genome().unwrap();
+            for &g in c1.genes().iter().chain(c2.genes()) {
+                assert!(
+                    (-1.0..=1.0).contains(&g),
+                    "child gene {g} escaped bounds [-1, 1]"
+                );
+                if (g - 1.0).abs() < eps || (g + 1.0).abs() < eps {
+                    atom_count += 1;
+                }
+                sum_children += g;
+                child_samples += 1;
+            }
+        }
+
+        let atom_frac = atom_count as f64 / child_samples as f64;
+        assert!(
+            atom_frac < 0.01,
+            "too many children pinned to the bounds: {atom_frac} (expected ~0)"
+        );
+
+        let mean_children = sum_children / child_samples as f64;
+        assert!(
+            (mean_children - parent_mid).abs() < 0.02,
+            "bounded SBX is not mean-preserving: mean {mean_children} vs parent midpoint {parent_mid}"
+        );
     }
 
     #[test]

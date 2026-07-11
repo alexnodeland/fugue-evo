@@ -52,9 +52,17 @@ pub trait MutationOperator<G: EvolutionaryGenome>: Send + Sync {
     /// Apply mutation to a genome in place
     fn mutate<R: Rng>(&self, genome: &mut G, rng: &mut R);
 
-    /// Get the mutation probability per gene
-    fn mutation_probability(&self) -> f64 {
-        1.0
+    /// Report the per-gene mutation probability *actually applied* by this
+    /// operator.
+    ///
+    /// Returns `None` when the operator uses a genome-length-dependent default
+    /// (the canonical `1/n` per-gene rate) that cannot be expressed as a single
+    /// constant here — this is the honest signal that the effective rate is
+    /// `1 / genome.len()`, not the misleading `1.0` this method used to report
+    /// (audit EV-103). Operators that always act on the whole genome (or have
+    /// no per-gene rate) return `Some(1.0)`.
+    fn mutation_probability(&self) -> Option<f64> {
+        Some(1.0)
     }
 }
 

@@ -28,6 +28,10 @@ pub struct PolynomialMutation {
     pub eta_m: f64,
     /// Per-gene mutation probability (default: 1/n)
     pub mutation_probability: Option<f64>,
+    /// Standard deviation used by the *unbounded* fallback (see
+    /// [`MutationOperator::mutate`]). `None` selects the adaptive default
+    /// `0.1 * (1 + |x|)` per gene; `Some(s)` uses a fixed `s`.
+    pub unbounded_sigma: Option<f64>,
 }
 
 impl PolynomialMutation {
@@ -37,6 +41,7 @@ impl PolynomialMutation {
         Self {
             eta_m,
             mutation_probability: None,
+            unbounded_sigma: None,
         }
     }
 
@@ -47,6 +52,18 @@ impl PolynomialMutation {
             "Probability must be in [0, 1]"
         );
         self.mutation_probability = Some(probability);
+        self
+    }
+
+    /// Set the standard deviation of the unbounded Gaussian fallback.
+    ///
+    /// Polynomial mutation is only defined relative to finite bounds; when the
+    /// operator is invoked without bounds it perturbs each gene with Gaussian
+    /// noise instead (audit EV-102). By default the per-gene sigma is
+    /// `0.1 * (1 + |x|)`; this method pins it to a fixed value.
+    pub fn with_unbounded_sigma(mut self, sigma: f64) -> Self {
+        assert!(sigma >= 0.0, "Sigma must be non-negative");
+        self.unbounded_sigma = Some(sigma);
         self
     }
 
@@ -75,13 +92,28 @@ impl PolynomialMutation {
 
 impl MutationOperator<RealVector> for PolynomialMutation {
     fn mutate<R: Rng>(&self, genome: &mut RealVector, rng: &mut R) {
-        // Use default bounds if not specified
-        let default_bounds = MultiBounds::symmetric(1e10, genome.dimension());
-        self.mutate_bounded(genome, &default_bounds, rng);
+        // Polynomial mutation is intrinsically bounds-relative and is undefined
+        // without a finite range. Rather than fabricating +/-1e10 bounds (which
+        // turned an "unbounded" mutation into a destructive, near-random reset
+        // of each gene), fall back to a local Gaussian perturbation (EV-102).
+        let n = genome.dimension();
+        let prob = self.mutation_probability.unwrap_or(1.0 / n as f64);
+
+        for gene in genome.genes_mut() {
+            if rng.gen::<f64>() < prob {
+                let sigma = self
+                    .unbounded_sigma
+                    .unwrap_or_else(|| 0.1 * (1.0 + gene.abs()));
+                if sigma > 0.0 {
+                    let normal = Normal::new(0.0, sigma).unwrap();
+                    *gene += normal.sample(rng);
+                }
+            }
+        }
     }
 
-    fn mutation_probability(&self) -> f64 {
-        self.mutation_probability.unwrap_or(1.0)
+    fn mutation_probability(&self) -> Option<f64> {
+        self.mutation_probability
     }
 }
 
@@ -146,8 +178,8 @@ impl MutationOperator<RealVector> for GaussianMutation {
         }
     }
 
-    fn mutation_probability(&self) -> f64 {
-        self.mutation_probability.unwrap_or(1.0)
+    fn mutation_probability(&self) -> Option<f64> {
+        self.mutation_probability
     }
 }
 
@@ -204,8 +236,15 @@ impl Default for UniformMutation {
 
 impl MutationOperator<RealVector> for UniformMutation {
     fn mutate<R: Rng>(&self, genome: &mut RealVector, rng: &mut R) {
+        // Uniform mutation requires a finite range; without explicit bounds we
+        // fall back to the modest, non-destructive default range [-1, 1].
+        // Prefer [`mutate_bounded`] with real bounds whenever they are known.
         let default_bounds = MultiBounds::symmetric(1.0, genome.dimension());
         self.mutate_bounded(genome, &default_bounds, rng);
+    }
+
+    fn mutation_probability(&self) -> Option<f64> {
+        self.mutation_probability
     }
 }
 
@@ -270,15 +309,15 @@ impl MutationOperator<BitString> for BitFlipMutation {
         }
     }
 
-    fn mutation_probability(&self) -> f64 {
-        self.mutation_probability.unwrap_or(1.0)
+    fn mutation_probability(&self) -> Option<f64> {
+        self.mutation_probability
     }
 }
 
 /// Swap mutation for permutation genomes (also works on any genome)
 ///
 /// Swaps two random positions in the genome.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SwapMutation {
     /// Number of swaps to perform
     pub num_swaps: usize,
@@ -293,6 +332,14 @@ impl SwapMutation {
     /// Create with multiple swaps
     pub fn with_swaps(num_swaps: usize) -> Self {
         Self { num_swaps }
+    }
+}
+
+impl Default for SwapMutation {
+    /// Delegates to [`SwapMutation::new`] (a single swap). A derived `Default`
+    /// would set `num_swaps = 0`, producing a silent no-op operator (EV-101).
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -400,7 +447,7 @@ impl MutationOperator<RealVector> for ScrambleMutation {
 ///
 /// Swaps two random positions in the permutation.
 /// This is one of the simplest and most commonly used permutation mutations.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PermutationSwapMutation {
     /// Number of swaps to perform
     pub num_swaps: usize,
@@ -415,6 +462,14 @@ impl PermutationSwapMutation {
     /// Create with multiple swaps
     pub fn with_swaps(num_swaps: usize) -> Self {
         Self { num_swaps }
+    }
+}
+
+impl Default for PermutationSwapMutation {
+    /// Delegates to [`PermutationSwapMutation::new`] (a single swap). A derived
+    /// `Default` would set `num_swaps = 0`, a silent no-op operator (EV-101).
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -439,7 +494,7 @@ impl MutationOperator<Permutation> for PermutationSwapMutation {
 ///
 /// Removes an element from one position and inserts it at another.
 /// This preserves adjacencies better than swap mutation.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct InsertMutation {
     /// Number of insert operations to perform
     pub num_inserts: usize,
@@ -454,6 +509,14 @@ impl InsertMutation {
     /// Create with multiple inserts
     pub fn with_inserts(num_inserts: usize) -> Self {
         Self { num_inserts }
+    }
+}
+
+impl Default for InsertMutation {
+    /// Delegates to [`InsertMutation::new`] (a single insert). A derived
+    /// `Default` would set `num_inserts = 0`, a silent no-op operator (EV-101).
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -797,8 +860,8 @@ impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for PointMutat
         genome.root = new_root;
     }
 
-    fn mutation_probability(&self) -> f64 {
-        self.mutation_probability
+    fn mutation_probability(&self) -> Option<f64> {
+        Some(self.mutation_probability)
     }
 }
 
@@ -872,17 +935,39 @@ impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for SubtreeMut
                 .unwrap_or_else(|| genome.random_function_position(rng).unwrap_or_default())
         };
 
-        // Calculate remaining depth budget
-        let current_depth = position.len();
-        let remaining_depth = genome.max_depth.saturating_sub(current_depth);
-        let subtree_depth = remaining_depth.min(self.max_subtree_depth).max(1);
+        // Depth budget for the replacement subtree (EV-27).
+        //
+        // `position` has one entry per edge from the root, so the selected node
+        // sits at tree level `position.len() + 1` (the root is level 1).
+        // Replacing it with a subtree `S` yields a tree whose depth along that
+        // branch is `position.len() + S.depth()`. To keep the whole tree within
+        // `genome.max_depth` we require `S.depth() <= max_depth - position.len()`.
+        let point_depth = position.len();
+        let budget = genome
+            .max_depth
+            .saturating_sub(point_depth)
+            .min(self.max_subtree_depth)
+            .max(1);
 
-        // Generate a new subtree using the grow method
-        let new_subtree: TreeGenome<T, F> =
-            TreeGenome::generate_grow(rng, subtree_depth, self.terminal_probability);
+        // `TreeGenome::generate_grow(_, m, _)` can produce a subtree whose
+        // `depth()` is up to `m + 1` (a function node may be created at the last
+        // permitted level and still receives terminal children one level
+        // deeper). We therefore ask for `budget - 1` so the result's depth is at
+        // most `budget`.
+        let new_root =
+            TreeGenome::<T, F>::generate_grow(rng, budget - 1, self.terminal_probability).root;
+
+        // Defensive guard mirroring SubtreeCrossover: if the generated subtree
+        // would still violate the depth limit, fall back to a single terminal,
+        // which always fits since `budget >= 1`.
+        let new_root = if point_depth + new_root.depth() > genome.max_depth {
+            TreeNode::Terminal(T::random(rng))
+        } else {
+            new_root
+        };
 
         // Replace the subtree
-        genome.root.replace_subtree(&position, new_subtree.root);
+        genome.root.replace_subtree(&position, new_root);
     }
 }
 
@@ -1571,5 +1656,175 @@ mod tests {
             // Point mutation preserves structure
             assert_eq!(genome.size(), original_size);
         }
+    }
+
+    #[test]
+    fn test_subtree_mutation_respects_max_depth() {
+        // regression: EV-27 — SubtreeMutation must never grow a tree beyond its
+        // `max_depth`. Pre-fix, the depth budget was off by one (generate_grow
+        // can produce a subtree one level deeper than requested) and the
+        // violation compounded across repeated mutations. Fuzz 500 mutations
+        // with a large `max_subtree_depth` (to stress the budget) and assert the
+        // depth invariant after every single mutation.
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2024);
+
+        let max_depth = 5;
+        // Start from a valid full tree at exactly `max_depth`
+        // (generate_full(_, d, _) yields depth d + 1).
+        let mut genome: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+            TreeGenome::generate_full(&mut rng, max_depth - 1, max_depth);
+        assert!(genome.depth() <= max_depth);
+
+        // Large subtree budget + low terminal probability => generate_grow tends
+        // to emit functions, maximally exercising the off-by-one path.
+        let mutation = SubtreeMutation::new()
+            .with_max_depth(12)
+            .with_terminal_probability(0.1);
+
+        for i in 0..500 {
+            mutation.mutate(&mut genome, &mut rng);
+            assert!(
+                genome.depth() <= max_depth,
+                "iteration {i}: tree depth {} exceeded max_depth {max_depth}",
+                genome.depth()
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_swap_mutations_actually_mutate() {
+        // regression: EV-101 — SwapMutation / PermutationSwapMutation /
+        // InsertMutation previously derived Default, giving num=0 (a silent
+        // no-op). Default::default() must now behave like new() (num=1) and
+        // actually change the genome.
+        assert_eq!(SwapMutation::default().num_swaps, 1);
+        assert_eq!(PermutationSwapMutation::default().num_swaps, 1);
+        assert_eq!(InsertMutation::default().num_inserts, 1);
+
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+
+        // A default SwapMutation must eventually move genes (num_swaps=0 never would).
+        let mut any_changed = false;
+        for _ in 0..50 {
+            let original = RealVector::new(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+            let mut genome = original.clone();
+            SwapMutation::default().mutate(&mut genome, &mut rng);
+            if genome.genes() != original.genes() {
+                any_changed = true;
+                break;
+            }
+        }
+        assert!(
+            any_changed,
+            "Default SwapMutation never mutated (num_swaps == 0?)"
+        );
+
+        // Default permutation swap: a valid perm with a moved element.
+        let mut perm_changed = false;
+        for _ in 0..50 {
+            let original = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+            let mut genome = original.clone();
+            PermutationSwapMutation::default().mutate(&mut genome, &mut rng);
+            if genome.as_slice() != original.as_slice() {
+                perm_changed = true;
+                break;
+            }
+        }
+        assert!(
+            perm_changed,
+            "Default PermutationSwapMutation never mutated (num_swaps == 0?)"
+        );
+
+        // Default insert mutation.
+        let mut insert_changed = false;
+        for _ in 0..50 {
+            let original = Permutation::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+            let mut genome = original.clone();
+            InsertMutation::default().mutate(&mut genome, &mut rng);
+            if genome.as_slice() != original.as_slice() {
+                insert_changed = true;
+                break;
+            }
+        }
+        assert!(
+            insert_changed,
+            "Default InsertMutation never mutated (num_inserts == 0?)"
+        );
+    }
+
+    #[test]
+    fn test_unbounded_polynomial_mutation_stays_local() {
+        // regression: EV-102 — the unbounded PolynomialMutation path used to
+        // fabricate +/-1e10 bounds, turning a mutation into a near-random reset
+        // spanning ~1e10 in magnitude. It must instead apply a local Gaussian
+        // perturbation and keep genes near their original values.
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+
+        for _ in 0..200 {
+            let mut genome = RealVector::new(vec![0.0, 1.0, -1.0, 2.5, -3.0]);
+            let mutation = PolynomialMutation::new(20.0).with_probability(1.0);
+            mutation.mutate(&mut genome, &mut rng); // unbounded path
+
+            for &g in genome.genes() {
+                assert!(
+                    g.abs() < 100.0,
+                    "unbounded polynomial mutation produced a destructive value: {g}"
+                );
+            }
+        }
+
+        // A fixed sigma is honored.
+        let mut genome = RealVector::new(vec![0.0; 1000]);
+        let mutation = PolynomialMutation::new(20.0)
+            .with_probability(1.0)
+            .with_unbounded_sigma(0.05);
+        mutation.mutate(&mut genome, &mut rng);
+        let variance: f64 =
+            genome.genes().iter().map(|g| g * g).sum::<f64>() / genome.dimension() as f64;
+        // Sample std should be near 0.05 (well under any 1e10 fabrication).
+        assert!(
+            variance.sqrt() < 0.2,
+            "fixed sigma not honored: std {}",
+            variance.sqrt()
+        );
+    }
+
+    #[test]
+    fn test_mutation_probability_reports_effective_rate() {
+        // regression: EV-103 — mutation_probability() used to report 1.0 while
+        // the operators actually applied the per-gene default 1/n. It must now
+        // report `None` for the length-dependent default and `Some(p)` for a
+        // configured rate.
+        assert_eq!(
+            MutationOperator::<RealVector>::mutation_probability(&PolynomialMutation::new(20.0)),
+            None
+        );
+        assert_eq!(
+            MutationOperator::<RealVector>::mutation_probability(
+                &PolynomialMutation::new(20.0).with_probability(0.25)
+            ),
+            Some(0.25)
+        );
+        assert_eq!(
+            MutationOperator::<RealVector>::mutation_probability(&GaussianMutation::new(0.1)),
+            None
+        );
+        assert_eq!(
+            MutationOperator::<RealVector>::mutation_probability(&UniformMutation::new()),
+            None
+        );
+        assert_eq!(
+            MutationOperator::<BitString>::mutation_probability(&BitFlipMutation::new()),
+            None
+        );
+        assert_eq!(
+            MutationOperator::<BitString>::mutation_probability(
+                &BitFlipMutation::new().with_probability(0.5)
+            ),
+            Some(0.5)
+        );
     }
 }
