@@ -9,8 +9,18 @@ use rand::Rng;
 use crate::diagnostics::{EvolutionResult, EvolutionStats, GenerationStats, TimingStats};
 use crate::error::EvolutionError;
 use crate::fitness::traits::{Fitness, FitnessValue};
+use crate::genome::bit_string::BitString;
 use crate::genome::bounds::MultiBounds;
+use crate::genome::permutation::Permutation;
+use crate::genome::real_vector::RealVector;
 use crate::genome::traits::EvolutionaryGenome;
+use crate::hyperparameter::bayesian::{
+    ThompsonConfig, ThompsonSamplingTuner, TunableMutation, PARAM_CROSSOVER_PROB,
+    PARAM_MUTATION_RATE,
+};
+use crate::operators::crossover::{OxCrossover, SbxCrossover, UniformCrossover};
+use crate::operators::mutation::{BitFlipMutation, PermutationSwapMutation, PolynomialMutation};
+use crate::operators::selection::TournamentSelection;
 use crate::operators::traits::{
     BoundedCrossoverOperator, BoundedMutationOperator, CrossoverOperator, MutationOperator,
     SelectionOperator,
@@ -18,6 +28,37 @@ use crate::operators::traits::{
 use crate::population::individual::Individual;
 use crate::population::population::Population;
 use crate::termination::{EvolutionState, MaxGenerations, TerminationCriterion};
+
+/// Validate a builder's configuration and bounds, producing a clear typed error.
+///
+/// Every operator/fitness/termination slot is enforced at compile time by the
+/// type-state builder, so this only needs to cover the runtime-configurable
+/// fields (population sizing, probabilities, and bounds).
+fn validate_config(config: &SimpleGAConfig, bounds: &MultiBounds) -> Result<(), EvolutionError> {
+    if config.population_size == 0 {
+        return Err(EvolutionError::Configuration(
+            "population_size must be at least 1".to_string(),
+        ));
+    }
+    if bounds.dimension() == 0 {
+        return Err(EvolutionError::Configuration(
+            "bounds must have at least one dimension".to_string(),
+        ));
+    }
+    if config.elitism && config.elite_count > config.population_size {
+        return Err(EvolutionError::Configuration(format!(
+            "elite_count ({}) cannot exceed population_size ({})",
+            config.elite_count, config.population_size
+        )));
+    }
+    if !(0.0..=1.0).contains(&config.crossover_probability) {
+        return Err(EvolutionError::Configuration(format!(
+            "crossover_probability must be in [0, 1], got {}",
+            config.crossover_probability
+        )));
+    }
+    Ok(())
+}
 
 /// Configuration for the Simple GA
 #[derive(Clone, Debug)]
@@ -59,6 +100,7 @@ where
     mutation: Option<M>,
     fitness: Option<Fit>,
     termination: Option<Term>,
+    adaptive: Option<ThompsonConfig>,
     _phantom: std::marker::PhantomData<(G, F)>,
 }
 
@@ -77,8 +119,91 @@ where
             mutation: None,
             fitness: None,
             termination: None,
+            adaptive: None,
             _phantom: std::marker::PhantomData,
         }
+    }
+}
+
+impl
+    SimpleGABuilder<RealVector, f64, TournamentSelection, SbxCrossover, PolynomialMutation, (), ()>
+{
+    /// Ergonomic entry point for real-valued optimization — **no turbofish needed**.
+    ///
+    /// Pins the genome to [`RealVector`] and the fitness value to `f64`, and
+    /// pre-installs sensible operator defaults (tournament selection, SBX
+    /// crossover, polynomial mutation). Any default is overridable by calling the
+    /// corresponding `.selection()` / `.crossover()` / `.mutation()` method.
+    ///
+    /// ```no_run
+    /// use fugue_evo::prelude::*;
+    /// use rand::{rngs::StdRng, SeedableRng};
+    ///
+    /// let mut rng = StdRng::seed_from_u64(42);
+    /// let result = SimpleGABuilder::real_valued()
+    ///     .population_size(100)
+    ///     .bounds(MultiBounds::symmetric(5.12, 10))
+    ///     .fitness(Sphere::new(10))
+    ///     .max_generations(200)
+    ///     .build()
+    ///     .unwrap()
+    ///     .run(&mut rng)
+    ///     .unwrap();
+    /// println!("best = {:.6}", result.best_fitness);
+    /// ```
+    pub fn real_valued() -> Self {
+        SimpleGABuilder::new()
+            .selection(TournamentSelection::new(3))
+            .crossover(SbxCrossover::new(20.0))
+            .mutation(PolynomialMutation::new(20.0))
+    }
+}
+
+impl
+    SimpleGABuilder<
+        BitString,
+        usize,
+        TournamentSelection,
+        UniformCrossover,
+        BitFlipMutation,
+        (),
+        (),
+    >
+{
+    /// Ergonomic entry point for bit-string optimization — **no turbofish needed**.
+    ///
+    /// Pins the genome to [`BitString`] and the fitness value to `usize`, with
+    /// tournament selection, uniform crossover, and bit-flip mutation as
+    /// overridable defaults.
+    pub fn bit_string() -> Self {
+        SimpleGABuilder::new()
+            .selection(TournamentSelection::new(3))
+            .crossover(UniformCrossover::new())
+            .mutation(BitFlipMutation::new())
+    }
+}
+
+impl
+    SimpleGABuilder<
+        Permutation,
+        f64,
+        TournamentSelection,
+        OxCrossover,
+        PermutationSwapMutation,
+        (),
+        (),
+    >
+{
+    /// Ergonomic entry point for permutation optimization — **no turbofish needed**.
+    ///
+    /// Pins the genome to [`Permutation`] and the fitness value to `f64`, with
+    /// tournament selection, order crossover (OX), and swap mutation as
+    /// overridable defaults.
+    pub fn permutation() -> Self {
+        SimpleGABuilder::new()
+            .selection(TournamentSelection::new(3))
+            .crossover(OxCrossover)
+            .mutation(PermutationSwapMutation::default())
     }
 }
 
@@ -133,6 +258,19 @@ where
         self
     }
 
+    /// Opt in to online Thompson-sampling tuning of operator parameters.
+    ///
+    /// When enabled, [`SimpleGA::run_adaptive`] consults a
+    /// [`ThompsonSamplingTuner`] each generation for the per-gene mutation
+    /// probability and the whole-genome crossover probability, applies the
+    /// sampled arm values, and credits the arms with the observed
+    /// parent-vs-offspring improvement events. The mutation operator must
+    /// implement [`TunableMutation`].
+    pub fn adaptive_operators(mut self, config: ThompsonConfig) -> Self {
+        self.adaptive = Some(config);
+        self
+    }
+
     /// Set the selection operator
     pub fn selection<NewS>(self, selection: NewS) -> SimpleGABuilder<G, F, NewS, C, M, Fit, Term>
     where
@@ -142,6 +280,7 @@ where
             config: self.config,
             bounds: self.bounds,
             selection: Some(selection),
+            adaptive: self.adaptive,
             crossover: self.crossover,
             mutation: self.mutation,
             fitness: self.fitness,
@@ -160,6 +299,7 @@ where
             bounds: self.bounds,
             selection: self.selection,
             crossover: Some(crossover),
+            adaptive: self.adaptive,
             mutation: self.mutation,
             fitness: self.fitness,
             termination: self.termination,
@@ -178,6 +318,7 @@ where
             selection: self.selection,
             crossover: self.crossover,
             mutation: Some(mutation),
+            adaptive: self.adaptive,
             fitness: self.fitness,
             termination: self.termination,
             _phantom: std::marker::PhantomData,
@@ -196,6 +337,7 @@ where
             crossover: self.crossover,
             mutation: self.mutation,
             fitness: Some(fitness),
+            adaptive: self.adaptive,
             termination: self.termination,
             _phantom: std::marker::PhantomData,
         }
@@ -217,6 +359,7 @@ where
             mutation: self.mutation,
             fitness: self.fitness,
             termination: Some(termination),
+            adaptive: self.adaptive,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -234,6 +377,7 @@ where
             mutation: self.mutation,
             fitness: self.fitness,
             termination: Some(MaxGenerations::new(max)),
+            adaptive: self.adaptive,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -278,6 +422,12 @@ where
             EvolutionError::Configuration("Termination criterion must be specified".to_string())
         })?;
 
+        // Validate runtime-configurable fields (operators/fitness/termination are
+        // already enforced at compile time by the type-state builder).
+        validate_config(&self.config, &bounds)?;
+
+        let tuner = self.adaptive.map(|cfg| cfg.build_tuner());
+
         Ok(SimpleGA {
             config: self.config,
             bounds,
@@ -286,6 +436,7 @@ where
             mutation,
             fitness,
             termination,
+            tuner,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -330,6 +481,12 @@ where
             EvolutionError::Configuration("Termination criterion must be specified".to_string())
         })?;
 
+        // Validate runtime-configurable fields (operators/fitness/termination are
+        // already enforced at compile time by the type-state builder).
+        validate_config(&self.config, &bounds)?;
+
+        let tuner = self.adaptive.map(|cfg| cfg.build_tuner());
+
         Ok(SimpleGA {
             config: self.config,
             bounds,
@@ -338,6 +495,7 @@ where
             mutation,
             fitness,
             termination,
+            tuner,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -358,7 +516,182 @@ where
     mutation: M,
     fitness: Fit,
     termination: Term,
+    tuner: Option<ThompsonSamplingTuner>,
     _phantom: std::marker::PhantomData<(G, F)>,
+}
+
+// Adaptive (Thompson-sampling) run loop.
+//
+// Available for any tunable mutation operator regardless of the `parallel`
+// feature: it evaluates offspring sequentially so it can read each
+// parent-vs-offspring improvement event and feed it back to the tuner.
+impl<G, F, S, C, M, Fit, Term> SimpleGA<G, F, S, C, M, Fit, Term>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+    S: SelectionOperator<G>,
+    C: CrossoverOperator<G>,
+    M: MutationOperator<G> + TunableMutation + Clone,
+    Fit: Fitness<Genome = G, Value = F>,
+    Term: TerminationCriterion<G, F>,
+{
+    /// Access the online tuner.
+    ///
+    /// Populated once [`run_adaptive`](Self::run_adaptive) has run, or immediately
+    /// if the builder opted in via
+    /// [`SimpleGABuilder::adaptive_operators`](SimpleGABuilder::adaptive_operators).
+    pub fn tuner(&self) -> Option<&ThompsonSamplingTuner> {
+        self.tuner.as_ref()
+    }
+
+    /// Run the GA with online Thompson-sampling tuning of operator parameters.
+    ///
+    /// Each generation the tuner Thompson-samples a per-gene mutation probability
+    /// and a whole-genome crossover probability; those values drive that
+    /// generation's operators, and each offspring's improvement over its parents
+    /// is credited back to the arm that produced it. If the builder did not opt in
+    /// via [`SimpleGABuilder::adaptive_operators`](SimpleGABuilder::adaptive_operators),
+    /// a default [`ThompsonConfig`] tuner is created on first use.
+    pub fn run_adaptive<R: Rng>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<EvolutionResult<G, F>, EvolutionError> {
+        let start_time = Instant::now();
+
+        // Own the tuner locally so the loop can freely borrow `self`'s fields.
+        let mut tuner = self
+            .tuner
+            .take()
+            .unwrap_or_else(|| ThompsonConfig::default().build_tuner());
+
+        let mut population: Population<G, F> =
+            Population::random(self.config.population_size, &self.bounds, rng);
+        population.evaluate(&self.fitness);
+
+        let mut stats = EvolutionStats::new();
+        let mut evaluations = population.len();
+        let mut fitness_history: Vec<f64> = Vec::new();
+
+        let mut best_individual = population
+            .best()
+            .ok_or(EvolutionError::EmptyPopulation)?
+            .clone();
+
+        let gen_stats = GenerationStats::from_population(&population, 0, evaluations);
+        fitness_history.push(gen_stats.best_fitness);
+        stats.record(gen_stats);
+        tuner.snapshot(0);
+
+        loop {
+            let state = EvolutionState {
+                generation: population.generation(),
+                evaluations,
+                best_fitness: best_individual.fitness_value().to_f64(),
+                population: &population,
+                fitness_history: &fitness_history,
+            };
+            if self.termination.should_terminate(&state) {
+                stats.set_termination_reason(self.termination.reason());
+                break;
+            }
+
+            let next_generation = population.generation() + 1;
+
+            // Thompson-sample this generation's operator parameters.
+            tuner.select_all(rng);
+            let crossover_prob = tuner
+                .selected(PARAM_CROSSOVER_PROB)
+                .unwrap_or(self.config.crossover_probability);
+            let mut mutation = self.mutation.clone();
+            if let Some(mutation_prob) = tuner.selected(PARAM_MUTATION_RATE) {
+                mutation.set_mutation_probability(mutation_prob);
+            }
+
+            let mut new_population: Population<G, F> =
+                Population::with_capacity(self.config.population_size);
+
+            // Elitism: carry the best (already-evaluated) individuals forward.
+            if self.config.elitism {
+                let mut sorted = population.clone();
+                sorted.sort_by_fitness();
+                for i in 0..self.config.elite_count.min(sorted.len()) {
+                    new_population.push(sorted[i].clone());
+                }
+            }
+
+            let selection_pool: Vec<(G, f64)> = population.as_fitness_pairs();
+
+            while new_population.len() < self.config.population_size {
+                let p1 = self.selection.select(&selection_pool, rng);
+                let p2 = self.selection.select(&selection_pool, rng);
+                let parent1 = &selection_pool[p1].0;
+                let parent2 = &selection_pool[p2].0;
+                // Improvement is measured against the better of the two parents.
+                let parent_best = selection_pool[p1].1.max(selection_pool[p2].1);
+
+                let (mut child1, mut child2) = if rng.gen::<f64>() < crossover_prob {
+                    match self.crossover.crossover(parent1, parent2, rng).genome() {
+                        Some((c1, c2)) => (c1, c2),
+                        None => (parent1.clone(), parent2.clone()),
+                    }
+                } else {
+                    (parent1.clone(), parent2.clone())
+                };
+
+                mutation.mutate(&mut child1, rng);
+                mutation.mutate(&mut child2, rng);
+
+                // Evaluate immediately so each improvement event credits the arms.
+                let f1 = self.fitness.evaluate(&child1);
+                tuner.observe(f1.to_f64() > parent_best);
+                evaluations += 1;
+                let mut ind1 = Individual::with_fitness(child1, f1);
+                ind1.birth_generation = next_generation;
+                new_population.push(ind1);
+
+                if new_population.len() < self.config.population_size {
+                    let f2 = self.fitness.evaluate(&child2);
+                    tuner.observe(f2.to_f64() > parent_best);
+                    evaluations += 1;
+                    let mut ind2 = Individual::with_fitness(child2, f2);
+                    ind2.birth_generation = next_generation;
+                    new_population.push(ind2);
+                }
+            }
+
+            while new_population.len() > self.config.population_size {
+                new_population.pop();
+            }
+
+            new_population.set_generation(next_generation);
+            population = new_population;
+
+            if let Some(best) = population.best() {
+                if best.is_better_than(&best_individual) {
+                    best_individual = best.clone();
+                }
+            }
+
+            let gen_stats =
+                GenerationStats::from_population(&population, population.generation(), evaluations);
+            fitness_history.push(gen_stats.best_fitness);
+            stats.record(gen_stats);
+            tuner.snapshot(next_generation);
+        }
+
+        stats.set_runtime(start_time.elapsed());
+
+        // Store the tuner back so callers can inspect the learned posteriors.
+        self.tuner = Some(tuner);
+
+        Ok(EvolutionResult::new(
+            best_individual.genome,
+            best_individual.fitness.unwrap(),
+            population.generation(),
+            evaluations,
+        )
+        .with_stats(stats))
+    }
 }
 
 // Parallel version with Send + Sync bounds
@@ -1042,7 +1375,7 @@ mod tests {
     use crate::fitness::benchmarks::{OneMax, Sphere};
     use crate::genome::traits::RealValuedGenome;
     use crate::operators::crossover::{SbxCrossover, UniformCrossover};
-    use crate::operators::mutation::{BitFlipMutation, PolynomialMutation};
+    use crate::operators::mutation::{BitFlipMutation, GaussianMutation, PolynomialMutation};
     use crate::operators::selection::TournamentSelection;
     use crate::termination::TargetFitness;
 
@@ -1252,5 +1585,163 @@ mod tests {
         for i in 1..history.len() {
             assert!(history[i] >= history[i - 1] - 0.001); // Allow small numerical error
         }
+    }
+
+    /// regression: EV-35 — the quickstart must work with ZERO turbofish via the
+    /// `real_valued()` entry point (pre-fix, the only path was the 7-parameter
+    /// `SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()` turbofish form).
+    #[test]
+    fn test_real_valued_constructor_no_turbofish() {
+        let mut rng = rand::thread_rng();
+        let ga = SimpleGABuilder::real_valued()
+            .population_size(40)
+            .bounds(MultiBounds::symmetric(5.12, 10))
+            .fitness(Sphere::new(10))
+            .max_generations(20)
+            .build()
+            .unwrap();
+        let result = ga.run(&mut rng).unwrap();
+        assert!(result.evaluations > 0);
+    }
+
+    /// regression: EV-35 — a default operator installed by `real_valued()` remains
+    /// overridable (calling `.mutation(...)` swaps it and still builds).
+    #[test]
+    fn test_real_valued_constructor_override_operator() {
+        let mut rng = rand::thread_rng();
+        let ga = SimpleGABuilder::real_valued()
+            .mutation(GaussianMutation::new(0.1))
+            .population_size(30)
+            .bounds(MultiBounds::symmetric(5.12, 5))
+            .fitness(Sphere::new(5))
+            .max_generations(10)
+            .build()
+            .unwrap();
+        assert!(ga.run(&mut rng).is_ok());
+    }
+
+    /// regression: EV-35 — bit-string quickstart with zero turbofish.
+    #[test]
+    fn test_bit_string_constructor_no_turbofish() {
+        let mut rng = rand::thread_rng();
+        let ga = SimpleGABuilder::bit_string()
+            .population_size(40)
+            .bounds(MultiBounds::uniform(
+                crate::genome::bounds::Bounds::unit(),
+                20,
+            ))
+            .fitness(OneMax::new(20))
+            .max_generations(30)
+            .build()
+            .unwrap();
+        let result = ga.run(&mut rng).unwrap();
+        assert!(result.best_fitness >= 10);
+    }
+
+    /// regression: EV-35 — permutation quickstart with zero turbofish.
+    #[test]
+    fn test_permutation_constructor_no_turbofish() {
+        use crate::fitness::traits::FnFitness;
+        use crate::genome::permutation::Permutation;
+        use crate::genome::traits::PermutationGenome;
+
+        let mut rng = rand::thread_rng();
+        // Maximized when the permutation equals the identity (sum of |v - i| = 0).
+        let fitness = FnFitness::new(|p: &Permutation| -> f64 {
+            -(p.permutation()
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (v as f64 - i as f64).abs())
+                .sum::<f64>())
+        });
+        let ga = SimpleGABuilder::permutation()
+            .population_size(30)
+            .bounds(MultiBounds::symmetric(1.0, 8))
+            .fitness(fitness)
+            .max_generations(10)
+            .build()
+            .unwrap();
+        assert!(ga.run(&mut rng).is_ok());
+    }
+
+    /// regression: EV-86 — build() must reject an invalid config with a clear
+    /// typed `Configuration` error rather than proceeding or panicking.
+    #[test]
+    fn test_build_rejects_zero_population() {
+        let ga = SimpleGABuilder::real_valued()
+            .population_size(0)
+            .bounds(MultiBounds::symmetric(5.12, 10))
+            .fitness(Sphere::new(10))
+            .max_generations(10)
+            .build();
+        assert!(ga.is_err());
+        let msg = ga.err().unwrap().to_string();
+        assert!(msg.contains("population_size"), "got: {msg}");
+    }
+
+    /// regression: EV-86 — build() validates the crossover probability range.
+    #[test]
+    fn test_build_rejects_out_of_range_crossover_probability() {
+        let ga = SimpleGABuilder::real_valued()
+            .crossover_probability(1.5)
+            .population_size(20)
+            .bounds(MultiBounds::symmetric(5.12, 5))
+            .fitness(Sphere::new(5))
+            .max_generations(5)
+            .build();
+        assert!(ga.is_err());
+        assert!(ga
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("crossover_probability"));
+    }
+
+    /// regression: EV-86 — elite_count exceeding population_size is rejected.
+    #[test]
+    fn test_build_rejects_elite_count_exceeding_population() {
+        let ga = SimpleGABuilder::real_valued()
+            .population_size(10)
+            .elite_count(50)
+            .bounds(MultiBounds::symmetric(5.12, 5))
+            .fitness(Sphere::new(5))
+            .max_generations(5)
+            .build();
+        assert!(ga.is_err());
+        assert!(ga.err().unwrap().to_string().contains("elite_count"));
+    }
+
+    /// regression: EV-21 — the adaptive tuner is actually wired into the GA: after
+    /// `run_adaptive` the tuner has received improvement feedback (pre-fix, no
+    /// algorithm consumed the learner at all).
+    #[test]
+    fn test_run_adaptive_feeds_tuner() {
+        use crate::hyperparameter::bayesian::{ThompsonConfig, PARAM_MUTATION_RATE};
+
+        let mut rng = rand::thread_rng();
+        let mut ga = SimpleGABuilder::real_valued()
+            .population_size(30)
+            .bounds(MultiBounds::symmetric(5.12, 8))
+            .fitness(Sphere::new(8))
+            .max_generations(15)
+            .adaptive_operators(ThompsonConfig::default())
+            .build()
+            .unwrap();
+
+        let result = ga.run_adaptive(&mut rng).unwrap();
+        assert!(result.evaluations > 0);
+
+        let tuner = ga
+            .tuner()
+            .expect("tuner should be present after run_adaptive");
+        assert!(
+            tuner.total_observations() > 0,
+            "tuner must receive improvement feedback"
+        );
+        let mr = tuner.parameter(PARAM_MUTATION_RATE).unwrap();
+        assert!(
+            mr.total_observations() > 0.0,
+            "mutation-rate arms must accumulate observations"
+        );
     }
 }

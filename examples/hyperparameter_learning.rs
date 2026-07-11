@@ -1,218 +1,149 @@
-//! Hyperparameter Learning with Bayesian Adaptation
+//! Online Operator-Parameter Learning with a Thompson-Sampling Bandit
 //!
-//! This example demonstrates online Bayesian learning of GA hyperparameters.
-//! The system learns optimal mutation rates based on observed fitness improvements.
+//! This example demonstrates the *wired-in* hyperparameter learner: a
+//! [`ThompsonSamplingTuner`] driven directly by [`SimpleGA::run_adaptive`].
+//!
+//! Each generation the GA Thompson-samples a per-gene mutation probability and a
+//! whole-genome crossover probability from the tuner, applies those arm values to
+//! its operators, and credits each arm with the observed parent-vs-offspring
+//! improvement events. The arm's Beta draw is used *only* to pick the arm — it is
+//! never returned as the parameter value itself (the bug the old learner had).
+//!
+//! Run with:
+//! ```text
+//! cargo run --example hyperparameter_learning
+//! ```
 
 use fugue_evo::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Bayesian Hyperparameter Learning ===\n");
+    println!("=== Thompson-Sampling Operator-Parameter Learning ===\n");
 
     let mut rng = StdRng::seed_from_u64(42);
 
     const DIM: usize = 20;
-    let fitness = Rastrigin::new(DIM);
     let bounds = MultiBounds::symmetric(5.12, DIM);
 
-    println!("Problem: {}-D Rastrigin", DIM);
-    println!("Learning optimal mutation rate via Beta posterior\n");
+    println!("Problem: {DIM}-D Rastrigin");
+    println!("Learner: Thompson-sampling bandit over mutation- and crossover-probability arms\n");
 
-    // Initialize Bayesian learner for mutation rate
-    // Prior: Beta(2, 2) centered around 0.5
-    let mut mutation_posterior = BetaPosterior::new(2.0, 2.0);
+    // Configure the bandit: candidate values ("arms") for each tunable parameter.
+    // Each arm holds a Beta posterior over P(offspring improves on parents | arm).
+    let config = ThompsonConfig {
+        mutation_rate_arms: vec![0.01, 0.05, 0.1, 0.2, 0.4],
+        crossover_prob_arms: vec![0.5, 0.7, 0.9],
+        prior: BetaPosterior::uniform(),
+        record_history: true,
+    };
 
-    // Track statistics
-    let mut successful_mutations = 0;
-    let mut total_mutations = 0;
+    println!("Mutation-rate arms:  {:?}", config.mutation_rate_arms);
+    println!("Crossover-prob arms: {:?}\n", config.crossover_prob_arms);
 
-    // Initialize population
-    let mut population: Population<RealVector, f64> = Population::random(100, &bounds, &mut rng);
-    population.evaluate(&fitness);
+    // Build a GA that consults the tuner every generation. `real_valued()` fixes
+    // the genome/fitness types (no turbofish); we override the mutation operator
+    // with a tunable Gaussian mutation whose per-gene probability the bandit sets.
+    let mut ga = SimpleGABuilder::real_valued()
+        .mutation(GaussianMutation::new(0.1))
+        .population_size(100)
+        .bounds(bounds)
+        .fitness(Rastrigin::new(DIM))
+        .max_generations(200)
+        .adaptive_operators(config)
+        .build()?;
 
-    let selection = TournamentSelection::new(3);
-    let crossover = SbxCrossover::new(15.0);
+    let result = ga.run_adaptive(&mut rng)?;
 
-    // Initial mutation rate from prior
-    let mut current_mutation_rate = mutation_posterior.mean();
+    // --- Posterior evolution ---------------------------------------------------
+    let tuner = ga.tuner().expect("tuner is present after run_adaptive");
+    let mr = tuner
+        .parameter(PARAM_MUTATION_RATE)
+        .expect("mutation-rate parameter");
+    let arm_values = mr.values();
 
-    println!(
-        "Initial mutation rate (prior mean): {:.4}",
-        current_mutation_rate
-    );
-    println!();
+    println!("Posterior evolution — P(improvement) mean per mutation-rate arm:\n");
+    print!("  {:>4}", "gen");
+    for v in &arm_values {
+        print!("   p={v:<5.2}");
+    }
+    println!("   selected");
 
-    let max_generations = 200;
-    let adaptation_interval = 20;
+    for snap in tuner.history().iter().step_by(20) {
+        // Find this parameter's entry in the snapshot.
+        if let Some((_, selected, means)) = snap
+            .parameters
+            .iter()
+            .find(|(name, _, _)| name == PARAM_MUTATION_RATE)
+        {
+            print!("  {:>4}", snap.generation);
+            for m in means {
+                print!("   {m:>6.3}");
+            }
+            match selected {
+                Some(v) => println!("   {v:.2}"),
+                None => println!("   -"),
+            }
+        }
+    }
 
-    for gen in 0..max_generations {
-        // Sample mutation rate from current posterior every adaptation interval
-        if gen > 0 && gen % adaptation_interval == 0 {
-            current_mutation_rate = mutation_posterior.sample(&mut rng);
+    // --- Learned parameters ----------------------------------------------------
+    println!("\n=== Learned operator parameters ===");
+    for param in tuner.parameters() {
+        let best = param.best_value();
+        println!("\nParameter '{}':", param.name);
+        for arm in param.arms() {
+            let flag = if (arm.value - best).abs() < 1e-12 {
+                " <-- best"
+            } else {
+                ""
+            };
             println!(
-                "Gen {:3}: Sampled mutation rate = {:.4} (posterior mean = {:.4})",
-                gen,
-                current_mutation_rate,
-                mutation_posterior.mean()
+                "  value {:<5.2}  P(improve)~{:.3}  pulls={}{}",
+                arm.value,
+                arm.posterior.mean(),
+                arm.selections,
+                flag
             );
         }
-
-        let selection_pool: Vec<_> = population.as_fitness_pairs();
-        let mut new_pop: Population<RealVector, f64> = Population::with_capacity(100);
-
-        // Elitism
-        if let Some(best) = population.best() {
-            new_pop.push(best.clone());
-        }
-
-        while new_pop.len() < 100 {
-            let p1_idx = selection.select(&selection_pool, &mut rng);
-            let p2_idx = selection.select(&selection_pool, &mut rng);
-
-            let (mut c1, mut c2) = crossover
-                .crossover(
-                    &selection_pool[p1_idx].0,
-                    &selection_pool[p2_idx].0,
-                    &mut rng,
-                )
-                .genome()
-                .unwrap_or_else(|| {
-                    (
-                        selection_pool[p1_idx].0.clone(),
-                        selection_pool[p2_idx].0.clone(),
-                    )
-                });
-
-            let parent1_fitness = selection_pool[p1_idx].1;
-            let parent2_fitness = selection_pool[p2_idx].1;
-
-            // Apply mutation with learned rate
-            let mutation = GaussianMutation::new(0.1).with_probability(current_mutation_rate);
-            mutation.mutate(&mut c1, &mut rng);
-            mutation.mutate(&mut c2, &mut rng);
-
-            // Evaluate children
-            let child1_fitness = fitness.evaluate(&c1);
-            let child2_fitness = fitness.evaluate(&c2);
-
-            // Update Bayesian posterior based on improvement
-            let improved1 = child1_fitness > parent1_fitness;
-            let improved2 = child2_fitness > parent2_fitness;
-
-            mutation_posterior.observe(improved1);
-            mutation_posterior.observe(improved2);
-
-            total_mutations += 2;
-            if improved1 {
-                successful_mutations += 1;
-            }
-            if improved2 {
-                successful_mutations += 1;
-            }
-
-            new_pop.push(Individual::with_fitness(c1, child1_fitness));
-            if new_pop.len() < 100 {
-                new_pop.push(Individual::with_fitness(c2, child2_fitness));
-            }
-        }
-
-        new_pop.set_generation(gen + 1);
-        population = new_pop;
+        println!("  => favored value: {best:.2}");
     }
-
-    // Results
-    println!("\n=== Results ===");
-    let best = population.best().unwrap();
-    println!("Best fitness: {:.6}", best.fitness_value());
-    println!();
-
-    println!("Learned hyperparameters:");
     println!(
-        "  Final mutation rate (posterior mean): {:.4}",
-        mutation_posterior.mean()
-    );
-    let ci = mutation_posterior.credible_interval(0.95);
-    println!("  95% credible interval: [{:.4}, {:.4}]", ci.0, ci.1);
-    println!();
-
-    println!("Mutation statistics:");
-    println!("  Total mutations: {}", total_mutations);
-    println!("  Successful mutations: {}", successful_mutations);
-    println!(
-        "  Observed success rate: {:.4}",
-        successful_mutations as f64 / total_mutations as f64
+        "\nTotal improvement events fed back to the tuner: {}",
+        tuner.total_observations()
     );
 
-    // Compare with fixed rates
+    println!("\n=== Result ===");
+    println!("Best fitness (adaptive): {:.6}", result.best_fitness);
+
+    // --- Comparison with fixed mutation rates ---------------------------------
     println!("\n--- Comparison with fixed mutation rates ---\n");
-
     for fixed_rate in [0.05, 0.1, 0.2, 0.5] {
-        let result = run_with_fixed_rate(fixed_rate, DIM)?;
-        println!("Fixed rate {:.2}: Best = {:.6}", fixed_rate, result);
+        let best = run_with_fixed_rate(fixed_rate, DIM)?;
+        println!("Fixed rate {fixed_rate:.2}: best = {best:.6}");
     }
-
     println!(
-        "\nLearned rate {:.2}: Best = {:.6}",
-        mutation_posterior.mean(),
-        best.fitness_value()
+        "\nAdaptive (favored {:.2}): best = {:.6}",
+        mr.best_value(),
+        result.best_fitness
     );
 
     Ok(())
 }
 
+/// Run a non-adaptive GA with a fixed per-gene mutation probability for comparison.
 fn run_with_fixed_rate(rate: f64, dim: usize) -> Result<f64, Box<dyn std::error::Error>> {
-    let mut rng = StdRng::seed_from_u64(42); // Same seed for fair comparison
-
-    let fitness = Rastrigin::new(dim);
+    let mut rng = StdRng::seed_from_u64(42); // Same seed for a fair comparison.
     let bounds = MultiBounds::symmetric(5.12, dim);
 
-    let mut population: Population<RealVector, f64> = Population::random(100, &bounds, &mut rng);
-    population.evaluate(&fitness);
+    let result = SimpleGABuilder::real_valued()
+        .mutation(GaussianMutation::new(0.1).with_probability(rate))
+        .population_size(100)
+        .bounds(bounds)
+        .fitness(Rastrigin::new(dim))
+        .max_generations(200)
+        .build()?
+        .run(&mut rng)?;
 
-    let selection = TournamentSelection::new(3);
-    let crossover = SbxCrossover::new(15.0);
-    let mutation = GaussianMutation::new(0.1).with_probability(rate);
-
-    for gen in 0..200 {
-        let selection_pool: Vec<_> = population.as_fitness_pairs();
-        let mut new_pop: Population<RealVector, f64> = Population::with_capacity(100);
-
-        if let Some(best) = population.best() {
-            new_pop.push(best.clone());
-        }
-
-        while new_pop.len() < 100 {
-            let p1_idx = selection.select(&selection_pool, &mut rng);
-            let p2_idx = selection.select(&selection_pool, &mut rng);
-
-            let (mut c1, mut c2) = crossover
-                .crossover(
-                    &selection_pool[p1_idx].0,
-                    &selection_pool[p2_idx].0,
-                    &mut rng,
-                )
-                .genome()
-                .unwrap_or_else(|| {
-                    (
-                        selection_pool[p1_idx].0.clone(),
-                        selection_pool[p2_idx].0.clone(),
-                    )
-                });
-
-            mutation.mutate(&mut c1, &mut rng);
-            mutation.mutate(&mut c2, &mut rng);
-
-            new_pop.push(Individual::new(c1));
-            if new_pop.len() < 100 {
-                new_pop.push(Individual::new(c2));
-            }
-        }
-
-        new_pop.evaluate(&fitness);
-        new_pop.set_generation(gen + 1);
-        population = new_pop;
-    }
-
-    Ok(*population.best().unwrap().fitness_value())
+    Ok(result.best_fitness)
 }
