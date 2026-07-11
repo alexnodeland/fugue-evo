@@ -407,12 +407,39 @@ where
         self.run_with_model(rng).map(|(result, _model)| result)
     }
 
+    /// Run UMDA, invoking `on_generation(generation, best_fitness)` once per
+    /// generation before that generation is sampled/evaluated.
+    ///
+    /// Returning `false` from the callback cancels the run early and returns the
+    /// best-so-far result (AUDIT EV-34: lets the WASM layer report per-generation
+    /// progress and support cancellation without a separate step API).
+    pub fn run_with_callback<R: Rng, Cb: FnMut(usize, f64) -> bool>(
+        &self,
+        rng: &mut R,
+        on_generation: Cb,
+    ) -> Result<EvolutionResult<RealVector, F>, EvolutionError> {
+        self.run_with_model_cb(rng, on_generation)
+            .map(|(result, _model)| result)
+    }
+
     /// Run the UMDA algorithm and also return the final learned univariate model
     /// (EV-10), so callers/tests can inspect whether the distribution actually
     /// converged toward the optimum rather than merely tracking a best-so-far.
     pub fn run_with_model<R: Rng>(
         &self,
         rng: &mut R,
+    ) -> Result<(EvolutionResult<RealVector, F>, ContinuousUnivariateModel), EvolutionError> {
+        // No-op observer: identical behavior to the historical `run_with_model`.
+        self.run_with_model_cb(rng, |_generation, _best_fitness| true)
+    }
+
+    /// Shared UMDA loop body driving both `run_with_model` (no-op callback) and
+    /// `run_with_callback` (EV-34 progress/cancel), so there is exactly one copy
+    /// of the algorithm.
+    fn run_with_model_cb<R: Rng, Cb: FnMut(usize, f64) -> bool>(
+        &self,
+        rng: &mut R,
+        mut on_generation: Cb,
     ) -> Result<(EvolutionResult<RealVector, F>, ContinuousUnivariateModel), EvolutionError> {
         let start_time = Instant::now();
 
@@ -453,6 +480,12 @@ where
 
             if self.termination.should_terminate(&state) {
                 stats.set_termination_reason(self.termination.reason());
+                break;
+            }
+
+            // EV-34: per-generation progress/cancel hook. A `false` return cancels
+            // the run, returning the best individual found so far.
+            if !on_generation(generation, best.fitness_value().to_f64()) {
                 break;
             }
 
@@ -1077,6 +1110,61 @@ mod tests {
             top[0].genes()[0],
             10.0,
             "selection should pick the is_better_than-best (lowest) individual"
+        );
+    }
+
+    // regression: EV-34 — run_with_callback reports every generation in order and
+    // returns the same result as `run` when the callback never cancels.
+    #[test]
+    fn test_umda_run_with_callback_reports_progress() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let umda: ContinuousUMDA<f64, _, _> = UMDABuilder::new()
+            .population_size(40)
+            .selection_ratio(0.3)
+            .bounds(MultiBounds::symmetric(5.12, 4))
+            .fitness(Sphere::new(4))
+            .max_generations(12)
+            .build()
+            .unwrap();
+
+        let mut seen: Vec<usize> = Vec::new();
+        let result = umda
+            .run_with_callback(&mut rng, |generation, best| {
+                assert!(best.is_finite());
+                seen.push(generation);
+                true
+            })
+            .unwrap();
+
+        assert_eq!(seen, (0..result.generations).collect::<Vec<_>>());
+        assert!(!seen.is_empty());
+    }
+
+    #[test]
+    fn test_umda_run_with_callback_cancels_early() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(4);
+        let umda: ContinuousUMDA<f64, _, _> = UMDABuilder::new()
+            .population_size(40)
+            .selection_ratio(0.3)
+            .bounds(MultiBounds::symmetric(5.12, 4))
+            .fitness(Sphere::new(4))
+            .max_generations(10_000)
+            .build()
+            .unwrap();
+
+        let mut calls = 0usize;
+        let result = umda
+            .run_with_callback(&mut rng, |_generation, _best| {
+                calls += 1;
+                calls < 6
+            })
+            .unwrap();
+
+        assert!(calls <= 6, "callback must stop being called after cancel");
+        assert!(
+            result.generations < 10,
+            "run must stop far short of the 10k budget, got {}",
+            result.generations
         );
     }
 }

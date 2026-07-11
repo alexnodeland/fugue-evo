@@ -152,3 +152,123 @@ fn resume_is_bit_identical_to_uninterrupted_run() {
         "resumed run diverged: straight={straight} resumed={resumed}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// EV-02 (library-level resume): the algorithm now provides the resume path
+// itself — `SimpleGA::checkpoint_run` / `resume` / `run_from_checkpoint` thread
+// a SnapshotRng-capable ChaCha RNG through the incremental run loop — so a user
+// no longer has to reimplement the generation loop (as `run_straight` /
+// `run_with_checkpoint` above do). These tests drive that library API only.
+// ---------------------------------------------------------------------------
+
+type SphereGa = SimpleGA<
+    RealVector,
+    f64,
+    TournamentSelection,
+    SbxCrossover,
+    PolynomialMutation,
+    Sphere,
+    MaxGenerations,
+>;
+
+fn build_ga(total: usize) -> SphereGa {
+    SimpleGABuilder::real_valued()
+        .population_size(POP_SIZE)
+        .bounds(MultiBounds::symmetric(5.12, DIM))
+        .fitness(Sphere::new(DIM))
+        .max_generations(total)
+        .build()
+        .expect("build GA")
+}
+
+#[test]
+fn library_resume_is_bit_identical() {
+    let total = 12;
+    let checkpoint_at = 6;
+    let ga = build_ga(total);
+
+    // Uninterrupted run driven purely through the library stepping API.
+    let mut rng_a = ChaCha8Rng::seed_from_u64(SEED);
+    let mut state_a = ga.init_run(&mut rng_a).expect("init_run");
+    while ga.step_generation(&mut state_a, &mut rng_a).expect("step") {}
+    let straight = ga.finish_run(state_a);
+
+    // Interrupted run: step to `checkpoint_at`, snapshot state + RNG via the
+    // library, then resume and run to termination — no hand-rolled loop.
+    let mut rng_b = ChaCha8Rng::seed_from_u64(SEED);
+    let mut state_b = ga.init_run(&mut rng_b).expect("init_run");
+    for _ in 0..checkpoint_at {
+        assert!(ga.step_generation(&mut state_b, &mut rng_b).expect("step"));
+    }
+    let checkpoint = ga.checkpoint_run(&state_b, &rng_b).expect("checkpoint_run");
+    assert!(
+        checkpoint.rng_state.is_some(),
+        "checkpoint_run must capture the RNG state"
+    );
+    assert_eq!(checkpoint.generation, checkpoint_at);
+
+    let resumed = ga
+        .run_from_checkpoint::<ChaCha8Rng>(&checkpoint)
+        .expect("run_from_checkpoint");
+
+    assert_eq!(
+        straight.best_fitness.to_bits(),
+        resumed.best_fitness.to_bits(),
+        "library resume diverged: straight={} resumed={}",
+        straight.best_fitness,
+        resumed.best_fitness
+    );
+    assert_eq!(straight.generations, resumed.generations);
+    assert_eq!(
+        straight.best_genome.as_vec(),
+        resumed.best_genome.as_vec(),
+        "resumed best genome must be identical"
+    );
+}
+
+#[test]
+fn library_resume_through_disk_and_rejects_missing_rng() {
+    let dir = tempdir().unwrap();
+    let total = 10;
+    let checkpoint_at = 4;
+    let ga = build_ga(total);
+
+    // Baseline uninterrupted run.
+    let mut rng_a = ChaCha8Rng::seed_from_u64(SEED);
+    let mut state_a = ga.init_run(&mut rng_a).expect("init_run");
+    while ga.step_generation(&mut state_a, &mut rng_a).expect("step") {}
+    let straight = ga.finish_run(state_a);
+
+    // Checkpoint to disk mid-run, reload, and resume through the library API.
+    let mut rng_b = ChaCha8Rng::seed_from_u64(SEED);
+    let mut state_b = ga.init_run(&mut rng_b).expect("init_run");
+    for _ in 0..checkpoint_at {
+        assert!(ga.step_generation(&mut state_b, &mut rng_b).expect("step"));
+    }
+    let checkpoint = ga.checkpoint_run(&state_b, &rng_b).expect("checkpoint_run");
+    let path = dir.path().join("library.ckpt");
+    save_checkpoint(&checkpoint, &path, CheckpointFormat::Binary).expect("save");
+
+    let loaded: Checkpoint<RealVector> = load_checkpoint(&path).expect("load");
+    let resumed = ga
+        .run_from_checkpoint::<ChaCha8Rng>(&loaded)
+        .expect("run_from_checkpoint");
+
+    assert_eq!(
+        straight.best_fitness.to_bits(),
+        resumed.best_fitness.to_bits(),
+        "disk resume diverged: straight={} resumed={}",
+        straight.best_fitness,
+        resumed.best_fitness
+    );
+
+    // A checkpoint that carries no captured RNG cannot be resumed
+    // bit-identically, so `resume` must reject it rather than silently diverging.
+    let no_rng = Checkpoint::new(checkpoint_at, loaded.population.clone());
+    assert!(no_rng.rng_state.is_none());
+    let result = ga.resume::<ChaCha8Rng>(&no_rng);
+    assert!(
+        result.is_err(),
+        "resume must reject a checkpoint with no captured RNG state"
+    );
+}

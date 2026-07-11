@@ -947,6 +947,134 @@ fn test_stepped_optimizer_early_cancel_snapshot() {
 }
 
 // ============================================================================
+// Per-generation progress / cancel callback tests (AUDIT EV-34)
+//
+// These exercise the `optimizeWithProgress` / `optimizeCustomWithProgress`
+// callback APIs added for every remaining optimizer (BitString, Permutation,
+// NSGA-II, Evolution Strategy, UMDA, Symbolic Regression). Each verifies both
+// that the callback is invoked per generation and that returning `false`
+// cancels the run early (result generations << the configured budget).
+// ============================================================================
+
+// Progress callback that always continues.
+fn progress_continue() -> js_sys::Function {
+    js_sys::Function::new_with_args("gen, best", "return true;")
+}
+
+// Progress callback that cancels once `gen >= limit`.
+fn progress_cancel_at(limit: usize) -> js_sys::Function {
+    js_sys::Function::new_with_args("gen, best", &format!("return gen < {limit};"))
+}
+
+#[wasm_bindgen_test]
+fn test_bitstring_progress_runs_and_cancels() {
+    let onemax = js_sys::Function::new_with_args(
+        "bits",
+        "var c=0; for (var i=0;i<bits.length;i++){ if (bits[i]) c++; } return c;",
+    );
+
+    let mut o = BitStringOptimizer::new(16);
+    o.set_population_size(20);
+    o.set_max_generations(40);
+    o.set_seed(7);
+
+    // Runs to completion, invoking the progress callback each generation.
+    let full = o
+        .optimize_with_progress(&onemax, &progress_continue())
+        .expect("progress optimize should succeed");
+    assert_eq!(full.generations(), 40);
+    assert_eq!(full.best_genome().len(), 16);
+
+    // Cancelling at generation 3 must stop far short of the 40-gen budget.
+    let cancelled = o
+        .optimize_with_progress(&onemax, &progress_cancel_at(3))
+        .expect("cancellable optimize should succeed");
+    assert!(
+        cancelled.generations() <= 3,
+        "cancel must stop early, got {}",
+        cancelled.generations()
+    );
+}
+
+#[wasm_bindgen_test]
+fn test_permutation_progress_cancels() {
+    let fitness = js_sys::Function::new_with_args("perm", "return perm.length;");
+    let mut o = PermutationOptimizer::new(8);
+    o.set_population_size(20);
+    o.set_max_generations(50);
+    o.set_seed(1);
+
+    let cancelled = o
+        .optimize_with_progress(&fitness, &progress_cancel_at(4))
+        .expect("permutation progress should succeed");
+    assert!(cancelled.generations() <= 4);
+}
+
+#[wasm_bindgen_test]
+fn test_nsga2_progress_cancels() {
+    let fitness = js_sys::Function::new_with_args(
+        "genes",
+        "return [genes[0]*genes[0], (genes[0]-2.0)*(genes[0]-2.0)];",
+    );
+    let mut o = Nsga2Optimizer::new(2, 2);
+    o.set_population_size(20);
+    o.set_max_generations(50);
+    o.set_bounds(-5.0, 5.0);
+    o.set_seed(5);
+
+    let cancelled = o
+        .optimize_with_progress(&fitness, &progress_cancel_at(3))
+        .expect("nsga2 progress should succeed");
+    assert!(cancelled.generations() <= 3);
+}
+
+#[wasm_bindgen_test]
+fn test_es_progress_cancels() {
+    let sphere = js_sys::Function::new_with_args(
+        "genes",
+        "var s=0.0; for (var i=0;i<genes.length;i++){ s+=genes[i]*genes[i]; } return -s;",
+    );
+    let mut o = EvolutionStrategyOptimizer::new(3);
+    o.set_max_generations(100);
+    o.set_bounds(-5.0, 5.0);
+    o.set_seed(2);
+
+    let cancelled = o
+        .optimize_with_progress(&sphere, &progress_cancel_at(5))
+        .expect("es progress should succeed");
+    assert!(cancelled.generations() <= 5);
+}
+
+#[wasm_bindgen_test]
+fn test_umda_progress_cancels() {
+    let mut o = UmdaOptimizer::new(4);
+    o.set_population_size(30);
+    o.set_max_generations(100);
+    o.set_bounds(-5.0, 5.0);
+    o.set_seed(8);
+
+    let cancelled = o
+        .optimize_with_progress("sphere", &progress_cancel_at(6))
+        .expect("umda progress should succeed");
+    assert!(cancelled.generations() <= 6);
+}
+
+#[wasm_bindgen_test]
+fn test_symbolic_regression_progress_cancels() {
+    // Custom fitness over the expression string; a constant keeps the run cheap.
+    let fitness = js_sys::Function::new_with_args("expr", "return 1.0;");
+    let mut o = SymbolicRegressionOptimizer::new();
+    o.set_population_size(20);
+    o.set_max_generations(50);
+    o.set_seed(4);
+
+    let cancelled = o
+        .optimize_custom_with_progress(&fitness, &progress_cancel_at(3))
+        .expect("symbolic regression progress should succeed");
+    assert!(cancelled.generations() <= 3);
+}
+
+// ============================================================================
 // Island Model Tests (AUDIT EV-77)
 // ============================================================================
 

@@ -996,4 +996,62 @@ mod tests {
         let expected = pop + (generations - 1) * (pop - elitism);
         assert_eq!(island.evaluations, expected);
     }
+
+    // regression: EV-83 — `evolve_one_generation` with `elitism` greater than the
+    // population size must not panic. The pre-fix `population.len() - elitism` was
+    // an unguarded usize subtraction that underflowed and panicked; the clamp
+    // (`elite_count = elitism.min(pop_len)`, `target_offspring = pop_len -
+    // elite_count`) makes it carry all members as elites and produce zero
+    // offspring, returning a valid same-size population.
+    #[test]
+    fn test_island_elitism_exceeding_population_does_not_underflow() {
+        let mut rng = StdRng::seed_from_u64(99);
+        let pop = 20;
+        let bounds = MultiBounds::symmetric(5.0, 5);
+        let mut island: Island<RealVector> = Island::new(0, pop, &bounds, &mut rng);
+
+        let fitness = Sphere::new(5);
+        let selection = TournamentSelection::new(2);
+        let crossover = BlxAlphaCrossover::new(0.5);
+        let mutation = GaussianMutation::new(0.1);
+
+        // Snapshot the whole population's genomes so we can prove every member is
+        // carried over unchanged when everyone is an elite.
+        island.population.evaluate(&fitness);
+        island.population.sort_by_fitness();
+        let before: Vec<RealVector> =
+            island.population.iter().map(|ind| ind.genome.clone()).collect();
+
+        // elitism (25) deliberately exceeds pop (20); this panicked pre-fix.
+        let elitism = 25;
+        let result = island.evolve_one_generation(
+            &fitness, &selection, &crossover, &mutation, elitism, &mut rng,
+        );
+        assert!(
+            result.is_ok(),
+            "over-large elitism must return Ok, got {result:?}"
+        );
+
+        // Population size is preserved: all members carried as elites, zero
+        // offspring produced.
+        assert_eq!(
+            island.population.len(),
+            pop,
+            "population size must be preserved when everyone is an elite"
+        );
+
+        // Every original genome survives (elitism == whole population => no
+        // reproduction). Order is preserved because elites are pushed in sorted
+        // order and no offspring follow.
+        let after: Vec<RealVector> =
+            island.population.iter().map(|ind| ind.genome.clone()).collect();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "no offspring should be created when elite_count == pop_len"
+        );
+        for (a, b) in after.iter().zip(before.iter()) {
+            assert_eq!(a.as_vec(), b.as_vec(), "all elites must be carried unchanged");
+        }
+    }
 }

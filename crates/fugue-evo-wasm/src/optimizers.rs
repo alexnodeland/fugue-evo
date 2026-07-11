@@ -4,7 +4,9 @@ use rand::SeedableRng;
 use wasm_bindgen::prelude::*;
 
 use fugue_evo::algorithms::cmaes::CmaEs;
-use fugue_evo::algorithms::nsga2::{MultiObjectiveFitness, Nsga2};
+use fugue_evo::algorithms::nsga2::{
+    fast_non_dominated_sort, recompute_crowding_distance_per_front, MultiObjectiveFitness, Nsga2,
+};
 use fugue_evo::algorithms::simple_ga::SimpleGABuilder;
 use fugue_evo::fitness::traits::Fitness;
 use fugue_evo::genome::bit_string::BitString;
@@ -369,6 +371,59 @@ impl BitStringOptimizer {
         self.run_with_fitness(fitness)
     }
 
+    /// Run with a custom fitness function, reporting progress per generation and
+    /// allowing cancellation (AUDIT EV-34).
+    ///
+    /// `progressFn(generation, bestFitness)` is invoked once per generation
+    /// before it is evolved; return `false` to cancel and receive the best result
+    /// found so far. Drive this from a Web Worker to `postMessage` a progress bar
+    /// or honor a cancel button without blocking on one opaque `optimize()` call.
+    #[wasm_bindgen(js_name = optimizeWithProgress)]
+    pub fn optimize_with_progress(
+        &self,
+        fitness_fn: &js_sys::Function,
+        progress_fn: &js_sys::Function,
+    ) -> Result<BitStringResult, JsValue> {
+        let fitness_fn = fitness_fn.clone();
+        let fitness = BitStringFitness::new(move |genome: &BitString| {
+            call_js_fitness_bool(&fitness_fn, genome.bits())
+        });
+
+        let mut rng = create_rng(self.config.seed);
+        let bounds = MultiBounds::symmetric(1.0, self.config.dimension);
+        let ga = SimpleGABuilder::<BitString, f64, _, _, _, _, _>::new()
+            .population_size(self.config.population_size)
+            .bounds(bounds)
+            .selection(TournamentSelection::new(self.config.tournament_size))
+            .crossover(UniformCrossover::new())
+            .mutation(BitFlipMutation::new().with_probability(self.flip_probability))
+            .fitness(fitness)
+            .max_generations(self.config.max_generations)
+            .build()
+            .map_err(evolution_error_to_js)?;
+
+        let mut state = ga.init_run(&mut rng).map_err(evolution_error_to_js)?;
+        loop {
+            if !report_progress(progress_fn, state.generation(), state.best_fitness())? {
+                break;
+            }
+            if !ga
+                .step_generation(&mut state, &mut rng)
+                .map_err(evolution_error_to_js)?
+            {
+                break;
+            }
+        }
+
+        Ok(BitStringResult::new(
+            state.best_genome().bits().to_vec(),
+            state.best_fitness(),
+            state.generation(),
+            state.evaluations(),
+            state.fitness_history().to_vec(),
+        ))
+    }
+
     /// Solve OneMax problem (maximize number of 1s)
     #[wasm_bindgen(js_name = solveOneMax)]
     pub fn solve_one_max(&self) -> Result<BitStringResult, JsValue> {
@@ -494,6 +549,58 @@ impl PermutationOptimizer {
             result.stats.best_fitness_history(),
         ))
     }
+
+    /// Run with a custom fitness function, reporting progress per generation and
+    /// allowing cancellation (AUDIT EV-34).
+    ///
+    /// `progressFn(generation, bestFitness)` is invoked once per generation before
+    /// it is evolved; return `false` to cancel and receive the best-so-far result.
+    #[wasm_bindgen(js_name = optimizeWithProgress)]
+    pub fn optimize_with_progress(
+        &self,
+        fitness_fn: &js_sys::Function,
+        progress_fn: &js_sys::Function,
+    ) -> Result<PermutationResult, JsValue> {
+        let mut rng = create_rng(self.config.seed);
+        let bounds = MultiBounds::symmetric(1.0, self.config.dimension);
+
+        let fitness_fn = fitness_fn.clone();
+        let fitness = PermutationFitness::new(move |genome: &Permutation| {
+            call_js_fitness_usize(&fitness_fn, genome.permutation())
+        });
+
+        let ga = SimpleGABuilder::<Permutation, f64, _, _, _, _, _>::new()
+            .population_size(self.config.population_size)
+            .bounds(bounds)
+            .selection(TournamentSelection::new(self.config.tournament_size))
+            .crossover(OxCrossover)
+            .mutation(PermutationSwapMutation::new())
+            .fitness(fitness)
+            .max_generations(self.config.max_generations)
+            .build()
+            .map_err(evolution_error_to_js)?;
+
+        let mut state = ga.init_run(&mut rng).map_err(evolution_error_to_js)?;
+        loop {
+            if !report_progress(progress_fn, state.generation(), state.best_fitness())? {
+                break;
+            }
+            if !ga
+                .step_generation(&mut state, &mut rng)
+                .map_err(evolution_error_to_js)?
+            {
+                break;
+            }
+        }
+
+        Ok(PermutationResult::new(
+            state.best_genome().permutation().to_vec(),
+            state.best_fitness(),
+            state.generation(),
+            state.evaluations(),
+            state.fitness_history().to_vec(),
+        ))
+    }
 }
 
 // ============================================================================
@@ -581,6 +688,68 @@ impl Nsga2Optimizer {
             fitness.evaluations(),
         ))
     }
+
+    /// Run NSGA-II reporting progress per generation and allowing cancellation
+    /// (AUDIT EV-34).
+    ///
+    /// `progressFn(generation, paretoFrontSize)` is invoked once per generation
+    /// before it is evolved; the second argument is the number of non-dominated
+    /// (rank-0) solutions found so far, a natural multi-objective progress signal
+    /// in place of a single scalar fitness. Return `false` to cancel and receive
+    /// the best-so-far Pareto front.
+    #[wasm_bindgen(js_name = optimizeWithProgress)]
+    pub fn optimize_with_progress(
+        &self,
+        fitness_fn: &js_sys::Function,
+        progress_fn: &js_sys::Function,
+    ) -> Result<MultiObjectiveResult, JsValue> {
+        let mut rng = create_rng(self.config.seed);
+        let bounds = MultiBounds::uniform(
+            Bounds::new(self.config.lower_bound, self.config.upper_bound),
+            self.config.dimension,
+        );
+
+        let num_objectives = self.num_objectives;
+        let fitness_fn = fitness_fn.clone();
+        let fitness = MultiObjectiveFitnessEvaluator::new(
+            move |genes: &[f64]| call_js_multi_objective(&fitness_fn, genes, num_objectives),
+            num_objectives,
+        );
+        let fitness = CountingMoFitness::new(fitness);
+
+        let nsga2 = Nsga2::<RealVector, _, _, _>::new(self.config.population_size)
+            .with_bounds(bounds.clone());
+        let crossover = SbxCrossover::new(self.crossover_eta);
+        let mutation = PolynomialMutation::new(self.mutation_eta);
+
+        // Mirror Nsga2::run's initialization, then drive the generation loop
+        // manually so we can report progress and cancel between generations.
+        let mut population = nsga2.initialize_population(&fitness, &bounds, &mut rng);
+        fast_non_dominated_sort(&mut population);
+        recompute_crowding_distance_per_front(&mut population);
+
+        let mut generation = 0usize;
+        while generation < self.config.max_generations {
+            let pareto_size = population.iter().filter(|ind| ind.rank == 0).count();
+            if !report_progress(progress_fn, generation, pareto_size as f64)? {
+                break;
+            }
+            nsga2.step(&mut population, &fitness, &crossover, &mutation, &mut rng);
+            generation += 1;
+        }
+
+        let pareto_front: Vec<ParetoSolution> = population
+            .iter()
+            .filter(|ind| ind.rank == 0)
+            .map(|ind| ParetoSolution::new(ind.genome.genes().to_vec(), ind.objectives.clone()))
+            .collect();
+
+        Ok(MultiObjectiveResult::new(
+            pareto_front,
+            generation,
+            fitness.evaluations(),
+        ))
+    }
 }
 
 // ============================================================================
@@ -658,6 +827,27 @@ impl<Fit: MultiObjectiveFitness<RealVector>> MultiObjectiveFitness<RealVector>
 // ============================================================================
 // JS interop helpers
 // ============================================================================
+
+/// Invoke a JS per-generation progress callback (AUDIT EV-34).
+///
+/// The callback receives `(generation, bestFitness)`. It may update a progress
+/// bar, `postMessage` from a Web Worker, etc. Returning boolean `false` cancels
+/// the run; any other return value (including `undefined`) continues, so a
+/// callback that just reports progress needs no explicit `return true`. A thrown
+/// exception is propagated to the caller as an `Err`.
+fn report_progress(
+    progress_fn: &js_sys::Function,
+    generation: usize,
+    best_fitness: f64,
+) -> Result<bool, JsValue> {
+    let ret = progress_fn.call2(
+        &JsValue::NULL,
+        &JsValue::from_f64(generation as f64),
+        &JsValue::from_f64(best_fitness),
+    )?;
+    // Continue unless the callback explicitly returned boolean `false`.
+    Ok(ret.as_bool() != Some(false))
+}
 
 fn call_js_fitness_f64(func: &js_sys::Function, genes: &[f64]) -> f64 {
     let arr = js_sys::Float64Array::from(genes);
@@ -821,6 +1011,74 @@ impl EvolutionStrategyOptimizer {
             .map_err(evolution_error_to_js)?;
 
         let result = es.run(&mut rng).map_err(evolution_error_to_js)?;
+
+        Ok(OptimizationResult::new(
+            result.best_genome.genes().to_vec(),
+            result.best_fitness,
+            result.generations,
+            result.evaluations,
+            result.stats.best_fitness_history(),
+        ))
+    }
+
+    /// Run the evolution strategy reporting progress per generation and allowing
+    /// cancellation (AUDIT EV-34).
+    ///
+    /// `progressFn(generation, bestFitness)` is invoked once per generation before
+    /// it is evolved; return `false` to cancel and receive the best-so-far result.
+    /// Backed by the native `EvolutionStrategy::run_with_callback` hook.
+    #[wasm_bindgen(js_name = optimizeWithProgress)]
+    pub fn optimize_with_progress(
+        &self,
+        fitness_fn: &js_sys::Function,
+        progress_fn: &js_sys::Function,
+    ) -> Result<OptimizationResult, JsValue> {
+        let mut rng = create_rng(self.config.seed);
+        let bounds = MultiBounds::uniform(
+            Bounds::new(self.config.lower_bound, self.config.upper_bound),
+            self.config.dimension,
+        );
+
+        let fitness_fn = fitness_fn.clone();
+        let fitness = RealVectorFitness::new(move |genome: &RealVector| {
+            call_js_fitness_f64(&fitness_fn, genome.genes())
+        });
+
+        let selection = match self.selection_strategy {
+            ESSelection::MuPlusLambda => ESSelectionStrategy::MuPlusLambda,
+            ESSelection::MuCommaLambda => ESSelectionStrategy::MuCommaLambda,
+        };
+
+        let es = ESBuilder::<RealVector, f64, _, _>::new()
+            .mu(self.mu)
+            .lambda(self.lambda)
+            .selection_strategy(selection)
+            .initial_sigma(self.initial_sigma)
+            .self_adaptive(self.self_adaptive)
+            .recombination(RecombinationType::Intermediate)
+            .bounds(bounds)
+            .fitness(fitness)
+            .max_generations(self.config.max_generations)
+            .build()
+            .map_err(evolution_error_to_js)?;
+
+        // A thrown exception in the JS callback can't cross the `FnMut -> bool`
+        // boundary, so capture it and cancel, then surface it after the run.
+        let mut progress_err: Option<JsValue> = None;
+        let result = es
+            .run_with_callback(&mut rng, |generation, best_fitness| {
+                match report_progress(progress_fn, generation, best_fitness) {
+                    Ok(cont) => cont,
+                    Err(e) => {
+                        progress_err = Some(e);
+                        false
+                    }
+                }
+            })
+            .map_err(evolution_error_to_js)?;
+        if let Some(e) = progress_err {
+            return Err(e);
+        }
 
         Ok(OptimizationResult::new(
             result.best_genome.genes().to_vec(),
@@ -1100,6 +1358,70 @@ impl SymbolicRegressionOptimizer {
             fitness_history: result.stats.best_fitness_history(),
         })
     }
+
+    /// Run symbolic regression (custom JS fitness over the expression string)
+    /// reporting progress per generation and allowing cancellation (AUDIT EV-34).
+    ///
+    /// `fitnessFn(expr)` returns the fitness of a candidate expression;
+    /// `progressFn(generation, bestFitness)` is invoked once per generation before
+    /// it is evolved. Return `false` from `progressFn` to cancel and receive the
+    /// best-so-far expression.
+    #[wasm_bindgen(js_name = optimizeCustomWithProgress)]
+    pub fn optimize_custom_with_progress(
+        &self,
+        fitness_fn: &js_sys::Function,
+        progress_fn: &js_sys::Function,
+    ) -> Result<SymbolicRegressionResult, JsValue> {
+        use fugue_evo::operators::crossover::SubtreeCrossover;
+        use fugue_evo::operators::mutation::SubtreeMutation;
+
+        let mut rng = create_rng(self.seed);
+        let bounds = MultiBounds::symmetric(1.0, self.max_tree_depth);
+
+        let fitness_fn = fitness_fn.clone();
+        let fitness = GenericFitness::<ArithmeticTree, _>::new(move |tree: &ArithmeticTree| {
+            let expr = tree.to_sexpr();
+            let js_expr = JsValue::from_str(&expr);
+            match fitness_fn.call1(&JsValue::null(), &js_expr) {
+                Ok(result) => result.as_f64().unwrap_or(f64::NEG_INFINITY),
+                Err(_) => f64::NEG_INFINITY,
+            }
+        });
+
+        let ga = SimpleGABuilder::<ArithmeticTree, f64, _, _, _, _, _>::new()
+            .population_size(self.population_size)
+            .bounds(bounds)
+            .selection(TournamentSelection::new(self.tournament_size))
+            .crossover(SubtreeCrossover::new().with_max_depth(self.max_tree_depth))
+            .mutation(SubtreeMutation::new().with_max_depth(self.max_tree_depth))
+            .fitness(fitness)
+            .max_generations(self.max_generations)
+            .build()
+            .map_err(evolution_error_to_js)?;
+
+        let mut state = ga.init_run(&mut rng).map_err(evolution_error_to_js)?;
+        loop {
+            if !report_progress(progress_fn, state.generation(), state.best_fitness())? {
+                break;
+            }
+            if !ga
+                .step_generation(&mut state, &mut rng)
+                .map_err(evolution_error_to_js)?
+            {
+                break;
+            }
+        }
+
+        Ok(SymbolicRegressionResult {
+            expression: state.best_genome().to_sexpr(),
+            best_fitness: state.best_fitness(),
+            generations: state.generation(),
+            evaluations: state.evaluations(),
+            tree_depth: state.best_genome().depth(),
+            tree_size: state.best_genome().size(),
+            fitness_history: state.fitness_history().to_vec(),
+        })
+    }
 }
 
 // ============================================================================
@@ -1179,6 +1501,69 @@ impl UmdaOptimizer {
             .map_err(evolution_error_to_js)?;
 
         let result = umda.run(&mut rng).map_err(evolution_error_to_js)?;
+
+        Ok(OptimizationResult::new(
+            result.best_genome.genes().to_vec(),
+            result.best_fitness,
+            result.generations,
+            result.evaluations,
+            result.stats.best_fitness_history(),
+        ))
+    }
+
+    /// Run UMDA (built-in fitness) reporting progress per generation and allowing
+    /// cancellation (AUDIT EV-34).
+    ///
+    /// `progressFn(generation, bestFitness)` is invoked once per generation before
+    /// it is sampled/evaluated; return `false` to cancel and receive the
+    /// best-so-far result. Backed by the native `UMDA::run_with_callback` hook.
+    #[wasm_bindgen(js_name = optimizeWithProgress)]
+    pub fn optimize_with_progress(
+        &self,
+        fitness_name: &str,
+        progress_fn: &js_sys::Function,
+    ) -> Result<OptimizationResult, JsValue> {
+        let mut rng = create_rng(self.config.seed);
+        let bounds = MultiBounds::uniform(
+            Bounds::new(self.config.lower_bound, self.config.upper_bound),
+            self.config.dimension,
+        );
+
+        let fitness_wrapper = FitnessWrapper::from_name(fitness_name, self.config.dimension)
+            .ok_or_else(|| {
+                JsValue::from_str(&format!("Unknown fitness function: {}", fitness_name))
+            })?;
+
+        let fitness = FitnessEvaluator::new(fitness_wrapper);
+
+        let umda = UMDABuilder::<RealVector, f64, _, _>::new()
+            .population_size(self.config.population_size)
+            .selection_ratio(self.selection_ratio)
+            .min_variance(self.min_variance)
+            .learning_rate(self.learning_rate)
+            .bounds(bounds)
+            .fitness(fitness)
+            .max_generations(self.config.max_generations)
+            .build()
+            .map_err(evolution_error_to_js)?;
+
+        // Capture a thrown JS-callback error (can't cross the FnMut->bool
+        // boundary) and surface it after the run.
+        let mut progress_err: Option<JsValue> = None;
+        let result = umda
+            .run_with_callback(&mut rng, |generation, best_fitness| {
+                match report_progress(progress_fn, generation, best_fitness) {
+                    Ok(cont) => cont,
+                    Err(e) => {
+                        progress_err = Some(e);
+                        false
+                    }
+                }
+            })
+            .map_err(evolution_error_to_js)?;
+        if let Some(e) = progress_err {
+            return Err(e);
+        }
 
         Ok(OptimizationResult::new(
             result.best_genome.genes().to_vec(),

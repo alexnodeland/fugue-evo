@@ -81,12 +81,13 @@ let bounds = MultiBounds::symmetric(5.12, DIM);
 ### 3. Configure the Algorithm
 
 ```rust,ignore
-let result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
+// `real_valued()` pins the genome to `RealVector` and the fitness value to `f64`
+// (no turbofish) and pre-installs tournament selection, SBX crossover, and
+// polynomial mutation as defaults. Override any of them with
+// `.selection(...)` / `.crossover(...)` / `.mutation(...)`.
+let result = SimpleGABuilder::real_valued()
     .population_size(100)
     .bounds(bounds)
-    .selection(TournamentSelection::new(3))
-    .crossover(SbxCrossover::new(20.0))
-    .mutation(PolynomialMutation::new(20.0))
     .fitness(fitness)
     .max_generations(200)
     .build()?
@@ -96,10 +97,14 @@ let result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
 | Setting | Value | Purpose |
 |---------|-------|---------|
 | `population_size` | 100 | Number of candidate solutions |
-| `selection` | Tournament(3) | Select best of 3 random individuals |
-| `crossover` | SBX(20.0) | Simulated Binary Crossover |
-| `mutation` | Polynomial(20.0) | Polynomial mutation |
+| `selection` | Tournament(3) *(default)* | Select best of 3 random individuals |
+| `crossover` | SBX(20.0) *(default)* | Simulated Binary Crossover |
+| `mutation` | Polynomial(20.0) *(default)* | Polynomial mutation |
 | `max_generations` | 200 | When to stop |
+
+The `selection` / `crossover` / `mutation` rows are the defaults `real_valued()`
+installs, so the quickstart above does not set them explicitly. Call
+`.selection(...)`, `.crossover(...)`, or `.mutation(...)` to override any one.
 
 ### 4. Analyze Results
 

@@ -1,6 +1,15 @@
 //! Parameter schedules for deterministic control
 //!
 //! Schedules provide predetermined parameter values based on generation number.
+//!
+//! **Integration status (EV-21):** these schedules are *unintegrated building
+//! blocks*. No default algorithm's run loop consumes them — grep confirms the
+//! types here are referenced only within this module and its unit tests. To use
+//! a schedule, query [`ParameterSchedule::value_at`] yourself each generation and
+//! apply the value to your operator (e.g. via a driven incremental run with
+//! [`SimpleGA::step_generation`](crate::algorithms::simple_ga::SimpleGA::step_generation)).
+//! For an adaptation mechanism that *is* wired into a built-in algorithm, see the
+//! Thompson-sampling tuner ([`SimpleGA::run_adaptive`](crate::algorithms::simple_ga::SimpleGA::run_adaptive)).
 
 use std::f64::consts::PI;
 

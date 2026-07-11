@@ -56,12 +56,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fitness2 = Rastrigin::new(DIM);
     let bounds2 = MultiBounds::symmetric(5.12, DIM);
 
-    let single_result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
+    // `real_valued()` installs tournament selection, SBX, and polynomial mutation
+    // as defaults (no turbofish); we override only the SBX distribution index.
+    let single_result = SimpleGABuilder::real_valued()
         .population_size(200) // Same total population
         .bounds(bounds2)
-        .selection(TournamentSelection::new(3))
         .crossover(SbxCrossover::new(15.0))
-        .mutation(PolynomialMutation::new(20.0))
         .fitness(fitness2)
         .max_generations(200)
         .build()?

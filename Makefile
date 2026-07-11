@@ -1,4 +1,4 @@
-.PHONY: all build check test lint fmt clippy doc clean ci help \
+.PHONY: all build check test lint fmt clippy doc clean ci help deps-check \
        mdbook mdbook-serve mdbook-clean mdbook-test doc-all doc-serve clean-all
 
 # Default target
@@ -85,8 +85,21 @@ clean:
 clean-all: clean mdbook-clean
 	@echo "All build artifacts cleaned!"
 
+# Guard against duplicate major versions of the rand stack (EV-74).
+# `cargo tree -d` lists only crates that appear at more than one version, so a
+# match on any rand-stack crate at column 0 means a duplicate major crept back
+# in (e.g. a proptest >= 1.7 bump reintroducing rand 0.9). Fail CI if so.
+deps-check:
+	@echo "Checking for duplicate rand-stack majors (EV-74)..."
+	@if cargo tree -d 2>/dev/null | grep -E '^(rand|rand_core|rand_chacha) v'; then \
+		echo "ERROR: duplicate major of the rand stack detected (see EV-74 / Cargo.toml note)"; \
+		exit 1; \
+	else \
+		echo "OK: single rand-stack major."; \
+	fi
+
 # Run the full CI pipeline (same as GitHub Actions)
-ci: fmt clippy check test doc mdbook
+ci: fmt clippy check test deps-check doc mdbook
 	@echo "CI pipeline completed successfully!"
 
 # Run quick checks (for development)
@@ -137,6 +150,7 @@ help:
 	@echo "  clean        - Clean cargo build artifacts"
 	@echo "  clean-all    - Clean all build artifacts (cargo + mdbook)"
 	@echo "  ci           - Run full CI pipeline"
+	@echo "  deps-check   - Fail if a duplicate rand-stack major exists (EV-74)"
 	@echo "  quick        - Run quick development checks"
 	@echo "  watch        - Watch for changes and run tests"
 	@echo "  bench        - Run benchmarks"

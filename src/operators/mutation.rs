@@ -789,60 +789,31 @@ impl PointMutation {
         self
     }
 
-    /// Mutate a single node, returning a new node of the same type/arity
-    fn mutate_node<T: Terminal, F: Function, R: Rng>(
+    /// Mutate a single node *in place*, preserving its arity.
+    ///
+    /// A terminal is replaced with a fresh random terminal; a function is swapped
+    /// for a randomly chosen function of the same arity (its children are left
+    /// untouched, so tree structure is preserved). In-place mutation via `&mut`
+    /// (rather than returning a new owned node) is what lets the whole traversal
+    /// avoid moving values out of an owned `TreeNode`, which would conflict with
+    /// `TreeNode`'s stack-safe `Drop` impl (EV-60).
+    fn mutate_node_in_place<T: Terminal, F: Function, R: Rng>(
         &self,
-        node: &TreeNode<T, F>,
+        node: &mut TreeNode<T, F>,
         rng: &mut R,
-    ) -> TreeNode<T, F> {
+    ) {
         match node {
-            TreeNode::Terminal(_) => {
-                // Replace with a random terminal
-                TreeNode::Terminal(T::random(rng))
-            }
-            TreeNode::Function(func, children) => {
-                // Find a function with the same arity
+            TreeNode::Terminal(t) => *t = T::random(rng),
+            TreeNode::Function(func, _children) => {
                 let target_arity = func.arity();
-                let funcs = F::functions();
-
-                // Filter functions with matching arity
-                let matching_funcs: Vec<&F> =
-                    funcs.iter().filter(|f| f.arity() == target_arity).collect();
-
-                if matching_funcs.is_empty() {
-                    // No matching arity, return original
-                    TreeNode::Function(func.clone(), children.clone())
-                } else {
-                    // Select a random function with the same arity
-                    let new_func = matching_funcs[rng.gen_range(0..matching_funcs.len())].clone();
-                    TreeNode::Function(new_func, children.clone())
-                }
-            }
-        }
-    }
-
-    /// Recursively apply point mutation to tree nodes
-    fn mutate_recursive<T: Terminal, F: Function, R: Rng>(
-        &self,
-        node: &TreeNode<T, F>,
-        rng: &mut R,
-    ) -> TreeNode<T, F> {
-        // Decide if we mutate this node
-        let mutated_node = if rng.gen::<f64>() < self.mutation_probability {
-            self.mutate_node(node, rng)
-        } else {
-            node.clone()
-        };
-
-        // Recurse into children if this is a function node
-        match mutated_node {
-            TreeNode::Terminal(t) => TreeNode::Terminal(t),
-            TreeNode::Function(func, children) => {
-                let new_children: Vec<TreeNode<T, F>> = children
+                let matching_funcs: Vec<&F> = F::functions()
                     .iter()
-                    .map(|c| self.mutate_recursive(c, rng))
+                    .filter(|f| f.arity() == target_arity)
                     .collect();
-                TreeNode::Function(func, new_children)
+                if !matching_funcs.is_empty() {
+                    *func = matching_funcs[rng.gen_range(0..matching_funcs.len())].clone();
+                }
+                // Children are preserved: point mutation keeps arity/structure.
             }
         }
     }
@@ -856,8 +827,22 @@ impl Default for PointMutation {
 
 impl<T: Terminal, F: Function> MutationOperator<TreeGenome<T, F>> for PointMutation {
     fn mutate<R: Rng>(&self, genome: &mut TreeGenome<T, F>, rng: &mut R) {
-        let new_root = self.mutate_recursive(&genome.root, rng);
-        genome.root = new_root;
+        // Iterative (explicit-stack) in-place point mutation (EV-60): visit every
+        // node without recursion so a pathologically deep tree cannot overflow the
+        // call stack. Each node is independently mutated with probability
+        // `mutation_probability`; point mutation preserves arity, so children are
+        // left in place and only the node's own label may change.
+        let mut stack: Vec<&mut TreeNode<T, F>> = vec![&mut genome.root];
+        while let Some(node) = stack.pop() {
+            if rng.gen::<f64>() < self.mutation_probability {
+                self.mutate_node_in_place(node, rng);
+            }
+            if let TreeNode::Function(_, children) = node {
+                for child in children.iter_mut() {
+                    stack.push(child);
+                }
+            }
+        }
     }
 
     fn mutation_probability(&self) -> Option<f64> {
@@ -1560,6 +1545,33 @@ mod tests {
             any_changed,
             "Point mutation should sometimes change the tree"
         );
+    }
+
+    #[test]
+    fn test_point_mutation_deep_tree_no_stack_overflow() {
+        // regression: EV-60 — PointMutation must traverse iteratively so a
+        // ~100k-deep tree can be mutated without overflowing the call stack. The
+        // previous recursive `mutate_recursive` overflowed at this depth.
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let depth = 100_000usize;
+        let mut root: TreeNode<ArithmeticTerminal, ArithmeticFunction> =
+            TreeNode::terminal(ArithmeticTerminal::Constant(1.0));
+        for _ in 0..depth {
+            root = TreeNode::function(ArithmeticFunction::Neg, vec![root]);
+        }
+        let mut genome = TreeGenome::new(root, depth + 1);
+        let size_before = genome.size();
+
+        // mutate every node (probability 1.0) — must not overflow.
+        PointMutation::new()
+            .with_probability(1.0)
+            .mutate(&mut genome, &mut rng);
+
+        // Point mutation preserves structure (arity/size) even at extreme depth.
+        assert_eq!(genome.size(), size_before);
+        // Free iteratively so the test itself doesn't overflow on teardown.
+        genome.dismantle();
     }
 
     #[test]

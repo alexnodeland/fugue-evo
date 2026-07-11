@@ -59,22 +59,23 @@ getrandom = { version = "0.2", features = ["js"] }
 [dev-dependencies]
 # Testing utilities
 #
-# AUDIT EV-74: proptest unconditionally depends on rand 0.9 (rand_core 0.9,
-# rand_chacha 0.9 via rand_xorshift's TestRng), which duplicates our own
-# direct rand 0.8 stack (rand 0.8.5 / rand_core 0.6.4 / rand_chacha 0.3.1,
-# used by fugue-evo, fugue-ppl, and rand_distr). This is NOT a version-spec
-# problem we can fix by pinning proptest: `cargo tree -i rand@0.9.2` and
-# `cargo tree -i rand_chacha@0.9.0` both bottom out at proptest even when
-# proptest is pinned back to 1.7.0 (its earliest release compatible with our
-# ">=1.5, <2" requirement) -- proptest has required rand 0.9 unconditionally
-# since at least that version. The upstream sibling crate `fugue` has the
-# identical duplication in its own Cargo.lock despite also pinning
-# `proptest = "1.0"`, confirming this is upstream-forced, not a local
-# misconfiguration. It only affects dev/test builds (proptest is a
-# dev-dependency), doubling RNG-stack compile units there; it does not affect
-# release/library builds. Revisit if/when proptest re-converges on rand 0.8,
-# or migrates its own dependents to rand 0.9 across the board.
-proptest = "1.5"
+# AUDIT EV-74: proptest migrated its internal RNG stack to rand 0.9 in the
+# 1.7.0 release. proptest >= 1.7 therefore pulls in a *second* major of the
+# RNG stack (rand 0.9 / rand_core 0.9 / rand_chacha 0.9 via rand_xorshift's
+# TestRng) alongside our own direct rand 0.8 stack (rand 0.8.5 / rand_core
+# 0.6.4 / rand_chacha 0.3.1, used by fugue-evo, fugue-ppl, and rand_distr),
+# duplicating the RNG-stack compile units in dev/test builds.
+#
+# The 1.5.x / 1.6.x line still uses rand 0.8, so we pin below 1.7 to collapse
+# the duplication. Verified empirically: `cargo update -p proptest --precise
+# 1.6.0` removes rand 0.9.2 / rand_chacha 0.9.0 / rand_core 0.9.3 entirely,
+# after which `cargo tree -d` reports a single rand major (0.8.5) and
+# `cargo check --all-targets` + the full property-test suite still pass. The
+# `Makefile`'s `deps-check` target runs `cargo tree -d` in CI to catch any
+# future reintroduction of a duplicate rand major. Revisit (dropping the
+# upper bound and migrating our own rand_distr/rand_chacha usage to 0.9) if we
+# ever need a proptest >= 1.7 feature.
+proptest = ">=1.5, <1.7"
 criterion = "0.5"
 approx = "0.5"
 tempfile = "3.10"

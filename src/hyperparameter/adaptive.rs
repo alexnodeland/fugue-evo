@@ -1,6 +1,17 @@
 //! Adaptive control mechanisms
 //!
 //! These mechanisms adapt parameters based on feedback from the search process.
+//!
+//! **Integration status (EV-21):** the types in this module
+//! ([`OneFifthRule`], [`AdaptiveOperatorSelection`], [`AdaptiveMutationRate`],
+//! [`DiversityBasedAdaptation`], [`SlidingWindowStats`]) are *unintegrated
+//! building blocks*. No default algorithm's run loop consumes them — grep
+//! confirms they are referenced only within this module and its unit tests, so
+//! treat them as a toolkit you drive yourself, not as an active adaptive-control
+//! offering. The adaptation mechanism that *is* wired into a built-in algorithm
+//! is the Thompson-sampling bandit
+//! ([`SimpleGA::run_adaptive`](crate::algorithms::simple_ga::SimpleGA::run_adaptive));
+//! self-adaptive step sizes are wired into the Evolution Strategy path.
 
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;

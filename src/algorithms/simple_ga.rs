@@ -1067,7 +1067,25 @@ where
         while self.step_generation(&mut state, rng)? {}
         Ok(self.finish_run(state))
     }
+}
 
+// The incremental stepping API (SimpleGaRun + init_run/step_generation/
+// finish_run/inject_migrants) is available in ALL builds — it uses sequential
+// evaluation and needs no Send+Sync bounds, so it works whether or not the
+// `parallel` feature is enabled. This lets the checkpoint resume API (EV-02) and
+// the WASM stepping bindings (EV-34) build on it regardless of feature flags.
+// (The parallel `run` above still uses rayon; `run` is intentionally kept per-cfg
+// so the default build stays parallel.)
+impl<G, F, S, C, M, Fit, Term> SimpleGA<G, F, S, C, M, Fit, Term>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+    S: SelectionOperator<G>,
+    C: CrossoverOperator<G>,
+    M: MutationOperator<G>,
+    Fit: Fitness<Genome = G, Value = F>,
+    Term: TerminationCriterion<G, F>,
+{
     /// Initialize an incremental run: build and evaluate the initial population
     /// and record generation-0 statistics.
     ///
@@ -1326,6 +1344,139 @@ where
     }
 }
 
+/// Algorithm-level checkpoint/resume for bit-identical continuation (EV-02).
+///
+/// These build the library-provided resume path the checkpoint primitives were
+/// missing: instead of hand-rolling the generation loop (as the example and
+/// integration test previously had to), a caller drives an incremental run with
+/// [`SimpleGA::init_run`]/[`SimpleGA::step_generation`], snapshots it with
+/// [`SimpleGA::checkpoint_run`] (capturing a [`SnapshotRng`](crate::checkpoint::SnapshotRng)),
+/// and later restores it with [`SimpleGA::resume`] / [`SimpleGA::run_from_checkpoint`].
+/// Because the ChaCha RNG state is captured and restored, resuming is
+/// bit-identical to an uninterrupted run.
+///
+/// Constrained to `f64` fitness because [`Checkpoint`](crate::checkpoint::Checkpoint)
+/// serializes `Individual<G>` (fitness value `f64`).
+impl<G, S, C, M, Fit, Term> SimpleGA<G, f64, S, C, M, Fit, Term>
+where
+    G: EvolutionaryGenome,
+    S: SelectionOperator<G>,
+    C: CrossoverOperator<G>,
+    M: MutationOperator<G>,
+    Fit: Fitness<Genome = G, Value = f64>,
+    Term: TerminationCriterion<G, f64>,
+{
+    /// Capture an in-progress incremental run into a [`Checkpoint`](crate::checkpoint::Checkpoint)
+    /// for bit-identical resume (EV-02).
+    ///
+    /// Serializes the population (with its generation counter), the tracked best
+    /// individual, the evaluation count and the per-generation statistics, and
+    /// captures the complete state of a [`SnapshotRng`](crate::checkpoint::SnapshotRng)
+    /// (the ChaCha family). Restoring the checkpoint via [`SimpleGA::resume`] and
+    /// continuing with [`SimpleGA::step_generation`] reproduces the exact
+    /// trajectory an uninterrupted run would have taken.
+    pub fn checkpoint_run<R>(
+        &self,
+        state: &SimpleGaRun<G, f64>,
+        rng: &R,
+    ) -> Result<crate::checkpoint::Checkpoint<G>, crate::error::CheckpointError>
+    where
+        R: crate::checkpoint::SnapshotRng,
+    {
+        let individuals: Vec<Individual<G>> = state.population.iter().cloned().collect();
+        crate::checkpoint::Checkpoint::new(state.generation(), individuals)
+            .with_evaluations(state.evaluations())
+            .with_best(state.best_individual.clone())
+            .with_statistics(state.stats.generations.clone())
+            .with_rng(rng)
+    }
+
+    /// Resume an incremental run from a [`Checkpoint`](crate::checkpoint::Checkpoint),
+    /// restoring the population, best individual, evaluation count, statistics AND
+    /// the captured [`SnapshotRng`](crate::checkpoint::SnapshotRng) (EV-02).
+    ///
+    /// Returns the reconstructed [`SimpleGaRun`] and the restored RNG; drive it
+    /// forward with [`SimpleGA::step_generation`]/[`SimpleGA::finish_run`] (or use
+    /// [`SimpleGA::run_from_checkpoint`] to continue straight to termination). The
+    /// checkpoint MUST have been created with a captured RNG (via
+    /// [`SimpleGA::checkpoint_run`] / [`Checkpoint::with_rng`](crate::checkpoint::Checkpoint::with_rng));
+    /// otherwise this returns [`CheckpointError::Corrupted`](crate::error::CheckpointError::Corrupted),
+    /// because bit-identical resume is impossible without the RNG state.
+    pub fn resume<R>(
+        &self,
+        checkpoint: &crate::checkpoint::Checkpoint<G>,
+    ) -> Result<(SimpleGaRun<G, f64>, R), crate::error::CheckpointError>
+    where
+        R: crate::checkpoint::SnapshotRng,
+    {
+        let rng = checkpoint.restore_rng::<R>()?.ok_or_else(|| {
+            crate::error::CheckpointError::Corrupted(
+                "checkpoint has no captured RNG state; bit-identical resume requires a \
+                 SnapshotRng captured via SimpleGA::checkpoint_run / Checkpoint::with_rng"
+                    .to_string(),
+            )
+        })?;
+
+        // Reconstruct the population and restore its generation counter.
+        let mut population: Population<G, f64> =
+            Population::with_capacity(checkpoint.population.len());
+        for ind in &checkpoint.population {
+            population.push(ind.clone());
+        }
+        population.set_generation(checkpoint.generation);
+
+        // Restore the tracked best (fall back to the population's best if absent).
+        let best_individual = match &checkpoint.best {
+            Some(best) => best.clone(),
+            None => population.best().cloned().ok_or_else(|| {
+                crate::error::CheckpointError::Corrupted("empty population".to_string())
+            })?,
+        };
+
+        // Rebuild statistics and the best-fitness history from the recorded
+        // per-generation stats, so termination criteria that read history (e.g.
+        // stagnation) behave identically to an uninterrupted run.
+        let mut stats = EvolutionStats::new();
+        stats.generations = checkpoint.statistics.clone();
+        let fitness_history: Vec<f64> = checkpoint
+            .statistics
+            .iter()
+            .map(|g| g.best_fitness)
+            .collect();
+
+        let state = SimpleGaRun {
+            population,
+            best_individual,
+            evaluations: checkpoint.evaluations,
+            fitness_history,
+            stats,
+            start_time: Instant::now(),
+            terminated: false,
+        };
+        Ok((state, rng))
+    }
+
+    /// Resume from a [`Checkpoint`](crate::checkpoint::Checkpoint) and run to
+    /// termination, returning the final [`EvolutionResult`] (EV-02).
+    ///
+    /// A convenience over [`SimpleGA::resume`] followed by repeated
+    /// [`SimpleGA::step_generation`] and [`SimpleGA::finish_run`]. Because the
+    /// captured [`SnapshotRng`](crate::checkpoint::SnapshotRng) is restored,
+    /// this yields the bit-identical result of an uninterrupted `run` for the same
+    /// seed and configuration.
+    pub fn run_from_checkpoint<R>(
+        &self,
+        checkpoint: &crate::checkpoint::Checkpoint<G>,
+    ) -> Result<EvolutionResult<G, f64>, EvolutionError>
+    where
+        R: crate::checkpoint::SnapshotRng + Rng,
+    {
+        let (mut state, mut rng) = self.resume::<R>(checkpoint)?;
+        while self.step_generation(&mut state, &mut rng)? {}
+        Ok(self.finish_run(state))
+    }
+}
+
 /// Mutable state for driving a [`SimpleGA`] one generation at a time.
 ///
 /// Produced by [`SimpleGA::init_run`], advanced by
@@ -1334,7 +1485,10 @@ where
 /// drive the generation loop, read progress via the getters below, and cancel
 /// early — all without changing `run`'s behavior, since `run` is implemented in
 /// terms of these methods.
-#[cfg(not(feature = "parallel"))]
+///
+/// Available in all builds (not gated on the `parallel` feature) so the
+/// checkpoint resume API (EV-02) and WASM stepping bindings (EV-34) work
+/// regardless of feature flags.
 pub struct SimpleGaRun<G, F = f64>
 where
     G: EvolutionaryGenome,
@@ -1349,7 +1503,6 @@ where
     terminated: bool,
 }
 
-#[cfg(not(feature = "parallel"))]
 impl<G, F> SimpleGaRun<G, F>
 where
     G: EvolutionaryGenome,

@@ -26,8 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Search space: [-5.12, 5.12]^{}", DIM);
     println!("Global optimum: 0.0 at origin\n");
 
-    // Run GA with larger population for multimodal landscape
-    let result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
+    // Run GA with larger population for multimodal landscape. `real_valued()`
+    // pins the genome/fitness types (no turbofish); we override each operator to
+    // tune for this harder multimodal landscape.
+    let result = SimpleGABuilder::real_valued()
         .population_size(200)
         .bounds(bounds)
         .selection(TournamentSelection::new(5)) // Higher pressure

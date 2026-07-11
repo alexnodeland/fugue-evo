@@ -5,19 +5,21 @@
 //!
 //! # Deep trees and stack safety
 //!
-//! The read-side traversals ([`TreeNode::depth`], [`TreeNode::size`] and
-//! [`TreeGenome::evaluate`]) use explicit work stacks instead of recursion, so
-//! they do not overflow the call stack even for pathologically deep trees.
-//!
-//! Tearing a tree down, however, cannot be made stack-safe via a `Drop` impl:
-//! adding `Drop` to [`TreeNode`] (or [`TreeGenome`]) is rejected by the compiler
-//! (error E0509) at the points where the operator layer
-//! (`crate::operators`, a separate work package) moves values out of an owned
-//! `TreeNode`/`TreeGenome`. Rust's compiler-generated drop glue is therefore
-//! still recursive. Callers that construct or deserialize pathologically deep
-//! trees should hand them to [`TreeGenome::dismantle`] (or
-//! [`drop_node_iteratively`]) to free them without recursion instead of letting
-//! them drop implicitly.
+//! Every traversal in this module uses an explicit work stack instead of
+//! recursion, so no operation overflows the call stack even for pathologically
+//! deep trees. This covers the read-side traversals ([`TreeNode::depth`],
+//! [`TreeNode::size`], [`TreeGenome::evaluate`], and the position collectors
+//! backing [`TreeNode::positions`]/[`TreeNode::terminal_positions`]/
+//! [`TreeNode::function_positions`]), the [`crate::operators`] point-mutation
+//! traversal, AND teardown: [`TreeNode`] implements a stack-safe [`Drop`]
+//! (EV-60) that frees an arbitrarily deep tree iteratively, so even dropping a
+//! deep tree *implicitly* (never calling [`TreeGenome::dismantle`]) cannot
+//! overflow the stack. The `Drop` impl moves each node's children out with
+//! `mem::take` — which is permitted under `Drop`, unlike moving a field out by
+//! value (E0509) — so the operator layer must likewise use `mem::take`/in-place
+//! mutation rather than by-value destructuring of an owned `TreeNode`.
+//! [`TreeGenome::dismantle`] and [`drop_node_iteratively`] remain as explicit,
+//! self-documenting entry points but are no longer required for correctness.
 
 use fugue::{addr, ChoiceValue, Trace};
 use rand::Rng;
@@ -106,13 +108,20 @@ impl<T: Terminal, F: Function> TreeNode<T, F> {
         positions
     }
 
+    /// Iterative preorder collector (EV-60: explicit stack, no recursion) that
+    /// records the path to every node.
     fn collect_positions(&self, path: &[usize], positions: &mut Vec<Vec<usize>>) {
-        positions.push(path.to_vec());
-        if let Self::Function(_, children) = self {
-            for (i, child) in children.iter().enumerate() {
-                let mut child_path = path.to_vec();
-                child_path.push(i);
-                child.collect_positions(&child_path, positions);
+        // (node, path-to-node). Children are pushed in reverse so they pop in
+        // left-to-right order, preserving the original preorder traversal.
+        let mut stack: Vec<(&Self, Vec<usize>)> = vec![(self, path.to_vec())];
+        while let Some((node, node_path)) = stack.pop() {
+            positions.push(node_path.clone());
+            if let Self::Function(_, children) = node {
+                for (i, child) in children.iter().enumerate().rev() {
+                    let mut child_path = node_path.clone();
+                    child_path.push(i);
+                    stack.push((child, child_path));
+                }
             }
         }
     }
@@ -184,14 +193,19 @@ impl<T: Terminal, F: Function> TreeNode<T, F> {
         positions
     }
 
+    /// Iterative preorder collector (EV-60: explicit stack, no recursion) that
+    /// records the path to every terminal (leaf) node.
     fn collect_terminal_positions(&self, path: &[usize], positions: &mut Vec<Vec<usize>>) {
-        match self {
-            Self::Terminal(_) => positions.push(path.to_vec()),
-            Self::Function(_, children) => {
-                for (i, child) in children.iter().enumerate() {
-                    let mut child_path = path.to_vec();
-                    child_path.push(i);
-                    child.collect_terminal_positions(&child_path, positions);
+        let mut stack: Vec<(&Self, Vec<usize>)> = vec![(self, path.to_vec())];
+        while let Some((node, node_path)) = stack.pop() {
+            match node {
+                Self::Terminal(_) => positions.push(node_path),
+                Self::Function(_, children) => {
+                    for (i, child) in children.iter().enumerate().rev() {
+                        let mut child_path = node_path.clone();
+                        child_path.push(i);
+                        stack.push((child, child_path));
+                    }
                 }
             }
         }
@@ -204,13 +218,18 @@ impl<T: Terminal, F: Function> TreeNode<T, F> {
         positions
     }
 
+    /// Iterative preorder collector (EV-60: explicit stack, no recursion) that
+    /// records the path to every function (internal) node.
     fn collect_function_positions(&self, path: &[usize], positions: &mut Vec<Vec<usize>>) {
-        if let Self::Function(_, children) = self {
-            positions.push(path.to_vec());
-            for (i, child) in children.iter().enumerate() {
-                let mut child_path = path.to_vec();
-                child_path.push(i);
-                child.collect_function_positions(&child_path, positions);
+        let mut stack: Vec<(&Self, Vec<usize>)> = vec![(self, path.to_vec())];
+        while let Some((node, node_path)) = stack.pop() {
+            if let Self::Function(_, children) = node {
+                positions.push(node_path.clone());
+                for (i, child) in children.iter().enumerate().rev() {
+                    let mut child_path = node_path.clone();
+                    child_path.push(i);
+                    stack.push((child, child_path));
+                }
             }
         }
     }
@@ -375,6 +394,12 @@ impl Function for ArithmeticFunction {
     }
 
     fn functions() -> &'static [Self] {
+        // EV-04: this slice is the canonical, stable index table used by
+        // TreeGenome trace encode/decode (encode_function looks up a function's
+        // position here). EVERY variant of the enum MUST appear exactly once, in
+        // enum-declaration order, or a node of the missing variant round-trips to
+        // the wrong function (previously `Pow` was absent, so a Pow node silently
+        // decoded to index 0 = Add). Keep this in sync with the enum above.
         &[
             Self::Add,
             Self::Sub,
@@ -385,6 +410,7 @@ impl Function for ArithmeticFunction {
             Self::Exp,
             Self::Log,
             Self::Sqrt,
+            Self::Pow,
             Self::Neg,
             Self::Abs,
         ]
@@ -433,11 +459,23 @@ impl Function for ArithmeticFunction {
             Self::Pow => {
                 let base = args.get(0).unwrap_or(&1.0);
                 let exp = args.get(1).unwrap_or(&1.0);
-                // Protected power
+                // Protected power (EV-04): now that `Pow` is part of the function
+                // set drawn by the generators and point mutation, it must never
+                // produce NaN/Inf — matching the protection every other function
+                // in this set already provides. `powf` returns NaN for a negative
+                // base with a fractional exponent, so we guard both the base≈0
+                // (negative exponent) case and any non-finite result.
                 if base.abs() < 1e-10 && *exp < 0.0 {
                     0.0
                 } else {
-                    base.powf(*exp).clamp(-1e10, 1e10)
+                    let result = base.powf(*exp);
+                    if result.is_nan() {
+                        // e.g. (-1.5)^0.75: fall back to a finite value.
+                        1.0
+                    } else {
+                        // `clamp` maps ±inf to ±1e10 and leaves finite values as-is.
+                        result.clamp(-1e10, 1e10)
+                    }
                 }
             }
             Self::Neg => -args.get(0).unwrap_or(&0.0),
@@ -834,14 +872,27 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
 
     // Encode a function as its index in the stable `F::functions()` ordering.
     // The ordering returned by `functions()` is a fixed `&'static` slice, so the
-    // index is stable across encode/decode. Functions absent from that set are a
-    // caller error; we fall back to index 0 (they cannot be produced by the
-    // built-in generators, which only draw from `functions()`).
+    // index is stable across encode/decode. EV-04: the built-in
+    // `ArithmeticFunction::functions()` now lists every variant (including `Pow`,
+    // which was previously missing and silently collapsed to Add), so this path
+    // is lossless for the built-in type. A function absent from the set can now
+    // only arise from a *custom* `Function` impl that violates the `functions()`
+    // contract (it must enumerate every variant it can produce). We surface that
+    // as a debug-build panic to catch the bug during development, and fall back to
+    // index 0 in release rather than silently indexing out of range on decode.
     fn encode_function(func: &F) -> usize {
-        F::functions()
-            .iter()
-            .position(|candidate| candidate == func)
-            .unwrap_or(0)
+        match F::functions().iter().position(|candidate| candidate == func) {
+            Some(idx) => idx,
+            None => {
+                debug_assert!(
+                    false,
+                    "encode_function: function not present in F::functions(); a \
+                     custom Function impl must enumerate every variant it can \
+                     produce so trace round-trips stay lossless (EV-04)"
+                );
+                0
+            }
+        }
     }
 
     fn decode_function(func_idx: usize) -> Result<F, GenomeError> {
@@ -903,24 +954,45 @@ impl<T: Terminal, F: Function> TreeGenomeType for TreeGenome<T, F> {
     }
 }
 
+impl<T: Terminal, F: Function> Drop for TreeNode<T, F> {
+    /// Stack-safe teardown (EV-60).
+    ///
+    /// The compiler-generated drop glue for a recursive `enum` like [`TreeNode`]
+    /// recurses one stack frame per level, so dropping a pathologically deep tree
+    /// would overflow the stack. This impl instead frees the subtree with an
+    /// explicit work stack. It takes each node's children out with
+    /// [`std::mem::take`] (leaving an empty `Vec` behind) — which is permitted
+    /// under `Drop`, unlike moving a field out of `self` by value (E0509). Since
+    /// every node's `children` `Vec` is emptied *before* that node is dropped,
+    /// the reentrant `Drop::drop` invoked when the node itself is freed always
+    /// finds an empty `Vec` and returns in O(1); no deep recursion occurs.
+    fn drop(&mut self) {
+        // Only function nodes own children that could recurse.
+        let mut stack: Vec<TreeNode<T, F>> = match self {
+            TreeNode::Terminal(_) => return,
+            TreeNode::Function(_, children) => std::mem::take(children),
+        };
+        while let Some(mut node) = stack.pop() {
+            if let TreeNode::Function(_, grandchildren) = &mut node {
+                // Detach grandchildren so `node` drops shallowly (its own
+                // reentrant Drop then finds an empty Vec).
+                stack.append(&mut std::mem::take(grandchildren));
+            }
+            // `node` drops here in O(1): a Terminal, or a Function whose
+            // children Vec is now empty.
+        }
+    }
+}
+
 /// Free a tree node and all of its descendants without deep recursion.
 ///
-/// Rust's compiler-generated drop glue for [`TreeNode`] is recursive (one stack
-/// frame per level), so dropping a very deep tree implicitly can overflow the
-/// stack. A stack-safe `Drop` impl is not possible here (see the module note on
-/// deep trees), so this helper tears the tree down with an explicit work stack
-/// instead. It is only able to move children out of each node *because*
-/// `TreeNode` deliberately does not implement `Drop`.
+/// EV-60: [`TreeNode`] now has a stack-safe [`Drop`] impl, so simply dropping a
+/// node already frees an arbitrarily deep tree iteratively. This helper is
+/// retained as an explicit, self-documenting entry point (and for source
+/// compatibility) but is no longer required to avoid a stack overflow — a plain
+/// `drop(node)` or letting the node fall out of scope is equally safe.
 pub fn drop_node_iteratively<T: Terminal, F: Function>(node: TreeNode<T, F>) {
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
-        if let TreeNode::Function(_, mut children) = current {
-            // Move the children onto the work stack so `current` drops shallowly
-            // (its `children` vec is now empty), then process them iteratively.
-            stack.append(&mut children);
-        }
-        // Terminal nodes (and the now-emptied function node) drop in O(1) here.
-    }
+    drop(node);
 }
 
 #[cfg(test)]
@@ -1071,6 +1143,80 @@ mod tests {
     }
 
     #[test]
+    fn test_tree_genome_trace_roundtrip_pow_node() {
+        // regression: EV-04 — a TreeGenome containing a `Pow` node must round-trip
+        // losslessly. `Pow` was previously absent from ArithmeticFunction::functions(),
+        // so encode_function's `.position(...).unwrap_or(0)` silently mapped it to
+        // index 0 = Add, corrupting the tree with no error.
+        let x0 = TreeNode::terminal(ArithmeticTerminal::Variable(0));
+        let two = TreeNode::terminal(ArithmeticTerminal::Constant(2.0));
+        let root = TreeNode::function(ArithmeticFunction::Pow, vec![x0, two]);
+        let original: TreeGenome<ArithmeticTerminal, ArithmeticFunction> = TreeGenome::new(root, 3);
+
+        let recovered: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+            TreeGenome::from_trace(&original.to_trace()).unwrap();
+
+        assert_eq!(original, recovered, "Pow node must survive the round-trip");
+        assert_eq!(recovered.to_sexpr(), original.to_sexpr());
+        assert!(
+            recovered.to_sexpr().contains("pow"),
+            "recovered tree must still be a pow, got {}",
+            recovered.to_sexpr()
+        );
+        // x^2 at x=3 must be 9, not (Add) 3+2=5 as the pre-fix collapse produced.
+        assert_eq!(original.evaluate(&[3.0]), 9.0);
+        assert_eq!(recovered.evaluate(&[3.0]), original.evaluate(&[3.0]));
+        for vars in [[3.0], [-2.0], [0.5], [1.5]] {
+            assert_eq!(recovered.evaluate(&vars), original.evaluate(&vars));
+        }
+    }
+
+    #[test]
+    fn test_every_arithmetic_function_variant_roundtrips_losslessly() {
+        // regression: EV-04 — prove the round-trip is lossless for EVERY public
+        // ArithmeticFunction variant, not just the ones the generators draw from.
+        // Each variant is exercised as a real node whose arity matches, and both
+        // exact structural equality and evaluation equality are asserted.
+        use ArithmeticFunction::*;
+        let all = [Add, Sub, Mul, Div, Sin, Cos, Exp, Log, Sqrt, Pow, Neg, Abs];
+        // functions() must contain every variant exactly once (index table).
+        assert_eq!(
+            ArithmeticFunction::functions().len(),
+            all.len(),
+            "functions() must list every ArithmeticFunction variant"
+        );
+        for f in &all {
+            assert!(
+                ArithmeticFunction::functions().contains(f),
+                "functions() is missing variant {f:?}"
+            );
+        }
+
+        for f in all {
+            let arity = f.arity();
+            let children: Vec<_> = (0..arity)
+                .map(|i| TreeNode::terminal(ArithmeticTerminal::Variable(i)))
+                .collect();
+            let root = TreeNode::function(f.clone(), children);
+            let original: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+                TreeGenome::new(root, 3);
+            let recovered: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+                TreeGenome::from_trace(&original.to_trace()).unwrap();
+            assert_eq!(original, recovered, "variant {f:?} lost identity on round-trip");
+            for vars in [[2.0, 3.0], [-1.5, 0.75]] {
+                let (a, b) = (recovered.evaluate(&vars), original.evaluate(&vars));
+                // Bit-identical (NaN-aware): the same function on the same inputs
+                // must produce the same result, including matching NaN (e.g.
+                // Pow(-1.5, 0.75)) which `==` would otherwise report as unequal.
+                assert!(
+                    a.to_bits() == b.to_bits(),
+                    "variant {f:?} evaluated differently after round-trip: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_tree_generate_with_depth_explicit() {
         // EV-94: honest constructor takes an explicit maximum depth.
         let mut rng = rand::thread_rng();
@@ -1157,6 +1303,53 @@ mod tests {
             node = TreeNode::function(ArithmeticFunction::Abs, vec![node]);
         }
         drop_node_iteratively(node);
+    }
+
+    fn deep_tree(depth: usize) -> TreeGenome<ArithmeticTerminal, ArithmeticFunction> {
+        // Build bottom-up in a loop (no recursion during construction).
+        let mut root: TreeNode<ArithmeticTerminal, ArithmeticFunction> =
+            TreeNode::terminal(ArithmeticTerminal::Constant(1.0));
+        for _ in 0..depth {
+            root = TreeNode::function(ArithmeticFunction::Neg, vec![root]);
+        }
+        TreeGenome::new(root, depth + 1)
+    }
+
+    #[test]
+    fn test_deep_tree_implicit_drop_no_overflow() {
+        // regression: EV-60 — dropping a ~100k-deep tree *implicitly* (never
+        // calling dismantle()) must not overflow. The stack-safe Drop impl frees
+        // it iteratively; the compiler-generated recursive drop glue would blow
+        // the stack here.
+        let depth = 100_000usize;
+        {
+            let tree = deep_tree(depth);
+            assert_eq!(tree.size(), depth + 1);
+            // Intentionally let `tree` fall out of scope here: implicit Drop only.
+        }
+        // A bare deep TreeNode dropped implicitly must also be safe.
+        {
+            let mut node: TreeNode<ArithmeticTerminal, ArithmeticFunction> =
+                TreeNode::terminal(ArithmeticTerminal::Constant(0.0));
+            for _ in 0..depth {
+                node = TreeNode::function(ArithmeticFunction::Abs, vec![node]);
+            }
+            let _ = node; // dropped implicitly at end of scope
+        }
+    }
+
+    #[test]
+    fn test_deep_tree_position_collectors_no_overflow() {
+        // regression: EV-60 — the position collectors must be iterative: calling
+        // positions()/terminal_positions()/function_positions() on a ~100k-deep
+        // tree must not overflow the call stack.
+        let depth = 100_000usize;
+        let tree = deep_tree(depth);
+        assert_eq!(tree.root.positions().len(), depth + 1);
+        // One terminal (the single leaf) and `depth` function nodes.
+        assert_eq!(tree.root.terminal_positions().len(), 1);
+        assert_eq!(tree.root.function_positions().len(), depth);
+        tree.dismantle();
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # fugue-evo
 
-A Probabilistic Genetic Algorithm Library for Rust.
+A broad evolutionary-computation library for Rust, with an optional probabilistic-programming bridge to [Fugue](https://github.com/fugue-ppl/fugue).
 
-This library implements genetic algorithms through the lens of probabilistic programming, treating evolution as Bayesian inference over solution spaces.
+The default flagship algorithms (SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState) are standalone evolutionary computation: they use Fugue's `Trace` only as an address→value data container for the optional `to_trace`/`from_trace` round-trip, not for inference. The genuine "evolution as Bayesian inference over solution spaces" story — a tempered Sequential Monte Carlo pipeline over Fugue's `Model`/`Handler`/`factor` machinery — lives in the `fugue_integration` module (`EvolutionarySMC`/`EvolutionStep`/`BayesianAdaptiveGA`), demonstrated by `examples/bayesian_evolution.rs`. Reach for that module, not the default algorithms, when you want the PPL-powered inference path (EV-17).
 
 ## Features
 
@@ -35,12 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fitness = Sphere::new(10);
     let bounds = MultiBounds::symmetric(5.12, 10);
 
-    let result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
+    // `real_valued()` pins the genome/fitness types (no turbofish) and
+    // pre-installs tournament selection, SBX crossover, and polynomial mutation
+    // as overridable defaults.
+    let result = SimpleGABuilder::real_valued()
         .population_size(100)
         .bounds(bounds)
-        .selection(TournamentSelection::new(3))
-        .crossover(SbxCrossover::new(20.0))
-        .mutation(PolynomialMutation::new(20.0))
         .fitness(fitness)
         .max_generations(200)
         .build()?
@@ -74,7 +74,7 @@ cargo run --example sphere_optimization
 
 ### Fitness as Likelihood
 
-Selection pressure maps directly to Bayesian conditioning. Higher fitness increases the probability of selection, analogous to likelihood weighting in probabilistic inference.
+The `exp(f/T)` selection weight corresponds to Bayesian conditioning on fitness. In this crate that correspondence is realized concretely in two places: `BoltzmannSelection` (a standalone softmax-of-`f/T` selection operator), and the tempered-SMC path in `fugue_integration`, which targets the Boltzmann/Gibbs posterior `π_β(x) ∝ p(x)·exp(β·f(x))` using Fugue's `factor` machinery. The other default selection operators (tournament, roulette, rank) are ordinary EC and do not perform inference.
 
 ### Learnable Operators
 

@@ -417,8 +417,24 @@ where
         ESBuilder::new()
     }
 
-    /// Run the evolution strategy
+    /// Run the evolution strategy.
     pub fn run<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<G, F>, EvolutionError> {
+        // Delegate to the callback-driven loop with a no-op observer, so `run`
+        // and `run_with_callback` share exactly one loop body.
+        self.run_with_callback(rng, |_generation, _best_fitness| true)
+    }
+
+    /// Run the evolution strategy, invoking `on_generation(generation,
+    /// best_fitness)` once per generation before that generation is evolved.
+    ///
+    /// Returning `false` from the callback cancels the run early and returns the
+    /// best-so-far result (AUDIT EV-34: lets the WASM layer report per-generation
+    /// progress and support cancellation without a separate step API).
+    pub fn run_with_callback<R: Rng, Cb: FnMut(usize, f64) -> bool>(
+        &self,
+        rng: &mut R,
+        mut on_generation: Cb,
+    ) -> Result<EvolutionResult<G, F>, EvolutionError> {
         let start_time = Instant::now();
 
         // Initialize population with adaptive genomes
@@ -475,6 +491,12 @@ where
 
             if self.termination.should_terminate(&state) {
                 stats.set_termination_reason(self.termination.reason());
+                break;
+            }
+
+            // EV-34: per-generation progress/cancel hook. A `false` return cancels
+            // the run, returning the best individual found so far.
+            if !on_generation(generation, best.1.to_f64()) {
                 break;
             }
 
@@ -726,8 +748,24 @@ where
         ESBuilder::new()
     }
 
-    /// Run the evolution strategy
+    /// Run the evolution strategy.
     pub fn run<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<G, F>, EvolutionError> {
+        // Delegate to the callback-driven loop with a no-op observer, so `run`
+        // and `run_with_callback` share exactly one loop body.
+        self.run_with_callback(rng, |_generation, _best_fitness| true)
+    }
+
+    /// Run the evolution strategy, invoking `on_generation(generation,
+    /// best_fitness)` once per generation before that generation is evolved.
+    ///
+    /// Returning `false` from the callback cancels the run early and returns the
+    /// best-so-far result (AUDIT EV-34: lets the WASM layer report per-generation
+    /// progress and support cancellation without a separate step API).
+    pub fn run_with_callback<R: Rng, Cb: FnMut(usize, f64) -> bool>(
+        &self,
+        rng: &mut R,
+        mut on_generation: Cb,
+    ) -> Result<EvolutionResult<G, F>, EvolutionError> {
         let start_time = Instant::now();
 
         // Initialize population with adaptive genomes
@@ -784,6 +822,12 @@ where
 
             if self.termination.should_terminate(&state) {
                 stats.set_termination_reason(self.termination.reason());
+                break;
+            }
+
+            // EV-34: per-generation progress/cancel hook. A `false` return cancels
+            // the run, returning the best individual found so far.
+            if !on_generation(generation, best.1.to_f64()) {
                 break;
             }
 
@@ -1033,6 +1077,7 @@ mod tests {
     use crate::fitness::benchmarks::Sphere;
     use crate::genome::real_vector::RealVector;
     use crate::termination::MaxEvaluations;
+    use rand::SeedableRng;
 
     #[test]
     fn test_es_builder() {
@@ -1150,6 +1195,70 @@ mod tests {
 
         let result = es.run(&mut rng);
         assert!(result.is_ok());
+    }
+
+    // regression: EV-34 — run_with_callback reports every generation and lets a
+    // caller cancel early.
+    #[test]
+    fn test_es_run_with_callback_reports_progress() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let bounds = MultiBounds::symmetric(5.12, 4);
+        let es: EvolutionStrategy<RealVector, f64, _, _> = ESBuilder::new()
+            .mu(6)
+            .lambda(24)
+            .initial_sigma(0.5)
+            .bounds(bounds)
+            .fitness(Sphere::new(4))
+            .max_generations(15)
+            .build()
+            .unwrap();
+
+        let mut seen: Vec<usize> = Vec::new();
+        let result = es
+            .run_with_callback(&mut rng, |generation, best| {
+                assert!(best.is_finite());
+                seen.push(generation);
+                true
+            })
+            .unwrap();
+
+        // The callback fired once per evolved generation, in order 0,1,2,...
+        assert_eq!(seen, (0..result.generations).collect::<Vec<_>>());
+        assert!(!seen.is_empty());
+    }
+
+    #[test]
+    fn test_es_run_with_callback_cancels_early() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12);
+        let bounds = MultiBounds::symmetric(5.12, 4);
+        // A large generation budget the cancel must cut short.
+        let es: EvolutionStrategy<RealVector, f64, _, _> = ESBuilder::new()
+            .mu(6)
+            .lambda(24)
+            .initial_sigma(0.5)
+            .bounds(bounds)
+            .fitness(Sphere::new(4))
+            .max_generations(10_000)
+            .build()
+            .unwrap();
+
+        let mut calls = 0usize;
+        let result = es
+            .run_with_callback(&mut rng, |_generation, _best| {
+                calls += 1;
+                // Continue for 5 generations, then cancel.
+                calls < 5
+            })
+            .unwrap();
+
+        // Cancelled at generation 4 (0-indexed), so no more than 5 generations ran
+        // despite the 10k budget.
+        assert!(calls <= 5, "callback should stop being called after cancel");
+        assert!(
+            result.generations < 10,
+            "run must stop far short of the 10k budget, got {}",
+            result.generations
+        );
     }
 
     /// regression: EV-40 — the default configuration enables σ self-adaptation,

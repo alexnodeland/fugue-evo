@@ -185,8 +185,17 @@ pub struct ConvergenceDetector {
     current_generation: usize,
     /// Current evaluations
     current_evaluations: usize,
-    /// Best fitness seen so far
+    /// Best fitness seen so far, *thresholded* for stagnation tracking: only
+    /// advanced when an update improves on it by more than `stagnation_threshold`
+    /// (see `update`). Because of that throttle it can lag the true running max by
+    /// up to `stagnation_threshold`, so it must NOT be used for target detection.
     best_fitness_overall: f64,
+    /// Pure running maximum of every `best_fitness` ever passed to `update`, with
+    /// no threshold throttle (REG-1). This is the authoritative "best seen so far"
+    /// used by `best_fitness()` and the target-fitness check; keeping it separate
+    /// from `best_fitness_overall` lets stagnation stay throttled while target
+    /// detection sees the true best.
+    running_best_fitness: f64,
     /// Generation when best fitness was last improved
     last_improvement_generation: usize,
 }
@@ -204,6 +213,7 @@ impl ConvergenceDetector {
             current_generation: 0,
             current_evaluations: 0,
             best_fitness_overall: f64::NEG_INFINITY,
+            running_best_fitness: f64::NEG_INFINITY,
             last_improvement_generation: 0,
         }
     }
@@ -233,7 +243,15 @@ impl ConvergenceDetector {
         self.mean_cumsq.push(prev_sq + mean_fitness * mean_fitness);
         self.diversity_history.push(diversity);
 
-        // Track improvement
+        // Pure running max (REG-1): tracks the true best regardless of the
+        // stagnation throttle below, so target detection never lags.
+        if best_fitness > self.running_best_fitness {
+            self.running_best_fitness = best_fitness;
+        }
+
+        // Track improvement (stagnation): intentionally throttled — only counts as
+        // an improvement when it beats the previous best by more than
+        // `stagnation_threshold`, so tiny gains don't reset the stagnation clock.
         if best_fitness > self.best_fitness_overall + self.config.stagnation_threshold {
             self.best_fitness_overall = best_fitness;
             self.last_improvement_generation = generation;
@@ -263,15 +281,18 @@ impl ConvergenceDetector {
         }
 
         // Check target fitness.
-        // EV-49: read the tracked running best (`best_fitness_overall`, the same
-        // value returned by `best_fitness()`), not the last per-generation value.
-        // A caller may legitimately pass a non-monotonic per-generation best, so
+        // EV-49 / REG-1: read the true running best (`running_best_fitness`, the
+        // same value returned by `best_fitness()`), not the last per-generation
+        // value and NOT the stagnation-throttled `best_fitness_overall`. A caller
+        // may legitimately pass a non-monotonic per-generation best, so
         // `best_fitness_history.last()` can dip below a target already reached in
-        // an earlier generation; the running best keeps target detection
-        // consistent with the struct's own bookkeeping.
+        // an earlier generation; and `best_fitness_overall` lags the true best by
+        // up to `stagnation_threshold`, which would miss a reached target whenever
+        // `stagnation_threshold > target_tolerance`. The pure running max keeps
+        // target detection consistent with the struct's own `best_fitness()`.
         if let Some(target) = self.config.target_fitness {
             if !self.best_fitness_history.is_empty() {
-                let best = self.best_fitness_overall;
+                let best = self.running_best_fitness;
                 if (best - target).abs() <= self.config.target_tolerance || best >= target {
                     reasons.push(ConvergenceReason::target_reached(best));
                 }
@@ -356,9 +377,10 @@ impl ConvergenceDetector {
         (var_plus / w).sqrt()
     }
 
-    /// Get the best fitness seen
+    /// Get the best fitness seen (true running maximum, not the
+    /// stagnation-throttled bookkeeping value).
     pub fn best_fitness(&self) -> f64 {
-        self.best_fitness_overall
+        self.running_best_fitness
     }
 
     /// Get generations since last improvement
@@ -393,6 +415,7 @@ impl ConvergenceDetector {
         self.current_generation = 0;
         self.current_evaluations = 0;
         self.best_fitness_overall = f64::NEG_INFINITY;
+        self.running_best_fitness = f64::NEG_INFINITY;
         self.last_improvement_generation = 0;
     }
 }
@@ -1035,6 +1058,63 @@ mod tests {
         );
         if let ConvergenceStatus::Converged(reason) = status {
             assert!(matches!(reason, ConvergenceReason::TargetReached { .. }));
+        }
+    }
+
+    // regression: REG-1 — the EV-49 fix must read a *pure* running max, not the
+    // stagnation-throttled `best_fitness_overall`, which lags the true best by up
+    // to `stagnation_threshold`. With `stagnation_threshold > target_tolerance`,
+    // a target that is reached-and-held is otherwise never reported.
+    #[test]
+    fn test_target_fitness_survives_stagnation_throttle() {
+        let config = ConvergenceConfig::default()
+            .target_fitness(100.0)
+            .target_tolerance(1e-6)
+            // threshold (0.01) deliberately larger than the tolerance (1e-6)
+            .stagnation(50, 0.01);
+        let mut detector = ConvergenceDetector::new(config);
+
+        // gen0 seeds the throttled `best_fitness_overall` just below target.
+        detector.update(0, 10, 99.995, 50.0, 1.0);
+        // gen1 hits the target exactly, but 100.0 <= 99.995 + 0.01 = 100.005, so
+        // the throttled value stays at 99.995. The pure running max must be 100.0.
+        detector.update(1, 20, 100.0, 50.0, 1.0);
+
+        assert_eq!(
+            detector.best_fitness(),
+            100.0,
+            "the running best must reflect the true max, not the throttled value"
+        );
+
+        let status = detector.check();
+        assert!(
+            status.is_converged(),
+            "target reached-and-held must be reported even when \
+             stagnation_threshold > target_tolerance"
+        );
+        assert!(
+            matches!(
+                status,
+                ConvergenceStatus::Converged(ConvergenceReason::TargetReached { .. })
+                    | ConvergenceStatus::Converged(ConvergenceReason::MultipleReasons(_))
+            ),
+            "convergence reason must include TargetReached, got {status:?}"
+        );
+
+        // Hold at target for many generations: TargetReached must persist and the
+        // pre-fix wrong-reason (stagnation ~49 gens later) must not be the sole
+        // reason reported at the moment the target is first reached.
+        for g in 2..10 {
+            detector.update(g, 10 * (g + 1), 100.0, 50.0, 1.0);
+            let s = detector.check();
+            let has_target = match &s {
+                ConvergenceStatus::Converged(ConvergenceReason::TargetReached { .. }) => true,
+                ConvergenceStatus::Converged(ConvergenceReason::MultipleReasons(rs)) => {
+                    rs.iter().any(|r| matches!(r, ConvergenceReason::TargetReached { .. }))
+                }
+                _ => false,
+            };
+            assert!(has_target, "target must stay reported while held, gen {g}: {s:?}");
         }
     }
 
