@@ -278,6 +278,7 @@ dependencies = [
  "nalgebra",
  "proptest",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "rand_distr",
  "rayon",
  "serde",
@@ -660,6 +661,7 @@ checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
  "rand_core 0.6.4",
+ "serde",
 ]
 
 [[package]]

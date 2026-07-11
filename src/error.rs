@@ -68,13 +68,43 @@ pub enum CheckpointError {
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// Serialization error
+    /// Serialization error (message-only; retained for callers that do not
+    /// have a structured source to attach).
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    /// Deserialization error
+    /// Deserialization error (message-only; retained for callers that do not
+    /// have a structured source to attach).
     #[error("Deserialization error: {0}")]
     Deserialization(String),
+
+    /// Serialization failed while writing a checkpoint file.
+    ///
+    /// Unlike [`CheckpointError::Serialization`], this variant preserves the
+    /// underlying error via [`std::error::Error::source`], so callers can
+    /// `source()`/`downcast_ref()` into the real cause (EV-89).
+    #[error("Failed to serialize checkpoint")]
+    SerializeError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Deserialization failed while reading a checkpoint file.
+    ///
+    /// Unlike [`CheckpointError::Deserialization`], this variant preserves the
+    /// underlying error via [`std::error::Error::source`], so callers can
+    /// distinguish e.g. an EOF/truncation from a type mismatch (EV-89).
+    #[error("Failed to deserialize checkpoint")]
+    DeserializeError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Checkpoint file exceeds the configured size limit.
+    ///
+    /// Guards against unbounded allocation when deserializing a corrupted or
+    /// hostile checkpoint file (EV-48).
+    #[error("Checkpoint too large: {size} bytes exceeds limit of {limit} bytes")]
+    TooLarge {
+        /// Size of the checkpoint payload in bytes.
+        size: u64,
+        /// Configured maximum in bytes.
+        limit: u64,
+    },
 
     /// Checkpoint version mismatch
     #[error("Version mismatch: expected {expected}, found {found}")]
@@ -273,5 +303,22 @@ mod tests {
         let result: OperatorResult<i32> = OperatorResult::Success(42);
         let mapped = result.map(|x| x * 2);
         assert_eq!(mapped.genome(), Some(84));
+    }
+
+    #[test]
+    fn test_checkpoint_error_preserves_source_chain() {
+        // regression: EV-89 - (de)serialization errors must preserve the
+        // underlying error via source() rather than stringifying it.
+        use std::error::Error;
+
+        let json_err = serde_json::from_str::<i32>("not a number").unwrap_err();
+        let err = CheckpointError::DeserializeError(Box::new(json_err));
+
+        // The source chain must be walkable and downcastable to the real cause.
+        let source = err.source().expect("source chain must be preserved");
+        assert!(
+            source.downcast_ref::<serde_json::Error>().is_some(),
+            "source must downcast to the original serde_json::Error"
+        );
     }
 }

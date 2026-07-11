@@ -25,6 +25,8 @@ nalgebra = "0.33"
 # Randomness
 rand = "0.8"
 rand_distr = "0.4"
+# Serializable, reproducible RNG for checkpoint round-tripping (EV-02)
+rand_chacha = { version = "0.3", features = ["serde1"] }
 
 # Parallelism (optional)
 rayon = { version = "1.10", optional = true }
