@@ -11,6 +11,21 @@
 
 -----
 
+> **Implementation note (2026-07):** this document is the original design
+> draft and predates several implementation decisions; treat code samples
+> below as illustrative, not as the current API. Notably: the Bayesian
+> operator-parameter learner shipped as [`ThompsonSamplingTuner`] (a Thompson-
+> sampling multi-armed bandit over conjugate `Beta`/`Gamma` posteriors,
+> opt-in via `SimpleGABuilder::adaptive_operators`), not the
+> `BayesianHyperparameterLearner` sketch in §4 below; the SMC-as-evolution
+> idea in `fugue_integration::evolution_model::EvolutionarySMC` is
+> implemented and demonstrated end-to-end in `examples/bayesian_evolution.rs`;
+> and checkpointing (§ Checkpointing) supports bit-identical resume for the
+> ChaCha RNG family via `checkpoint::rng::SnapshotRng`. See README.md and
+> CHANGELOG.md for the current, verified feature set.
+
+-----
+
 ## Executive Summary
 
 **fugue-evo** is a Rust library that implements genetic algorithms through the lens of probabilistic programming, built on top of the [Fugue PPL](https://github.com/alexnodeland/fugue). By treating evolution as Bayesian inference over solution spaces, fugue-evo provides principled approaches to selection, crossover, and mutation while enabling automatic hyperparameter learning through probabilistic inference.

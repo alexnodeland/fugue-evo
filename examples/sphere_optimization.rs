@@ -41,9 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?
         .run(&mut rng)?;
 
-    // Print results
+    // Print results. `result.best_fitness` is the GA's internal (negated,
+    // higher-is-better) value, so we flip its sign back here to report the
+    // textbook Sphere objective (sum of squares, minimized at 0.0).
     println!("Optimization complete!");
-    println!("  Best fitness: {:.6}", result.best_fitness);
+    println!("  Best fitness (sum of squares): {:.6}", -result.best_fitness);
     println!("  Generations:  {}", result.generations);
     println!("  Evaluations:  {}", result.evaluations);
     println!("\nBest solution:");

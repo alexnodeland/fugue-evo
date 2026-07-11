@@ -9,9 +9,9 @@ This library implements genetic algorithms through the lens of probabilistic pro
 - **Multiple Algorithms**: Simple GA, CMA-ES, NSGA-II, Island Model
 - **Flexible Genomes**: Real-valued vectors, bit strings, permutations, and GP trees
 - **Rich Operators**: SBX crossover, polynomial mutation, tournament selection, and more
-- **Probabilistic Integration**: Fugue PPL integration for trace-based evolutionary operators
-- **Bayesian Learning**: Online hyperparameter adaptation using conjugate priors
-- **Production Ready**: Checkpointing, convergence detection, parallel evaluation
+- **Probabilistic Integration**: a genuine tempered Sequential Monte Carlo pipeline over Fugue's `Model`/`Handler`/`factor` machinery, targeting the Boltzmann/Gibbs posterior `π_β(x) ∝ p(x) · exp(β·f(x))` (see `examples/bayesian_evolution.rs`)
+- **Bayesian Learning**: opt-in online hyperparameter tuning via a Thompson-sampling multi-armed bandit over conjugate `Beta`/`Gamma` posteriors (`SimpleGABuilder::adaptive_operators` + `run_adaptive`; see `examples/hyperparameter_learning.rs`)
+- **Production Ready**: checkpointing with bit-identical resume (ChaCha RNG family), convergence detection, parallel evaluation
 
 ## Quick Start
 
@@ -59,9 +59,10 @@ The `examples/` directory contains demonstrations of various features:
 - `rastrigin_benchmark.rs` - Multimodal function optimization
 - `cma_es_example.rs` - CMA-ES for Rosenbrock function
 - `island_model.rs` - Parallel island model evolution
-- `checkpointing.rs` - Save and restore evolution state
+- `checkpointing.rs` - Save and restore evolution state with bit-identical resume
 - `symbolic_regression.rs` - Genetic programming with tree genomes
-- `hyperparameter_learning.rs` - Bayesian hyperparameter adaptation
+- `hyperparameter_learning.rs` - Opt-in Thompson-sampling operator-parameter tuning
+- `bayesian_evolution.rs` - Flagship end-to-end pipeline: tempered SMC over the Boltzmann posterior, plus the Bayesian adaptive GA
 
 Run an example:
 
@@ -77,7 +78,7 @@ Selection pressure maps directly to Bayesian conditioning. Higher fitness increa
 
 ### Learnable Operators
 
-The library supports automatic inference of optimal crossover, mutation, and selection hyperparameters using Bayesian conjugate priors that update online during evolution.
+Operator parameters (per-gene mutation probability, crossover probability) can optionally be tuned online by a Thompson-sampling multi-armed bandit: each candidate value is an arm with a conjugate `Beta` posterior over "did this arm's value improve the offspring", and the arm actually applied each generation is Thompson-sampled from those posteriors. Opt in with `SimpleGABuilder::adaptive_operators(ThompsonConfig)` and `SimpleGA::run_adaptive` (the default `run` path uses fixed operator parameters).
 
 ### Flexible Genomes
 
@@ -95,6 +96,14 @@ Genomes can be converted to Fugue PPL traces for probabilistic operations:
 let trace = genome.to_trace();
 let recovered = RealVector::from_trace(&trace)?;
 ```
+
+Beyond trace conversion, the `fugue_integration` module runs a genuine tempered
+Sequential Monte Carlo sampler (`EvolutionarySMC`) over Fugue's
+`Model`/`Handler`/`factor` machinery, targeting the Boltzmann/Gibbs posterior
+`π_β(x) ∝ p(x) · exp(β·f(x))` from the prior (`β = 0`) to the full posterior
+(`β = 1`), using trace-based mutation/crossover as `π_β`-invariant
+Metropolis–Hastings rejuvenation moves. See `examples/bayesian_evolution.rs`
+for the end-to-end pipeline.
 
 ## Algorithms
 
@@ -114,6 +123,37 @@ Non-dominated Sorting Genetic Algorithm II for multi-objective optimization. Fin
 
 Parallel evolution with multiple subpopulations and periodic migration. Supports ring, fully-connected, and star topologies.
 
+## Development
+
+fugue-evo depends on the published `fugue-ppl = "0.1.0"` release from
+crates.io, not a `path` dependency onto the sibling `fugue` checkout, even
+though both crates live side by side under the same `fugue-ecosystem` parent
+directory. This is a deliberate choice, not an oversight: `fugue-evo` and
+`fugue` are developed and audited independently and often have in-progress,
+momentarily-uncompilable work on `fugue`'s `main` branch at any given time, so
+hard-wiring the build to `../fugue`'s working tree would make `fugue-evo`'s
+own build only as stable as whatever `fugue` happens to look like on disk
+right now (verified: pointing this dependency at `path = "../fugue"` compiled
+cleanly at one point during this remediation, then started failing minutes
+later from unrelated concurrent edits to `fugue`, with no change on the
+`fugue-evo` side — exactly the fragility a hard path dependency should avoid
+for a crate published independently to crates.io).
+
+To develop `fugue-evo` and `fugue` together and pick up local edits to
+`../fugue` immediately (without publishing `fugue-ppl` first), add a
+`[patch]` override to your own **local, uncommitted** top-level `Cargo.toml`
+(or an `--config` override) rather than to this crate's tracked manifest:
+
+```toml
+[patch.crates-io]
+fugue-ppl = { path = "../fugue" }
+```
+
+Run `cargo check` afterward to confirm your local `fugue` checkout actually
+still satisfies `fugue-evo`'s usage before relying on it; drop the `[patch]`
+block (or just don't commit it) to fall back to the pinned, known-good
+registry release.
+
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Licensed under the [MIT license](LICENSE).
