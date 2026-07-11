@@ -8,6 +8,7 @@
 
 use std::marker::PhantomData;
 
+use nalgebra::{DMatrix, SymmetricEigen};
 use rand::Rng;
 use rand_distr::{Distribution, StandardNormal};
 
@@ -348,23 +349,28 @@ impl CmaEsState {
         // Update generation counter
         self.generation += 1;
 
-        // Update eigendecomposition periodically
-        // (expensive, so don't do it every generation)
-        let update_eigendecomp = self.generation - self.eigen_eval
-            > (self.lambda as f64 / (self.c_1 + self.c_mu) / n as f64 / 10.0) as usize;
-
-        if update_eigendecomp {
+        // Update eigendecomposition on the lazy purecmaes cadence (expensive, so
+        // don't do it every generation). Best-solution tracking is handled by the
+        // caller (`step`) so that it records the *feasible* (bound-repaired)
+        // point rather than the raw sample used for the distribution update.
+        if self.generation - self.eigen_eval >= self.eigen_update_interval() {
             self.update_eigensystem();
             self.eigen_eval = self.generation;
         }
+    }
 
-        // Track best solution
-        if let Some((best_genome, best_fit)) = offspring.first() {
-            if *best_fit < self.best_fitness {
-                self.best_fitness = *best_fit;
-                self.best_solution = best_genome.genes().to_vec();
-            }
-        }
+    /// Number of generations between eigendecomposition recomputes.
+    ///
+    /// purecmaes recomputes the eigensystem when
+    /// `counteval - eigeneval > lambda/(c1+cmu)/N/10`, where `counteval` counts
+    /// **evaluations** and advances by `lambda` each generation. In generation
+    /// units this is `generation - eigen_eval > 1/(10·N·(c1+cmu))`, i.e. the
+    /// interval is `max(1, floor(1/(10·N·(c1+cmu))))`. The previous code compared
+    /// a *generation* difference against the *evaluation*-scaled right-hand side,
+    /// making recomputes a factor of λ too infrequent (see AUDIT EV-37).
+    pub fn eigen_update_interval(&self) -> usize {
+        let n = self.dimension as f64;
+        ((1.0 / (10.0 * n * (self.c_1 + self.c_mu))).floor() as usize).max(1)
     }
 
     /// Update eigendecomposition of C
@@ -379,9 +385,10 @@ impl CmaEsState {
             }
         }
 
-        // Simple Jacobi eigendecomposition
-        // In production, you'd use a linear algebra library
-        let (eigenvalues, eigenvectors) = jacobi_eigendecomposition(&self.covariance);
+        // Symmetric eigendecomposition via nalgebra. `eigenvalues[j]` is paired
+        // with column `j` of `eigenvectors` (matching the B·D·z sampling and
+        // C^{-1/2} = B·D^{-1}·Bᵀ conventions used below).
+        let (eigenvalues, eigenvectors) = symmetric_eigendecomposition(&self.covariance);
 
         self.eigenvalues = eigenvalues;
         self.eigenvectors = eigenvectors;
@@ -425,89 +432,34 @@ impl CmaEsState {
     }
 }
 
-/// Simple Jacobi eigendecomposition for symmetric matrices
-fn jacobi_eigendecomposition(a: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
+/// Symmetric eigendecomposition of a real symmetric matrix.
+///
+/// Returns `(eigenvalues, eigenvectors)` where `eigenvalues[j]` is the
+/// eigenvalue associated with **column `j`** of the returned `eigenvectors`
+/// matrix (i.e. `eigenvectors[i][j]` is the `i`-th component of the `j`-th
+/// eigenvector). Eigenvectors form an orthonormal set, and for the CMA-ES
+/// covariance `C` the reconstruction `B · diag(λ) · Bᵀ = C` holds.
+///
+/// Backed by `nalgebra::SymmetricEigen`, which uses a numerically stable
+/// symmetric tridiagonalization + implicit-shift QR iteration rather than the
+/// previous hand-rolled cyclic-Jacobi routine (which never mutated its input
+/// matrix and therefore returned incorrect — even negative — eigenvalues and
+/// non-diagonalizing eigenvectors; see AUDIT EV-01).
+fn symmetric_eigendecomposition(a: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
     let n = a.len();
-    let mut d: Vec<f64> = (0..n).map(|i| a[i][i]).collect();
-    let mut v: Vec<Vec<f64>> = (0..n)
-        .map(|i| {
-            let mut row = vec![0.0; n];
-            row[i] = 1.0;
-            row
-        })
+
+    // nalgebra stores column-major; build from a row-major flat copy of `a`.
+    let flat: Vec<f64> = (0..n).flat_map(|i| (0..n).map(move |j| a[i][j])).collect();
+    let matrix = DMatrix::from_row_slice(n, n, &flat);
+
+    let eig = SymmetricEigen::new(matrix);
+
+    let eigenvalues: Vec<f64> = eig.eigenvalues.iter().copied().collect();
+    let eigenvectors: Vec<Vec<f64>> = (0..n)
+        .map(|i| (0..n).map(|j| eig.eigenvectors[(i, j)]).collect())
         .collect();
-    let mut b = d.clone();
-    let mut z = vec![0.0; n];
 
-    let max_sweeps = 50;
-
-    for _ in 0..max_sweeps {
-        let mut sm = 0.0;
-        for p in 0..n - 1 {
-            for q in p + 1..n {
-                sm += a[p][q].abs();
-            }
-        }
-
-        if sm < 1e-16 {
-            break;
-        }
-
-        for p in 0..n - 1 {
-            for q in p + 1..n {
-                let h = d[q] - d[p];
-                let mut t: f64;
-
-                if a[p][q].abs() < 1e-100 {
-                    t = 0.0;
-                } else if h.abs() < 1e-100 {
-                    t = a[p][q].signum();
-                } else {
-                    let theta = 0.5 * h / a[p][q];
-                    t = 1.0 / (theta.abs() + (1.0 + theta * theta).sqrt());
-                    if theta < 0.0 {
-                        t = -t;
-                    }
-                }
-
-                let c = 1.0 / (1.0 + t * t).sqrt();
-                let s = t * c;
-                let tau = s / (1.0 + c);
-
-                let h = t * a[p][q];
-                z[p] -= h;
-                z[q] += h;
-                d[p] -= h;
-                d[q] += h;
-
-                // Rotate rows/columns
-                for j in 0..p {
-                    let g = a[j][p];
-                    let h = a[j][q];
-                    let apj = g - s * (h + g * tau);
-                    let aqj = h + s * (g - h * tau);
-                    // Note: we can't modify a, so we track rotations through v
-                    let _ = (apj, aqj);
-                }
-
-                // Update eigenvectors
-                for j in 0..n {
-                    let g = v[j][p];
-                    let h = v[j][q];
-                    v[j][p] = g - s * (h + g * tau);
-                    v[j][q] = h + s * (g - h * tau);
-                }
-            }
-        }
-
-        for i in 0..n {
-            b[i] += z[i];
-            d[i] = b[i];
-            z[i] = 0.0;
-        }
-    }
-
-    (d, v)
+    (eigenvalues, eigenvectors)
 }
 
 /// Implement CmaEsFitness for any Fn that matches the signature
@@ -539,6 +491,13 @@ pub struct CmaEs<F> {
     pub state: CmaEsState,
     /// Problem bounds
     pub bounds: Option<MultiBounds>,
+    /// Weight of the optional quadratic boundary penalty (0.0 = disabled).
+    ///
+    /// When positive, an infeasible sample `x` is scored as
+    /// `f(clamp(x)) + boundary_penalty · ‖x − clamp(x)‖²`, following Hansen's
+    /// reference boundary handling. The distribution (mean/covariance/paths) is
+    /// always adapted from the *unrepaired* sample regardless of this weight.
+    pub boundary_penalty: f64,
     /// Fitness function marker
     _phantom: PhantomData<F>,
 }
@@ -549,6 +508,7 @@ impl<F: CmaEsFitness> CmaEs<F> {
         Self {
             state: CmaEsState::new(initial_mean, initial_sigma, None),
             bounds: None,
+            boundary_penalty: 0.0,
             _phantom: PhantomData,
         }
     }
@@ -558,6 +518,7 @@ impl<F: CmaEsFitness> CmaEs<F> {
         Self {
             state: CmaEsState::new(initial_mean, initial_sigma, Some(lambda)),
             bounds: None,
+            boundary_penalty: 0.0,
             _phantom: PhantomData,
         }
     }
@@ -568,43 +529,86 @@ impl<F: CmaEsFitness> CmaEs<F> {
         self
     }
 
+    /// Set the quadratic boundary-penalty weight (see [`CmaEs::boundary_penalty`]).
+    pub fn with_boundary_penalty(mut self, weight: f64) -> Self {
+        self.boundary_penalty = weight;
+        self
+    }
+
     /// Run a single generation
+    ///
+    /// Box constraints are handled per Hansen's recommendation (AUDIT EV-36):
+    /// each sample is evaluated at its *repaired* (bound-clamped, and therefore
+    /// feasible) position — optionally with a quadratic infeasibility penalty —
+    /// but the search distribution (mean, covariance, evolution paths, step
+    /// size) is adapted from the **unrepaired** sample `y = (x − m)/σ`. Feeding
+    /// repaired points back into the distribution update biases `C` and `m`
+    /// toward active bounds; keeping the raw sample avoids that bias.
     pub fn step<R: Rng>(
         &mut self,
         fitness: &F,
         rng: &mut R,
     ) -> EvoResult<Vec<Individual<RealVector>>> {
-        // Sample offspring
-        let mut offspring = self.state.sample_population(rng);
+        // Sample offspring (unrepaired). These raw samples drive the update.
+        let unrepaired = self.state.sample_population(rng);
 
-        // Apply bounds if present
-        if let Some(ref bounds) = self.bounds {
-            for genome in &mut offspring {
-                genome.apply_bounds(bounds);
-            }
-        }
-
-        // Evaluate fitness
-        let mut evaluated: Vec<(RealVector, f64)> = offspring
+        // For each sample: build the feasible (repaired) point, evaluate fitness
+        // there, and add the optional quadratic boundary penalty. Keep the
+        // unrepaired sample for the distribution update.
+        let mut evaluated: Vec<(RealVector, RealVector, f64)> = unrepaired
             .into_iter()
-            .map(|g| {
-                let f = fitness.evaluate(&g);
-                (g, f)
+            .map(|raw| {
+                let feasible = match self.bounds {
+                    Some(ref bounds) => {
+                        let mut repaired = raw.clone();
+                        repaired.apply_bounds(bounds);
+                        repaired
+                    }
+                    None => raw.clone(),
+                };
+
+                let mut f = fitness.evaluate(&feasible);
+                if self.boundary_penalty > 0.0 {
+                    let penalty: f64 = raw
+                        .genes()
+                        .iter()
+                        .zip(feasible.genes().iter())
+                        .map(|(&x, &c)| {
+                            let d = x - c;
+                            d * d
+                        })
+                        .sum();
+                    f += self.boundary_penalty * penalty;
+                }
+
+                (raw, feasible, f)
             })
             .collect();
 
         self.state.evaluations += evaluated.len();
 
-        // Sort by fitness (minimization)
-        evaluated.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by fitness (minimization).
+        evaluated.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Update state
-        self.state.update(&evaluated);
+        // Update the distribution from the UNREPAIRED samples.
+        let update_input: Vec<(RealVector, f64)> = evaluated
+            .iter()
+            .map(|(raw, _feasible, f)| (raw.clone(), *f))
+            .collect();
+        self.state.update(&update_input);
 
-        // Convert to individuals
+        // Track the best *feasible* solution.
+        if let Some((_, feasible, f)) = evaluated.first() {
+            if *f < self.state.best_fitness {
+                self.state.best_fitness = *f;
+                self.state.best_solution = feasible.genes().to_vec();
+            }
+        }
+
+        // Convert to individuals using the feasible points.
         let individuals: Vec<Individual<RealVector>> = evaluated
             .into_iter()
-            .map(|(g, f)| Individual::with_fitness(g, f))
+            .map(|(_raw, feasible, f)| Individual::with_fitness(feasible, f))
             .collect();
 
         Ok(individuals)
@@ -721,6 +725,7 @@ pub struct CmaEsBuilder {
     initial_sigma: f64,
     lambda: Option<usize>,
     bounds: Option<MultiBounds>,
+    boundary_penalty: f64,
 }
 
 impl CmaEsBuilder {
@@ -731,7 +736,14 @@ impl CmaEsBuilder {
             initial_sigma: 1.0,
             lambda: None,
             bounds: None,
+            boundary_penalty: 0.0,
         }
+    }
+
+    /// Set the quadratic boundary-penalty weight (see [`CmaEs::boundary_penalty`]).
+    pub fn boundary_penalty(mut self, weight: f64) -> Self {
+        self.boundary_penalty = weight;
+        self
     }
 
     /// Set the initial mean
@@ -772,6 +784,8 @@ impl CmaEsBuilder {
         if let Some(bounds) = self.bounds {
             cmaes = cmaes.with_bounds(bounds);
         }
+
+        cmaes.boundary_penalty = self.boundary_penalty;
 
         Ok(cmaes)
     }
@@ -906,16 +920,227 @@ mod tests {
         assert!(state.has_converged());
     }
 
+    // Rosenbrock (minimization, optimum f=0 at all-ones) for CMA-ES behavioural
+    // testing. Defined directly (not via the benchmark type, which negates for
+    // maximization) so it matches CMA-ES's lower-is-better convention.
+    fn rosenbrock(x: &RealVector) -> f64 {
+        x.genes()
+            .windows(2)
+            .map(|w| 100.0 * (w[1] - w[0] * w[0]).powi(2) + (1.0 - w[0]).powi(2))
+            .sum()
+    }
+
+    // Build a random symmetric positive-definite matrix C = A·Aᵀ + n·I.
+    fn random_spd(n: usize, rng: &mut impl Rng) -> Vec<Vec<f64>> {
+        let a: Vec<Vec<f64>> = (0..n)
+            .map(|_| {
+                (0..n)
+                    .map(|_| rng.gen_range(-1.0..1.0))
+                    .collect::<Vec<f64>>()
+            })
+            .collect();
+        let mut c = vec![vec![0.0; n]; n];
+        for (i, ci) in c.iter_mut().enumerate() {
+            for (j, cij) in ci.iter_mut().enumerate() {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += a[i][k] * a[j][k];
+                }
+                *cij = s;
+            }
+        }
+        for (i, ci) in c.iter_mut().enumerate() {
+            ci[i] += n as f64;
+        }
+        c
+    }
+
+    /// regression: EV-01 / EV-38 — the eigendecomposition must return the true
+    /// eigenvalues (all positive for an SPD matrix), eigenvectors that actually
+    /// diagonalize C (C·vᵢ = λᵢ·vᵢ), and reconstruct C via B·diag(λ)·Bᵀ. The
+    /// pre-fix cyclic-Jacobi routine never mutated its input, so it returned
+    /// wrong (even negative) eigenvalues while only preserving the trace — the
+    /// old test asserted only Σλ = trace, which the broken routine passed.
     #[test]
-    fn test_jacobi_eigendecomposition() {
-        // Test with a known symmetric matrix
+    fn test_eigendecomposition_known_matrix() {
         let a = vec![vec![4.0, 1.0], vec![1.0, 3.0]];
+        let (eigenvalues, eigenvectors) = symmetric_eigendecomposition(&a);
 
-        let (eigenvalues, _eigenvectors) = jacobi_eigendecomposition(&a);
+        // Eigenvalues of [[4,1],[1,3]] are (7±√5)/2 ≈ 4.618 and 2.382.
+        let mut sorted = eigenvalues.clone();
+        sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        assert_relative_eq!(sorted[0], (7.0 - 5.0_f64.sqrt()) / 2.0, epsilon = 1e-9);
+        assert_relative_eq!(sorted[1], (7.0 + 5.0_f64.sqrt()) / 2.0, epsilon = 1e-9);
 
-        // Eigenvalues of [[4,1],[1,3]] are (7+sqrt(5))/2 ≈ 4.618 and (7-sqrt(5))/2 ≈ 2.382
-        let expected_sum = 7.0; // trace
-        let actual_sum: f64 = eigenvalues.iter().sum();
-        assert_relative_eq!(actual_sum, expected_sum, epsilon = 1e-6);
+        // All eigenvalues of this PD matrix are positive.
+        assert!(eigenvalues.iter().all(|&l| l > 0.0));
+
+        // Each (λ_j, column j) is an eigenpair: C·v = λ·v.
+        for j in 0..2 {
+            let v: Vec<f64> = (0..2).map(|i| eigenvectors[i][j]).collect();
+            for i in 0..2 {
+                let cv: f64 = (0..2).map(|k| a[i][k] * v[k]).sum();
+                assert_relative_eq!(cv, eigenvalues[j] * v[i], epsilon = 1e-9);
+            }
+        }
+    }
+
+    /// regression: EV-01 — on random SPD matrices, every returned pair must
+    /// satisfy C·vᵢ = λᵢ·vᵢ to 1e-9, all eigenvalues must be positive, and
+    /// B·diag(λ)·Bᵀ must reconstruct C.
+    #[test]
+    fn test_eigendecomposition_random_spd() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2024);
+
+        for &n in &[2usize, 3, 5, 8] {
+            let c = random_spd(n, &mut rng);
+            let (eigenvalues, eigenvectors) = symmetric_eigendecomposition(&c);
+
+            // Positivity.
+            assert!(
+                eigenvalues.iter().all(|&l| l > 0.0),
+                "SPD matrix must have all-positive eigenvalues, got {:?}",
+                eigenvalues
+            );
+
+            // Eigenpair equation C·vⱼ = λⱼ·vⱼ.
+            for j in 0..n {
+                let v: Vec<f64> = (0..n).map(|i| eigenvectors[i][j]).collect();
+                for i in 0..n {
+                    let cv: f64 = (0..n).map(|k| c[i][k] * v[k]).sum();
+                    assert!(
+                        (cv - eigenvalues[j] * v[i]).abs() < 1e-9,
+                        "n={}: C·v_{} component {} mismatch",
+                        n,
+                        j,
+                        i
+                    );
+                }
+            }
+
+            // Reconstruction B·diag(λ)·Bᵀ = C.
+            for i in 0..n {
+                for j in 0..n {
+                    let recon: f64 = (0..n)
+                        .map(|k| eigenvectors[i][k] * eigenvalues[k] * eigenvectors[j][k])
+                        .sum();
+                    assert!(
+                        (recon - c[i][j]).abs() < 1e-9,
+                        "n={}: reconstruction mismatch at ({},{})",
+                        n,
+                        i,
+                        j
+                    );
+                }
+            }
+        }
+    }
+
+    /// regression: EV-01 (behavioural) — with a correct eigendecomposition,
+    /// CMA-ES solves the 5-D Rosenbrock function to f < 1e-6 within a generous
+    /// seeded budget. The pre-fix garbage eigensystem corrupted sampling and
+    /// C^{-1/2}, so it could not converge.
+    #[test]
+    fn test_cmaes_rosenbrock_convergence() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+
+        // Slightly larger λ improves robustness on the Rosenbrock valley.
+        let mut cmaes: CmaEs<_> = CmaEs::with_lambda(vec![0.0; 5], 0.5, 20);
+        let best = cmaes.run_until(&rosenbrock, 1e-6, 4000, &mut rng).unwrap();
+
+        assert!(
+            best.fitness_f64() < 1e-6,
+            "CMA-ES should reach f < 1e-6 on 5-D Rosenbrock, got {}",
+            best.fitness_f64()
+        );
+    }
+
+    /// regression: EV-37 — for large n the correct per-generation cadence
+    /// recomputes the eigensystem (nearly) every generation, whereas the pre-fix
+    /// λ-too-infrequent cadence recomputed only a handful of times.
+    #[test]
+    fn test_eigen_recompute_cadence() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let fitness = Sphere;
+        let n = 100;
+        let mut cmaes: CmaEs<Sphere> = CmaEs::new(vec![1.0; n], 1.0);
+
+        // For n=100 the correct interval is 1 generation.
+        assert_eq!(cmaes.state.eigen_update_interval(), 1);
+
+        let gens = 30;
+        let mut recomputes = 0;
+        let mut last = cmaes.state.eigen_eval;
+        for _ in 0..gens {
+            cmaes.step(&fitness, &mut rng).unwrap();
+            if cmaes.state.eigen_eval != last {
+                recomputes += 1;
+                last = cmaes.state.eigen_eval;
+            }
+        }
+
+        assert!(
+            recomputes >= gens - 1,
+            "expected ~every-generation eigen recompute for n=100, got {} in {} gens",
+            recomputes,
+            gens
+        );
+    }
+
+    /// regression: EV-36 — the distribution update must be adapted from the
+    /// UNREPAIRED samples. With bounds sitting far above the sampling region,
+    /// every sample clamps up to the lower bound, so a clamped-update (pre-fix)
+    /// would slam the mean straight onto the boundary (~2.9) in a single step,
+    /// while an unrepaired update keeps the mean near the sampled region.
+    #[test]
+    fn test_cmaes_update_uses_unrepaired_samples() {
+        use crate::genome::bounds::Bounds;
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let fitness = Sphere;
+
+        let bounds = MultiBounds::uniform(Bounds::new(2.9, 3.1), 2);
+        let mut cmaes: CmaEs<Sphere> = CmaEs::new(vec![0.0, 0.0], 1.0).with_bounds(bounds);
+
+        cmaes.step(&fitness, &mut rng).unwrap();
+
+        for &m in &cmaes.state.mean {
+            assert!(
+                m.abs() < 2.0,
+                "mean component {} was pulled onto the clamped boundary (~2.9); \
+                 the distribution update must use unrepaired samples",
+                m
+            );
+        }
+
+        // The best solution reported must still be feasible (within bounds).
+        for &g in &cmaes.state.best_solution {
+            assert!((2.9..=3.1).contains(&g));
+        }
+    }
+
+    /// The optional quadratic boundary penalty adds a positive infeasibility
+    /// cost while leaving the feasible-region behaviour unchanged when disabled.
+    #[test]
+    fn test_cmaes_boundary_penalty_option() {
+        use crate::genome::bounds::Bounds;
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(5);
+        let fitness = Sphere;
+
+        let bounds = MultiBounds::uniform(Bounds::new(-1.0, 1.0), 3);
+        let mut cmaes: CmaEs<Sphere> = CmaEs::new(vec![0.0; 3], 2.0)
+            .with_bounds(bounds)
+            .with_boundary_penalty(10.0);
+        assert_eq!(cmaes.boundary_penalty, 10.0);
+
+        // Should run without panicking and keep the reported best feasible.
+        cmaes.step(&fitness, &mut rng).unwrap();
+        for &g in &cmaes.state.best_solution {
+            assert!((-1.0..=1.0).contains(&g));
+        }
     }
 }
