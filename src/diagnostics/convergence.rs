@@ -170,15 +170,12 @@ pub struct ConvergenceDetector {
     config: ConvergenceConfig,
     /// History of best fitness values
     best_fitness_history: Vec<f64>,
-    /// History of mean fitness values (for R-hat)
+    /// History of mean fitness values (for R-hat). Retained in full so
+    /// `compute_rhat` can take a numerically stable **two-pass** variance over
+    /// each half-chain (see `compute_rhat`); an earlier revision kept running
+    /// sum / sum-of-squares prefix arrays instead, but the one-pass variance
+    /// they enabled was catastrophically unstable for large-offset fitness.
     mean_fitness_history: Vec<f64>,
-    /// Running prefix sums of `mean_fitness_history` (EV-88). `mean_cumsum[i]` is
-    /// the sum of the first `i` mean-fitness values (with a leading 0), and
-    /// `mean_cumsq[i]` the corresponding sum of squares. These let `compute_rhat`
-    /// evaluate each half-chain's mean/variance in O(1) instead of rescanning the
-    /// whole unbounded history on every `check()` call.
-    mean_cumsum: Vec<f64>,
-    mean_cumsq: Vec<f64>,
     /// History of diversity values
     diversity_history: Vec<f64>,
     /// Current generation
@@ -200,6 +197,26 @@ pub struct ConvergenceDetector {
     last_improvement_generation: usize,
 }
 
+/// Numerically stable **two-pass** sample mean and (Bessel-corrected) variance
+/// of `xs`, returned as `(mean, variance)`.
+///
+/// The first pass computes the mean; the second sums squared deviations from
+/// that mean. This avoids the catastrophic cancellation of the one-pass
+/// `(Σx² − (Σx)²/n)/(n−1)` form, which loses precision when the values share a
+/// large offset relative to their spread (the exact failure that motivated
+/// this helper — see `compute_rhat`). `xs` must be non-empty; the variance is
+/// `0.0` for a single element. The operations mirror those in
+/// [`evolutionary_rhat`], so the two agree to within rounding.
+fn two_pass_mean_var(xs: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    if xs.len() < 2 {
+        return (mean, 0.0);
+    }
+    let ss: f64 = xs.iter().map(|x| (x - mean).powi(2)).sum();
+    (mean, ss / (n - 1.0))
+}
+
 impl ConvergenceDetector {
     /// Create a new convergence detector
     pub fn new(config: ConvergenceConfig) -> Self {
@@ -207,8 +224,6 @@ impl ConvergenceDetector {
             config,
             best_fitness_history: Vec::new(),
             mean_fitness_history: Vec::new(),
-            mean_cumsum: vec![0.0],
-            mean_cumsq: vec![0.0],
             diversity_history: Vec::new(),
             current_generation: 0,
             current_evaluations: 0,
@@ -236,11 +251,6 @@ impl ConvergenceDetector {
         self.current_evaluations = evaluations;
         self.best_fitness_history.push(best_fitness);
         self.mean_fitness_history.push(mean_fitness);
-        // EV-88: extend the running prefix sums in O(1) so R-hat never rescans.
-        let prev_sum = *self.mean_cumsum.last().unwrap();
-        let prev_sq = *self.mean_cumsq.last().unwrap();
-        self.mean_cumsum.push(prev_sum + mean_fitness);
-        self.mean_cumsq.push(prev_sq + mean_fitness * mean_fitness);
         self.diversity_history.push(diversity);
 
         // Pure running max (REG-1): tracks the true best regardless of the
@@ -332,37 +342,40 @@ impl ConvergenceDetector {
         }
     }
 
-    /// Compute R-hat statistic from fitness history.
+    /// Compute the split-R-hat statistic (Gelman & Rubin) from the mean-fitness
+    /// history.
     ///
-    /// EV-88: computed from the incrementally-maintained prefix sums in O(1),
-    /// producing the same value as
-    /// `evolutionary_rhat(&[history[..half], history[half..]])` (which truncates
-    /// the two chains to the common length `half`), but without rescanning the
-    /// full history on every call.
+    /// The history is split into two equal-length half-chains — indices
+    /// `[0, l)` and `[l, 2l)` where `l = len / 2` — matching the common-length
+    /// truncation performed by [`evolutionary_rhat`]; the returned value equals
+    /// `evolutionary_rhat(&[history[0..l], history[l..2l]])`.
+    ///
+    /// Each half-chain's mean and (Bessel-corrected) within-chain variance are
+    /// computed with a numerically stable **two-pass** formula (subtract the
+    /// chain mean, then sum squared deviations) directly over the raw history.
+    /// This replaces an earlier one-pass `(Σx² − (Σx)²/l)/(l−1)` form evaluated
+    /// over running sum / sum-of-squares prefix arrays. That form suffered
+    /// catastrophic cancellation for large-offset fitness (e.g. mean-fitness
+    /// ~1e6 with a true within-chain variance ~1 lost ~12 significant digits):
+    /// it could drive `w <= 0` and report a spurious R-hat of exactly `1.0`
+    /// ("converged"), and the running Σx² could overflow to `+inf` over very
+    /// long runs, yielding `NaN`. The two-pass form has no such cancellation.
+    ///
+    /// Returns `f64::INFINITY` when there are fewer than 5 draws per half-chain.
     fn compute_rhat(&self) -> f64 {
         let n = self.mean_fitness_history.len();
-        let half = n / 2;
+        let l = n / 2;
 
-        if half < 5 {
+        if l < 5 {
             return f64::INFINITY; // Not enough data
         }
 
-        let l = half;
         let l_f = l as f64;
 
         // chain1 = indices [0, l), chain2 = indices [l, 2l) — matching the
         // common-length truncation performed by `evolutionary_rhat`.
-        let sum1 = self.mean_cumsum[l] - self.mean_cumsum[0];
-        let sq1 = self.mean_cumsq[l] - self.mean_cumsq[0];
-        let sum2 = self.mean_cumsum[2 * l] - self.mean_cumsum[l];
-        let sq2 = self.mean_cumsq[2 * l] - self.mean_cumsq[l];
-
-        let mean1 = sum1 / l_f;
-        let mean2 = sum2 / l_f;
-
-        // Sample (Bessel-corrected) within-chain variances.
-        let var1 = (sq1 - sum1 * sum1 / l_f) / (l_f - 1.0);
-        let var2 = (sq2 - sum2 * sum2 / l_f) / (l_f - 1.0);
+        let (mean1, var1) = two_pass_mean_var(&self.mean_fitness_history[0..l]);
+        let (mean2, var2) = two_pass_mean_var(&self.mean_fitness_history[l..2 * l]);
 
         let m = 2.0;
         let grand_mean = (mean1 + mean2) / m;
@@ -407,10 +420,6 @@ impl ConvergenceDetector {
     pub fn reset(&mut self) {
         self.best_fitness_history.clear();
         self.mean_fitness_history.clear();
-        self.mean_cumsum.clear();
-        self.mean_cumsum.push(0.0);
-        self.mean_cumsq.clear();
-        self.mean_cumsq.push(0.0);
         self.diversity_history.clear();
         self.current_generation = 0;
         self.current_evaluations = 0;
@@ -1109,12 +1118,15 @@ mod tests {
             let s = detector.check();
             let has_target = match &s {
                 ConvergenceStatus::Converged(ConvergenceReason::TargetReached { .. }) => true,
-                ConvergenceStatus::Converged(ConvergenceReason::MultipleReasons(rs)) => {
-                    rs.iter().any(|r| matches!(r, ConvergenceReason::TargetReached { .. }))
-                }
+                ConvergenceStatus::Converged(ConvergenceReason::MultipleReasons(rs)) => rs
+                    .iter()
+                    .any(|r| matches!(r, ConvergenceReason::TargetReached { .. })),
                 _ => false,
             };
-            assert!(has_target, "target must stay reported while held, gen {g}: {s:?}");
+            assert!(
+                has_target,
+                "target must stay reported while held, gen {g}: {s:?}"
+            );
         }
     }
 
@@ -1143,9 +1155,10 @@ mod tests {
         );
     }
 
-    // regression: EV-88 — the incremental (prefix-sum) R-hat must equal the
-    // from-scratch recompute over the full mean-fitness history at every length,
-    // proving the running statistics are behavior-identical to the old rescan.
+    // regression: EV-88 — `compute_rhat` must equal the from-scratch
+    // `evolutionary_rhat` recompute over the full mean-fitness history at every
+    // length, proving the half-chain split and two-pass statistics stay
+    // behavior-identical to the reference implementation.
     #[test]
     fn test_compute_rhat_matches_naive_recompute() {
         let mut detector = ConvergenceDetector::with_defaults();
@@ -1171,5 +1184,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    // regression (re-verification low): `compute_rhat` previously derived each
+    // half-chain's within-chain variance from running sum / sum-of-squares
+    // prefix arrays via `(sq - sum*sum/l)/(l-1)`. With mean-fitness values
+    // offset by ~1e6 and a true within-chain variance of ~1, that one-pass form
+    // subtracts two ~2e13 quantities to recover ~19, losing ~12 significant
+    // digits: it can drive `w <= 0` and report a spurious R-hat of exactly 1.0
+    // (false "converged"), and the running Σx² can overflow to +inf (→ NaN)
+    // over long runs. The stable two-pass formulation must (a) match a directly
+    // computed two-pass R-hat to 1e-9 and (b) NOT collapse to the spurious 1.0.
+    #[test]
+    fn test_compute_rhat_stable_under_large_offset() {
+        // Two chains sharing a ~1e6 offset, each with small, distinct
+        // deviations (true within-chain variance ~1) plus a real between-chain
+        // mean shift of ~4 — so the correct R-hat is clearly > 1.
+        let offset = 1e6;
+        let chain1: Vec<f64> = (0..20)
+            .map(|i| offset + (i as f64 * 0.7).sin() * 1.3)
+            .collect();
+        let chain2: Vec<f64> = (0..20)
+            .map(|i| offset + 4.0 + (i as f64 * 0.9 + 0.5).cos() * 1.1)
+            .collect();
+
+        // History = chain1 then chain2, so with len = 40 the half-chain split
+        // (`l = 20`) reproduces exactly [chain1, chain2].
+        let mut detector = ConvergenceDetector::with_defaults();
+        for (i, &v) in chain1.iter().chain(chain2.iter()).enumerate() {
+            detector.update(i, i, v, v, 0.5);
+        }
+        let got = detector.compute_rhat();
+
+        // Directly compute the reference two-pass R-hat, independently of the
+        // module helper (subtract mean, then sum squared deviations).
+        let tp = |xs: &[f64]| -> (f64, f64) {
+            let n = xs.len() as f64;
+            let mean = xs.iter().sum::<f64>() / n;
+            let ss: f64 = xs.iter().map(|x| (x - mean).powi(2)).sum();
+            (mean, ss / (n - 1.0))
+        };
+        let (mean1, var1) = tp(&chain1);
+        let (mean2, var2) = tp(&chain2);
+        let l = chain1.len() as f64;
+        let m = 2.0;
+        let grand = (mean1 + mean2) / m;
+        let b = l / (m - 1.0) * ((mean1 - grand).powi(2) + (mean2 - grand).powi(2));
+        let w = (var1 + var2) / m;
+        assert!(w > 0.0, "true within-chain variance must be positive");
+        let var_plus = ((l - 1.0) / l) * w + b / l;
+        let reference = (var_plus / w).sqrt();
+
+        // (a) stable formulation matches the directly computed two-pass R-hat.
+        assert!(
+            (got - reference).abs() < 1e-9,
+            "compute_rhat {got} != directly computed two-pass R-hat {reference}"
+        );
+        // (b) must NOT report the spurious `w <= 0` convergence value of 1.0.
+        assert!(
+            (got - 1.0).abs() > 1e-6,
+            "compute_rhat collapsed to the spurious 1.0 (got {got})"
+        );
+        assert!(got.is_finite(), "compute_rhat must be finite, got {got}");
+        // And it agrees with the public reference over the same two chains.
+        let via_public = evolutionary_rhat(&[chain1, chain2]);
+        assert!(
+            (got - via_public).abs() < 1e-9,
+            "compute_rhat {got} != evolutionary_rhat {via_public}"
+        );
     }
 }

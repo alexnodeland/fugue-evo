@@ -76,12 +76,66 @@ macro_rules! impl_optimizer_config {
     };
 }
 
-/// Helper to create RNG from config
+/// Helper to create RNG from config.
+///
+/// A seed of `0` is the sentinel for "seed from OS entropy" (a non-reproducible
+/// run). Any non-zero seed produces a deterministic, reproducible stream.
 fn create_rng(seed: u64) -> rand::rngs::StdRng {
     if seed == 0 {
         rand::rngs::StdRng::from_entropy()
     } else {
         rand::rngs::StdRng::seed_from_u64(seed)
+    }
+}
+
+/// The odd golden-ratio constant used as splitmix64's increment.
+const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// One round of the splitmix64 mixing function (Steele, Lea & Flood, 2014).
+///
+/// splitmix64 is a **bijection** on `u64`: distinct inputs always map to
+/// distinct outputs. That property is what lets [`derive_island_seed`] prove
+/// its islands are pairwise distinct and never `0`.
+fn splitmix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(SPLITMIX64_GAMMA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Derive a deterministic RNG seed for island `i` of a run started from the
+/// user seed `seed`.
+///
+/// AUDIT (re-verification low): [`create_rng`] treats a seed of `0` as the
+/// "seed from OS entropy" sentinel, so any island whose derived seed lands on
+/// `0` would silently become non-deterministic — breaking the reproducibility
+/// guarantee. The previous derivation `seed.wrapping_add(i as u64 + 1)` wraps
+/// to exactly `0` whenever `seed == u64::MAX - i` (e.g. `seed == u64::MAX`,
+/// `i == 0`).
+///
+/// Behaviour and the properties that fix the bug:
+///   * `seed == 0` is propagated unchanged, preserving the caller's opt-in to a
+///     non-reproducible (entropy-seeded) run for every island.
+///   * For any non-zero `seed`, the island inputs `seed + 1 ..= seed + n` are
+///     pairwise distinct, and splitmix64 is a bijection, so the derived seeds
+///     are pairwise distinct — islands never share an RNG stream — for every
+///     seed and island count.
+///   * At most one island input can hash to `0`. That single case is remapped
+///     to `splitmix64(seed)`. By injectivity `splitmix64(seed)` differs from
+///     every `splitmix64(seed + j + 1)` (equality would need `j + 1 == 0`, i.e.
+///     `j == u64::MAX`, never a valid island index), and it is itself non-zero
+///     in this branch (`seed` cannot be the unique preimage of `0` when
+///     `seed + i + 1` already is). So the remap can neither reintroduce `0` nor
+///     collide with another island.
+fn derive_island_seed(seed: u64, i: usize) -> u64 {
+    if seed == 0 {
+        return 0; // entropy for every island (non-reproducible run)
+    }
+    let mixed = splitmix64(seed.wrapping_add(i as u64 + 1));
+    if mixed == 0 {
+        splitmix64(seed)
+    } else {
+        mixed
     }
 }
 
@@ -2082,14 +2136,13 @@ impl IslandModelOptimizer {
 
         // Build the islands. Each gets a distinct but deterministic RNG seed so
         // the populations differ yet the whole run is reproducible.
+        // `derive_island_seed` guarantees the derived seed is never the `0`
+        // entropy sentinel for a reproducible (non-zero) user seed — see its
+        // docs — and that islands stay pairwise distinct for every seed.
         let mut islands: Vec<SteppedRun> = Vec::with_capacity(n);
         for i in 0..n {
             let ga = build_stepped_ga(&self.config, &self.fitness_name)?;
-            let island_seed = if self.config.seed == 0 {
-                0 // entropy for every island
-            } else {
-                self.config.seed.wrapping_add(i as u64 + 1)
-            };
+            let island_seed = derive_island_seed(self.config.seed, i);
             let mut rng = create_rng(island_seed);
             let state = ga.init_run(&mut rng).map_err(evolution_error_to_js)?;
             islands.push(SteppedRun { ga, state, rng });
@@ -2151,5 +2204,91 @@ impl IslandModelOptimizer {
             total_evaluations,
             history,
         ))
+    }
+}
+
+#[cfg(test)]
+mod island_seed_tests {
+    use super::{derive_island_seed, splitmix64};
+    use std::collections::HashSet;
+
+    // regression (re-verification low): the island seed was derived as
+    // `seed.wrapping_add(i as u64 + 1)`, which wraps to exactly 0 when the user
+    // seed is near u64::MAX (e.g. seed == u64::MAX with i == 0). `create_rng`
+    // treats 0 as the "seed from entropy" sentinel, so that island silently
+    // became non-deterministic — contradicting the reproducibility guarantee.
+    // `derive_island_seed` must never yield 0 for a non-zero user seed and must
+    // keep islands pairwise distinct for every seed.
+    #[test]
+    fn island_seed_nonzero_and_distinct_at_u64_max() {
+        let seed = u64::MAX; // the exact seed that made the old scheme wrap to 0
+        let n = 16usize;
+        let derived: Vec<u64> = (0..n).map(|i| derive_island_seed(seed, i)).collect();
+
+        // (1) No island lands on the 0 entropy sentinel.
+        for (i, &s) in derived.iter().enumerate() {
+            assert_ne!(s, 0, "island {i} derived the 0 entropy sentinel");
+        }
+        // Documents the old bug: the previous derivation `seed + i + 1` mapped
+        // (seed==u64::MAX, i==0) to exactly 0 — the entropy sentinel.
+        assert_eq!(u64::MAX.wrapping_add(0u64 + 1), 0);
+
+        // (2) All derived seeds are pairwise distinct (no shared RNG stream).
+        let unique: HashSet<u64> = derived.iter().copied().collect();
+        assert_eq!(unique.len(), n, "island seeds must be pairwise distinct");
+    }
+
+    #[test]
+    fn island_seed_nonzero_and_distinct_across_dangerous_seeds() {
+        // Sweep the whole u64::MAX-adjacent band where the old wrapping scheme
+        // could hit 0, for a range of island counts. Every derived seed must be
+        // non-zero and pairwise distinct within each run.
+        for &seed in &[
+            u64::MAX,
+            u64::MAX - 1,
+            u64::MAX - 5,
+            1,
+            0x9E37_79B9_7F4A_7C15,
+            123_456_789,
+        ] {
+            for n in [2usize, 3, 8, 32] {
+                let derived: Vec<u64> = (0..n).map(|i| derive_island_seed(seed, i)).collect();
+                for (i, &s) in derived.iter().enumerate() {
+                    assert_ne!(s, 0, "seed={seed}, island {i} hit the 0 sentinel");
+                }
+                let unique: HashSet<u64> = derived.iter().copied().collect();
+                assert_eq!(
+                    unique.len(),
+                    n,
+                    "seed={seed}: island seeds must be distinct"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seed_zero_stays_entropy_sentinel() {
+        // A 0 user seed opts into OS entropy for every island; that must be
+        // preserved (all islands get the 0 sentinel back).
+        for i in 0..8 {
+            assert_eq!(derive_island_seed(0, i), 0);
+        }
+    }
+
+    #[test]
+    fn derivation_is_deterministic() {
+        // Same inputs -> same output on every call (reproducibility).
+        for &seed in &[1u64, 42, u64::MAX, u64::MAX - 3] {
+            for i in 0..8 {
+                assert_eq!(derive_island_seed(seed, i), derive_island_seed(seed, i));
+            }
+        }
+    }
+
+    #[test]
+    fn splitmix64_is_injective_on_a_sample() {
+        // Guards the bijection property the distinctness argument relies on.
+        let outputs: HashSet<u64> = (0..10_000u64).map(splitmix64).collect();
+        assert_eq!(outputs.len(), 10_000, "splitmix64 must be injective");
     }
 }
