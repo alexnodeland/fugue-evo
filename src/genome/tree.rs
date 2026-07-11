@@ -2,6 +2,22 @@
 //!
 //! This module provides tree-based genomes for symbolic regression and
 //! genetic programming applications.
+//!
+//! # Deep trees and stack safety
+//!
+//! The read-side traversals ([`TreeNode::depth`], [`TreeNode::size`] and
+//! [`TreeGenome::evaluate`]) use explicit work stacks instead of recursion, so
+//! they do not overflow the call stack even for pathologically deep trees.
+//!
+//! Tearing a tree down, however, cannot be made stack-safe via a `Drop` impl:
+//! adding `Drop` to [`TreeNode`] (or [`TreeGenome`]) is rejected by the compiler
+//! (error E0509) at the points where the operator layer
+//! (`crate::operators`, a separate work package) moves values out of an owned
+//! `TreeNode`/`TreeGenome`. Rust's compiler-generated drop glue is therefore
+//! still recursive. Callers that construct or deserialize pathologically deep
+//! trees should hand them to [`TreeGenome::dismantle`] (or
+//! [`drop_node_iteratively`]) to free them without recursion instead of letting
+//! them drop implicitly.
 
 use fugue::{addr, ChoiceValue, Trace};
 use rand::Rng;
@@ -43,22 +59,44 @@ impl<T: Terminal, F: Function> TreeNode<T, F> {
         matches!(self, Self::Function(_, _))
     }
 
-    /// Get the depth of this subtree
+    /// Get the depth of this subtree.
+    ///
+    /// Uses an explicit work stack rather than recursion so that pathologically
+    /// deep trees cannot overflow the call stack (see the module note on deep
+    /// trees).
     pub fn depth(&self) -> usize {
-        match self {
-            Self::Terminal(_) => 1,
-            Self::Function(_, children) => {
-                1 + children.iter().map(|c| c.depth()).max().unwrap_or(0)
+        let mut max_depth = 0;
+        // (node, depth-of-node) pairs; a terminal has depth 1.
+        let mut stack: Vec<(&Self, usize)> = vec![(self, 1)];
+        while let Some((node, d)) = stack.pop() {
+            if d > max_depth {
+                max_depth = d;
+            }
+            if let Self::Function(_, children) = node {
+                for child in children {
+                    stack.push((child, d + 1));
+                }
             }
         }
+        max_depth
     }
 
-    /// Get the number of nodes in this subtree
+    /// Get the number of nodes in this subtree.
+    ///
+    /// Uses an explicit work stack rather than recursion (see the module note on
+    /// deep trees).
     pub fn size(&self) -> usize {
-        match self {
-            Self::Terminal(_) => 1,
-            Self::Function(_, children) => 1 + children.iter().map(|c| c.size()).sum::<usize>(),
+        let mut count = 0;
+        let mut stack: Vec<&Self> = vec![self];
+        while let Some(node) = stack.pop() {
+            count += 1;
+            if let Self::Function(_, children) = node {
+                for child in children {
+                    stack.push(child);
+                }
+            }
         }
+        count
     }
 
     /// Get all node positions (preorder traversal indices)
@@ -193,6 +231,24 @@ pub trait Terminal:
 
     /// Convert to string representation
     fn to_string(&self) -> String;
+
+    /// Encode this terminal as a `(type_code, payload)` pair for lossless trace
+    /// round-tripping.
+    ///
+    /// `type_code` identifies the terminal variant (a discriminant) and
+    /// `payload` carries its associated value. The pair must satisfy the
+    /// inverse relationship `Self::decode(self.encode()) == *self` so that
+    /// [`TreeGenome::from_trace`](crate::genome::traits::EvolutionaryGenome::from_trace)
+    /// reproduces the exact terminal that
+    /// [`TreeGenome::to_trace`](crate::genome::traits::EvolutionaryGenome::to_trace)
+    /// serialized.
+    fn encode(&self) -> (f64, f64);
+
+    /// Decode a terminal previously produced by [`encode`](Self::encode).
+    ///
+    /// This is the inverse of [`encode`](Self::encode) and must reconstruct an
+    /// equal terminal for any `(type_code, payload)` this type emits.
+    fn decode(type_code: f64, payload: f64) -> Self;
 }
 
 /// Trait for function nodes in GP trees
@@ -252,6 +308,26 @@ impl Terminal for ArithmeticTerminal {
         match self {
             Self::Variable(i) => format!("x{}", i),
             Self::Constant(c) | Self::Erc(c) => format!("{:.4}", c),
+        }
+    }
+
+    fn encode(&self) -> (f64, f64) {
+        // type_code: 0 = Variable, 1 = Constant, 2 = Erc
+        match self {
+            Self::Variable(i) => (0.0, *i as f64),
+            Self::Constant(c) => (1.0, *c),
+            Self::Erc(c) => (2.0, *c),
+        }
+    }
+
+    fn decode(type_code: f64, payload: f64) -> Self {
+        match type_code.round() as i64 {
+            0 => Self::Variable(payload.max(0.0) as usize),
+            1 => Self::Constant(payload),
+            2 => Self::Erc(payload),
+            // Unknown discriminant (corrupt trace): preserve the payload as a
+            // constant rather than fabricating a random terminal.
+            _ => Self::Constant(payload),
         }
     }
 }
@@ -413,22 +489,54 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
         self.root.size()
     }
 
-    /// Evaluate the tree with given variable bindings
+    /// Evaluate the tree with given variable bindings.
+    ///
+    /// Uses an explicit work stack (iterative post-order traversal) rather than
+    /// recursion, so a pathologically deep tree cannot overflow the call stack
+    /// (see the module note on deep trees).
     pub fn evaluate(&self, variables: &[f64]) -> f64 {
-        self.evaluate_node(&self.root, variables)
-    }
+        // Two task kinds: `Eval` expands a node; `Apply` combines the results of
+        // a function node's already-evaluated children.
+        enum Task<'a, T: Terminal, F: Function> {
+            Eval(&'a TreeNode<T, F>),
+            Apply(&'a F, usize),
+        }
 
-    fn evaluate_node(&self, node: &TreeNode<T, F>, variables: &[f64]) -> f64 {
-        match node {
-            TreeNode::Terminal(t) => t.evaluate(variables),
-            TreeNode::Function(f, children) => {
-                let args: Vec<f64> = children
-                    .iter()
-                    .map(|c| self.evaluate_node(c, variables))
-                    .collect();
-                f.apply(&args)
+        let mut tasks: Vec<Task<T, F>> = vec![Task::Eval(&self.root)];
+        let mut values: Vec<f64> = Vec::new();
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Eval(node) => match node {
+                    TreeNode::Terminal(t) => values.push(t.evaluate(variables)),
+                    TreeNode::Function(f, children) => {
+                        // Schedule the apply, then push children in reverse so
+                        // they evaluate left-to-right and land on `values` in
+                        // argument order.
+                        tasks.push(Task::Apply(f, children.len()));
+                        for child in children.iter().rev() {
+                            tasks.push(Task::Eval(child));
+                        }
+                    }
+                },
+                Task::Apply(f, arity) => {
+                    let start = values.len() - arity;
+                    let args = values.split_off(start);
+                    values.push(f.apply(&args));
+                }
             }
         }
+
+        values.pop().unwrap_or(0.0)
+    }
+
+    /// Free this tree without deep recursion.
+    ///
+    /// Consumes the genome and dismantles its tree iteratively (see the module
+    /// note on deep trees). Use this for pathologically deep trees that would
+    /// otherwise overflow the stack when dropped implicitly.
+    pub fn dismantle(self) {
+        drop_node_iteratively(self.root);
     }
 
     /// Generate a random tree using the "full" method
@@ -492,6 +600,19 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
         } else {
             Self::generate_grow(rng, depth, 0.3)
         }
+    }
+
+    /// Generate a random tree with an explicit maximum depth.
+    ///
+    /// This is the honest constructor for random generation: unlike
+    /// [`EvolutionaryGenome::generate`](crate::genome::traits::EvolutionaryGenome::generate),
+    /// which overloads `MultiBounds` and remaps its *dimension count* to a depth,
+    /// this takes the maximum depth directly. It uses ramped half-and-half
+    /// between depth 2 and `max_depth` (both clamped to at least 1).
+    pub fn generate_with_depth<R: Rng>(rng: &mut R, max_depth: usize) -> Self {
+        let max_depth = max_depth.max(1);
+        let min_depth = 2.min(max_depth);
+        Self::generate_ramped_half_and_half(rng, min_depth, max_depth)
     }
 
     /// Convert tree to S-expression string
@@ -573,9 +694,15 @@ impl<T: Terminal, F: Function> EvolutionaryGenome for TreeGenome<T, F> {
         self.size()
     }
 
+    /// Generate a random tree.
+    ///
+    /// Only `bounds.dimension()` is consulted — it is remapped (clamped to
+    /// `[3, 10]`) to a maximum tree depth — and the per-dimension `min`/`max`
+    /// values are ignored. Prefer [`TreeGenome::generate_with_depth`] to make the
+    /// depth explicit instead of overloading `MultiBounds`.
     fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
-        let max_depth = bounds.dimension().max(3).min(10);
-        Self::generate_ramped_half_and_half(rng, 2, max_depth)
+        let max_depth = bounds.dimension().clamp(3, 10);
+        Self::generate_with_depth(rng, max_depth)
     }
 
     fn distance(&self, other: &Self) -> f64 {
@@ -583,6 +710,11 @@ impl<T: Terminal, F: Function> EvolutionaryGenome for TreeGenome<T, F> {
         let size_diff = (self.size() as f64 - other.size() as f64).abs();
         let depth_diff = (self.depth() as f64 - other.depth() as f64).abs();
         size_diff + depth_diff
+    }
+
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        // Any two trees are comparable (size/depth deltas), so this never errs.
+        Ok(self.distance(other))
     }
 
     fn trace_prefix() -> &'static str {
@@ -689,36 +821,38 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
         }
     }
 
-    // Encode terminal as (type_code, value)
-    // type_code: 0 = Variable, 1 = Constant, 2 = ERC
-    fn encode_terminal(_terminal: &T) -> (f64, f64) {
-        // Default implementation for generic terminals
-        // Concrete implementations would need specialization
-        (0.0, 0.0)
+    // Encode a terminal as a (type_code, payload) pair via the type's own
+    // lossless `Terminal::encode`, so trace round-tripping preserves the exact
+    // terminal (variant + value) rather than fabricating a random one.
+    fn encode_terminal(terminal: &T) -> (f64, f64) {
+        terminal.encode()
     }
 
     fn decode_terminal(term_type: f64, term_val: f64) -> Result<T, GenomeError> {
-        // This requires runtime generation; use random for now
-        // A full implementation would need type-specific decoding
-        let mut rng = rand::thread_rng();
-        let _ = (term_type, term_val); // Acknowledge parameters
-        Ok(T::random(&mut rng))
+        Ok(T::decode(term_type, term_val))
     }
 
-    fn encode_function(_func: &F) -> usize {
-        // Default returns 0; specialized for ArithmeticFunction
-        0
+    // Encode a function as its index in the stable `F::functions()` ordering.
+    // The ordering returned by `functions()` is a fixed `&'static` slice, so the
+    // index is stable across encode/decode. Functions absent from that set are a
+    // caller error; we fall back to index 0 (they cannot be produced by the
+    // built-in generators, which only draw from `functions()`).
+    fn encode_function(func: &F) -> usize {
+        F::functions()
+            .iter()
+            .position(|candidate| candidate == func)
+            .unwrap_or(0)
     }
 
     fn decode_function(func_idx: usize) -> Result<F, GenomeError> {
         let funcs = F::functions();
-        if func_idx < funcs.len() {
-            Ok(funcs[func_idx].clone())
-        } else {
-            // Fall back to random
-            let mut rng = rand::thread_rng();
-            Ok(F::random(&mut rng))
-        }
+        funcs.get(func_idx).cloned().ok_or_else(|| {
+            GenomeError::InvalidStructure(format!(
+                "Function index {} out of range ({} functions available)",
+                func_idx,
+                funcs.len()
+            ))
+        })
     }
 }
 
@@ -766,6 +900,26 @@ impl<T: Terminal, F: Function> TreeGenomeType for TreeGenome<T, F> {
 
     fn from_root(root: TreeNode<T, F>, max_depth: usize) -> Self {
         Self { root, max_depth }
+    }
+}
+
+/// Free a tree node and all of its descendants without deep recursion.
+///
+/// Rust's compiler-generated drop glue for [`TreeNode`] is recursive (one stack
+/// frame per level), so dropping a very deep tree implicitly can overflow the
+/// stack. A stack-safe `Drop` impl is not possible here (see the module note on
+/// deep trees), so this helper tears the tree down with an explicit work stack
+/// instead. It is only able to move children out of each node *because*
+/// `TreeNode` deliberately does not implement `Drop`.
+pub fn drop_node_iteratively<T: Terminal, F: Function>(node: TreeNode<T, F>) {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if let TreeNode::Function(_, mut children) = current {
+            // Move the children onto the work stack so `current` drops shallowly
+            // (its `children` vec is now empty), then process them iteratively.
+            stack.append(&mut children);
+        }
+        // Terminal nodes (and the now-emptied function node) drop in O(1) here.
     }
 }
 
@@ -887,21 +1041,122 @@ mod tests {
 
     #[test]
     fn test_tree_genome_trace_roundtrip() {
+        // regression: EV-04 — from_trace(to_trace(g)) must reproduce g *exactly*
+        // (function identity and terminal values), not fabricate Add nodes and
+        // fresh random terminals as the previous implementation did.
         let x0 = TreeNode::terminal(ArithmeticTerminal::Variable(0));
         let c1 = TreeNode::terminal(ArithmeticTerminal::Constant(2.5));
-        let add = TreeNode::function(ArithmeticFunction::Add, vec![x0, c1]);
-        let original: TreeGenome<ArithmeticTerminal, ArithmeticFunction> = TreeGenome::new(add, 5);
+        // Use a non-Add function and mixed terminals to expose the old data loss.
+        let sub = TreeNode::function(ArithmeticFunction::Sub, vec![x0, c1]);
+        let x1 = TreeNode::terminal(ArithmeticTerminal::Variable(1));
+        let erc = TreeNode::terminal(ArithmeticTerminal::Erc(-0.75));
+        let mul = TreeNode::function(ArithmeticFunction::Mul, vec![x1, erc]);
+        let root = TreeNode::function(ArithmeticFunction::Div, vec![sub, mul]);
+        let original: TreeGenome<ArithmeticTerminal, ArithmeticFunction> = TreeGenome::new(root, 5);
 
         let trace = original.to_trace();
         let recovered: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
             TreeGenome::from_trace(&trace).unwrap();
 
-        // The trace encoding preserves structure (max_depth, size) but terminal values
-        // are generated fresh since the simple encoding doesn't preserve all details
+        // Exact structural + semantic equality (variant identity, terminal values).
+        assert_eq!(original, recovered);
         assert_eq!(original.max_depth, recovered.max_depth);
         assert_eq!(original.size(), recovered.size());
-        // Both should be valid trees of the same structure
-        assert!(recovered.evaluate(&[3.0]).is_finite());
+        assert_eq!(recovered.to_sexpr(), original.to_sexpr());
+
+        // Evaluation results must agree across several inputs.
+        for vars in [[3.0, 4.0], [-1.0, 2.0], [0.5, -0.5]] {
+            assert_eq!(recovered.evaluate(&vars), original.evaluate(&vars));
+        }
+    }
+
+    #[test]
+    fn test_tree_generate_with_depth_explicit() {
+        // EV-94: honest constructor takes an explicit maximum depth.
+        let mut rng = rand::thread_rng();
+        let tree: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
+            TreeGenome::generate_with_depth(&mut rng, 4);
+        assert!(tree.depth() >= 1);
+        assert!(tree.depth() <= 5); // ramped/grow can reach max_depth (+1 level)
+                                    // Degenerate depth is clamped to at least 1 and must not panic.
+        let _ =
+            TreeGenome::<ArithmeticTerminal, ArithmeticFunction>::generate_with_depth(&mut rng, 0);
+    }
+
+    #[test]
+    fn test_arithmetic_function_ordering_is_stable() {
+        // regression: EV-04 — encode_function relies on the stable ordering of
+        // F::functions(); pin that ordering so encode/decode stays consistent.
+        let funcs = ArithmeticFunction::functions();
+        assert_eq!(funcs[0], ArithmeticFunction::Add);
+        assert_eq!(funcs[1], ArithmeticFunction::Sub);
+        assert_eq!(funcs[2], ArithmeticFunction::Mul);
+        assert_eq!(funcs[3], ArithmeticFunction::Div);
+        // Every function decodes back to itself from its own index.
+        for (idx, f) in funcs.iter().enumerate() {
+            let encoded = TreeGenome::<ArithmeticTerminal, ArithmeticFunction>::encode_function(f);
+            assert_eq!(encoded, idx);
+            let decoded =
+                TreeGenome::<ArithmeticTerminal, ArithmeticFunction>::decode_function(encoded)
+                    .unwrap();
+            assert_eq!(&decoded, f);
+        }
+    }
+
+    #[test]
+    fn test_arithmetic_terminal_encode_decode_roundtrip() {
+        // regression: EV-04 — terminal encode/decode must be exact for every
+        // variant, including distinguishing Constant from Erc.
+        for t in [
+            ArithmeticTerminal::Variable(0),
+            ArithmeticTerminal::Variable(7),
+            ArithmeticTerminal::Constant(3.25),
+            ArithmeticTerminal::Constant(-100.5),
+            ArithmeticTerminal::Erc(0.0),
+            ArithmeticTerminal::Erc(-0.75),
+        ] {
+            let (ty, val) = t.encode();
+            assert_eq!(ArithmeticTerminal::decode(ty, val), t);
+        }
+    }
+
+    #[test]
+    fn test_tree_deep_no_stack_overflow() {
+        // regression: EV-60 — a ~100k-deep degenerate tree must evaluate, report
+        // depth/size, and be torn down without overflowing the call stack. The
+        // previous recursive eval/depth/size and the implicit recursive drop
+        // would all overflow at this depth.
+        let depth = 100_000usize;
+        // Build bottom-up in a loop (no recursion during construction).
+        let mut root: TreeNode<ArithmeticTerminal, ArithmeticFunction> =
+            TreeNode::terminal(ArithmeticTerminal::Constant(1.0));
+        for _ in 0..depth {
+            root = TreeNode::function(ArithmeticFunction::Neg, vec![root]);
+        }
+        let tree = TreeGenome::new(root, depth + 1);
+
+        // Iterative traversals must not overflow.
+        assert_eq!(tree.size(), depth + 1);
+        assert_eq!(tree.depth(), depth + 1);
+        // Neg applied an even number of times to 1.0 yields +1.0.
+        let value = tree.evaluate(&[]);
+        assert!(value.is_finite());
+        assert_eq!(value, 1.0);
+
+        // Iterative teardown must not overflow (implicit drop would recurse).
+        tree.dismantle();
+    }
+
+    #[test]
+    fn test_drop_node_iteratively_frees_deep_tree() {
+        // regression: EV-60 — the standalone iterative teardown handles a bare
+        // deep TreeNode (not wrapped in a TreeGenome) without recursion.
+        let mut node: TreeNode<ArithmeticTerminal, ArithmeticFunction> =
+            TreeNode::terminal(ArithmeticTerminal::Constant(0.0));
+        for _ in 0..100_000 {
+            node = TreeNode::function(ArithmeticFunction::Abs, vec![node]);
+        }
+        drop_node_iteratively(node);
     }
 
     #[test]
