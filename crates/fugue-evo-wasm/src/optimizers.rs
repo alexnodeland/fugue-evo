@@ -19,6 +19,7 @@ use fugue_evo::operators::mutation::{
 use fugue_evo::operators::selection::TournamentSelection;
 
 use crate::config::OptimizationConfig;
+use crate::error::evolution_error_to_js;
 use crate::fitness::{FitnessEvaluator, FitnessWrapper};
 use crate::result::{
     BitStringResult, MultiObjectiveResult, OptimizationResult, ParetoSolution, PermutationResult,
@@ -242,9 +243,9 @@ impl RealVectorOptimizer {
             .fitness(fitness)
             .max_generations(self.config.max_generations)
             .build()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
-        let result = ga.run(rng).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let result = ga.run(rng).map_err(evolution_error_to_js)?;
 
         Ok(OptimizationResult::new(
             result.best_genome.genes().to_vec(),
@@ -286,16 +287,44 @@ impl RealVectorOptimizer {
         };
         cmaes = cmaes.with_bounds(bounds);
 
-        let result = cmaes
-            .run_generations(&fitness, self.config.max_generations, &mut rng)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        // Drive CMA-ES one generation at a time so we can record a genuine
+        // per-generation best-so-far trajectory, matching the fitness_history
+        // that SimpleGA/UMDA/ES return (AUDIT EV-76). CMA-ES minimizes on the
+        // negated objective, so we flip the sign for reporting (higher = better).
+        let mut fitness_history: Vec<f64> = Vec::with_capacity(self.config.max_generations);
+        let mut best_individual: Option<fugue_evo::population::individual::Individual<RealVector>> =
+            None;
+        for _ in 0..self.config.max_generations {
+            let population = cmaes
+                .step(&fitness, &mut rng)
+                .map_err(evolution_error_to_js)?;
+            if let Some(current_best) = population.first() {
+                let better = match &best_individual {
+                    None => true,
+                    Some(existing) => current_best.fitness_f64() < existing.fitness_f64(),
+                };
+                if better {
+                    best_individual = Some(current_best.clone());
+                }
+            }
+            // Record the best-so-far for this generation (sign-flipped).
+            fitness_history.push(-cmaes.state.best_fitness);
+
+            if cmaes.state.has_converged() {
+                break;
+            }
+        }
+
+        let best_genome = best_individual
+            .map(|ind| ind.genome.genes().to_vec())
+            .unwrap_or_else(|| cmaes.state.best_solution.clone());
 
         Ok(OptimizationResult::new(
-            result.genome.genes().to_vec(),
+            best_genome,
             -cmaes.state.best_fitness,
             cmaes.state.generation,
             cmaes.state.evaluations,
-            vec![-cmaes.state.best_fitness],
+            fitness_history,
         ))
     }
 }
@@ -397,11 +426,9 @@ impl BitStringOptimizer {
             .fitness(fitness)
             .max_generations(self.config.max_generations)
             .build()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
-        let result = ga
-            .run(&mut rng)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let result = ga.run(&mut rng).map_err(evolution_error_to_js)?;
 
         Ok(BitStringResult::new(
             result.best_genome.bits().to_vec(),
@@ -455,11 +482,9 @@ impl PermutationOptimizer {
             .fitness(fitness)
             .max_generations(self.config.max_generations)
             .build()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
-        let result = ga
-            .run(&mut rng)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let result = ga.run(&mut rng).map_err(evolution_error_to_js)?;
 
         Ok(PermutationResult::new(
             result.best_genome.permutation().to_vec(),
@@ -526,6 +551,9 @@ impl Nsga2Optimizer {
             move |genes: &[f64]| call_js_multi_objective(&fitness_fn, genes, num_objectives),
             num_objectives,
         );
+        // Count real evaluations performed by NSGA-II instead of fabricating a
+        // formula (AUDIT EV-33).
+        let fitness = CountingMoFitness::new(fitness);
 
         let nsga2 = Nsga2::<RealVector, _, _, _>::new(self.config.population_size)
             .with_bounds(bounds.clone());
@@ -539,7 +567,7 @@ impl Nsga2Optimizer {
                 self.config.max_generations,
                 &mut rng,
             )
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
         let pareto_front: Vec<ParetoSolution> = result
             .iter()
@@ -550,7 +578,7 @@ impl Nsga2Optimizer {
         Ok(MultiObjectiveResult::new(
             pareto_front,
             self.config.max_generations,
-            self.config.population_size * self.config.max_generations * 2,
+            fitness.evaluations(),
         ))
     }
 }
@@ -582,6 +610,48 @@ impl<F: Fn(&[f64]) -> Vec<f64>> MultiObjectiveFitness<RealVector>
 
     fn evaluate(&self, genome: &RealVector) -> Vec<f64> {
         (self.func)(genome.genes())
+    }
+}
+
+/// A [`MultiObjectiveFitness`] decorator that counts the actual number of
+/// objective evaluations performed.
+///
+/// `Nsga2::run` does not return an evaluation counter, and the previous code
+/// fabricated one as `population_size * max_generations * 2` — a value that
+/// overstated the true count by ~90% for typical configs and had no basis in
+/// the algorithm's behavior (AUDIT EV-33). Wrapping the fitness lets us report
+/// the real, measured evaluation count (one per `evaluate` call). Uses an atomic
+/// so the wrapper stays `Send + Sync` when the inner fitness is.
+struct CountingMoFitness<Fit> {
+    inner: Fit,
+    count: std::sync::atomic::AtomicUsize,
+}
+
+impl<Fit: MultiObjectiveFitness<RealVector>> CountingMoFitness<Fit> {
+    fn new(inner: Fit) -> Self {
+        Self {
+            inner,
+            count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The number of objective evaluations performed so far.
+    fn evaluations(&self) -> usize {
+        self.count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl<Fit: MultiObjectiveFitness<RealVector>> MultiObjectiveFitness<RealVector>
+    for CountingMoFitness<Fit>
+{
+    fn num_objectives(&self) -> usize {
+        self.inner.num_objectives()
+    }
+
+    fn evaluate(&self, genome: &RealVector) -> Vec<f64> {
+        self.count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.evaluate(genome)
     }
 }
 
@@ -748,11 +818,9 @@ impl EvolutionStrategyOptimizer {
             .fitness(fitness)
             .max_generations(self.config.max_generations)
             .build()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
-        let result = es
-            .run(&mut rng)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let result = es.run(&mut rng).map_err(evolution_error_to_js)?;
 
         Ok(OptimizationResult::new(
             result.best_genome.genes().to_vec(),
@@ -970,11 +1038,9 @@ impl SymbolicRegressionOptimizer {
             .fitness(fitness)
             .max_generations(self.max_generations)
             .build()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
-        let result = ga
-            .run(&mut rng)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let result = ga.run(&mut rng).map_err(evolution_error_to_js)?;
 
         Ok(SymbolicRegressionResult {
             expression: result.best_genome.to_sexpr(),
@@ -1020,11 +1086,9 @@ impl SymbolicRegressionOptimizer {
             .fitness(fitness)
             .max_generations(self.max_generations)
             .build()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
-        let result = ga
-            .run(&mut rng)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let result = ga.run(&mut rng).map_err(evolution_error_to_js)?;
 
         Ok(SymbolicRegressionResult {
             expression: result.best_genome.to_sexpr(),
@@ -1112,11 +1176,9 @@ impl UmdaOptimizer {
             .fitness(fitness)
             .max_generations(self.config.max_generations)
             .build()
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
-        let result = umda
-            .run(&mut rng)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let result = umda.run(&mut rng).map_err(evolution_error_to_js)?;
 
         Ok(OptimizationResult::new(
             result.best_genome.genes().to_vec(),
@@ -1181,7 +1243,8 @@ impl Nsga2Optimizer {
         bounds: MultiBounds,
         rng: &mut rand::rngs::StdRng,
     ) -> Result<MultiObjectiveResult, JsValue> {
-        let fitness = ZdtFitness::new(zdt);
+        // Count real evaluations rather than fabricating a formula (AUDIT EV-33).
+        let fitness = CountingMoFitness::new(ZdtFitness::new(zdt));
 
         let nsga2 = Nsga2::<RealVector, _, _, _>::new(self.config.population_size)
             .with_bounds(bounds.clone());
@@ -1195,7 +1258,7 @@ impl Nsga2Optimizer {
                 self.config.max_generations,
                 rng,
             )
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(evolution_error_to_js)?;
 
         let pareto_front: Vec<ParetoSolution> = result
             .iter()
@@ -1206,7 +1269,7 @@ impl Nsga2Optimizer {
         Ok(MultiObjectiveResult::new(
             pareto_front,
             self.config.max_generations,
-            self.config.population_size * self.config.max_generations * 2,
+            fitness.evaluations(),
         ))
     }
 }
@@ -1253,5 +1316,455 @@ impl<Z: ZdtEvaluator> MultiObjectiveFitness<RealVector> for ZdtFitness<Z> {
     fn evaluate(&self, genome: &RealVector) -> Vec<f64> {
         let [f1, f2] = self.zdt.evaluate(genome.genes());
         vec![f1, f2]
+    }
+}
+
+// ============================================================================
+// SteppedRealOptimizer — incremental / cancellable GA (AUDIT EV-34)
+// ============================================================================
+
+use fugue_evo::algorithms::simple_ga::{SimpleGA, SimpleGaRun};
+use fugue_evo::termination::MaxGenerations;
+
+/// Concrete `SimpleGA` type driven by the incremental step API.
+type SteppedGa = SimpleGA<
+    RealVector,
+    f64,
+    TournamentSelection,
+    SbxCrossover,
+    PolynomialMutation,
+    FitnessEvaluator,
+    MaxGenerations,
+>;
+
+/// One in-progress GA run (algorithm + its mutable stepping state + RNG).
+struct SteppedRun {
+    ga: SteppedGa,
+    state: SimpleGaRun<RealVector, f64>,
+    rng: rand::rngs::StdRng,
+}
+
+/// Build a `SteppedGa` for a built-in fitness function from a config snapshot.
+fn build_stepped_ga(config: &OptimizationConfig, fitness_name: &str) -> Result<SteppedGa, JsValue> {
+    let bounds = MultiBounds::uniform(
+        Bounds::new(config.lower_bound, config.upper_bound),
+        config.dimension,
+    );
+    let wrapper = FitnessWrapper::from_name(fitness_name, config.dimension)
+        .ok_or_else(|| JsValue::from_str(&format!("Unknown fitness: {}", fitness_name)))?;
+
+    SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
+        .population_size(config.population_size)
+        .bounds(bounds)
+        .selection(TournamentSelection::new(config.tournament_size))
+        .crossover(SbxCrossover::new(config.crossover_eta))
+        .mutation(PolynomialMutation::new(config.mutation_eta))
+        .fitness(FitnessEvaluator::new(wrapper))
+        .max_generations(config.max_generations)
+        .build()
+        .map_err(evolution_error_to_js)
+}
+
+/// A real-vector GA that runs **incrementally**.
+///
+/// Instead of a single blocking `optimize()` call, JavaScript drives the
+/// generation loop in chunks via [`SteppedRealOptimizer::step`], reads progress
+/// between chunks (best fitness/genome, generation, evaluations, history), and
+/// simply stops calling to cancel (AUDIT EV-34). This keeps a UI thread — or a
+/// Web Worker that wants to `postMessage` progress — responsive.
+///
+/// Uses the same configuration surface as [`RealVectorOptimizer`] with a
+/// built-in fitness function, driven through the native incremental stepping API
+/// (`SimpleGA::init_run` / `step_generation` / `finish_run`).
+#[wasm_bindgen]
+pub struct SteppedRealOptimizer {
+    config: OptimizationConfig,
+    fitness_name: String,
+    run: Option<SteppedRun>,
+}
+
+#[wasm_bindgen]
+impl SteppedRealOptimizer {
+    /// Create a new stepped optimizer for the given dimension.
+    #[wasm_bindgen(constructor)]
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            config: OptimizationConfig::new(dimension),
+            fitness_name: "sphere".to_string(),
+            run: None,
+        }
+    }
+
+    /// Set the population size (resets any in-progress run).
+    #[wasm_bindgen(js_name = setPopulationSize)]
+    pub fn set_population_size(&mut self, size: usize) {
+        self.config.set_population_size(size);
+        self.run = None;
+    }
+
+    /// Set the maximum number of generations (resets any in-progress run).
+    #[wasm_bindgen(js_name = setMaxGenerations)]
+    pub fn set_max_generations(&mut self, gens: usize) {
+        self.config.set_max_generations(gens);
+        self.run = None;
+    }
+
+    /// Set the bounds for all dimensions (resets any in-progress run).
+    #[wasm_bindgen(js_name = setBounds)]
+    pub fn set_bounds(&mut self, lower: f64, upper: f64) {
+        self.config.set_bounds(lower, upper);
+        self.run = None;
+    }
+
+    /// Set the random seed, 0 for entropy (resets any in-progress run).
+    #[wasm_bindgen(js_name = setSeed)]
+    pub fn set_seed(&mut self, seed: u64) {
+        self.config.set_seed(seed);
+        self.run = None;
+    }
+
+    /// Set the tournament size for selection (resets any in-progress run).
+    #[wasm_bindgen(js_name = setTournamentSize)]
+    pub fn set_tournament_size(&mut self, size: usize) {
+        self.config.set_tournament_size(size);
+        self.run = None;
+    }
+
+    /// Set the built-in fitness function by name (resets any in-progress run).
+    #[wasm_bindgen(js_name = setFitness)]
+    pub fn set_fitness(&mut self, name: &str) {
+        self.fitness_name = name.to_string();
+        self.run = None;
+    }
+
+    /// Build the GA and evaluate the initial population, if not already started.
+    fn ensure_started(&mut self) -> Result<(), JsValue> {
+        if self.run.is_some() {
+            return Ok(());
+        }
+        let ga = build_stepped_ga(&self.config, &self.fitness_name)?;
+        let mut rng = create_rng(self.config.seed);
+        let state = ga.init_run(&mut rng).map_err(evolution_error_to_js)?;
+        self.run = Some(SteppedRun { ga, state, rng });
+        Ok(())
+    }
+
+    /// Advance the optimization by up to `n_generations`.
+    ///
+    /// Returns `true` if the optimizer is still running (more generations remain
+    /// before `maxGenerations`), or `false` once it has reached the generation
+    /// budget or converged. Call repeatedly (e.g. `step(1)` per animation frame)
+    /// and stop whenever you like to cancel.
+    #[wasm_bindgen]
+    pub fn step(&mut self, n_generations: usize) -> Result<bool, JsValue> {
+        self.ensure_started()?;
+        let run = self
+            .run
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("optimizer not started"))?;
+        for _ in 0..n_generations {
+            let advanced = run
+                .ga
+                .step_generation(&mut run.state, &mut run.rng)
+                .map_err(evolution_error_to_js)?;
+            if !advanced {
+                return Ok(false);
+            }
+        }
+        Ok(!run.state.is_terminated())
+    }
+
+    /// The number of generations completed so far.
+    #[wasm_bindgen(js_name = currentGeneration, getter)]
+    pub fn current_generation(&self) -> usize {
+        self.run.as_ref().map(|r| r.state.generation()).unwrap_or(0)
+    }
+
+    /// The best fitness found so far (higher is better).
+    #[wasm_bindgen(js_name = bestFitness, getter)]
+    pub fn best_fitness(&self) -> f64 {
+        self.run
+            .as_ref()
+            .map(|r| r.state.best_fitness())
+            .unwrap_or(f64::NEG_INFINITY)
+    }
+
+    /// The best genome found so far.
+    #[wasm_bindgen(js_name = bestGenome)]
+    pub fn best_genome(&self) -> Vec<f64> {
+        self.run
+            .as_ref()
+            .map(|r| r.state.best_genome().genes().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Total fitness evaluations performed so far.
+    #[wasm_bindgen(getter)]
+    pub fn evaluations(&self) -> usize {
+        self.run
+            .as_ref()
+            .map(|r| r.state.evaluations())
+            .unwrap_or(0)
+    }
+
+    /// Per-generation best-so-far fitness trajectory.
+    #[wasm_bindgen(js_name = fitnessHistory)]
+    pub fn fitness_history(&self) -> Vec<f64> {
+        self.run
+            .as_ref()
+            .map(|r| r.state.fitness_history().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// `true` once the generation budget is exhausted or the run converged.
+    #[wasm_bindgen(js_name = isFinished, getter)]
+    pub fn is_finished(&self) -> bool {
+        self.run
+            .as_ref()
+            .map(|r| r.state.is_terminated())
+            .unwrap_or(false)
+    }
+
+    /// `true` once the initial population has been built and evaluated.
+    #[wasm_bindgen(js_name = isStarted, getter)]
+    pub fn is_started(&self) -> bool {
+        self.run.is_some()
+    }
+
+    /// Snapshot the current progress as an [`OptimizationResult`].
+    ///
+    /// Can be called at any point (starts the run if needed). Does not consume
+    /// the optimizer, so stepping can continue afterward.
+    #[wasm_bindgen(js_name = getResult)]
+    pub fn get_result(&mut self) -> Result<OptimizationResult, JsValue> {
+        self.ensure_started()?;
+        let run = self
+            .run
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("optimizer not started"))?;
+        Ok(OptimizationResult::new(
+            run.state.best_genome().genes().to_vec(),
+            run.state.best_fitness(),
+            run.state.generation(),
+            run.state.evaluations(),
+            run.state.fitness_history().to_vec(),
+        ))
+    }
+}
+
+// ============================================================================
+// IslandModelOptimizer — single-threaded island GA (AUDIT EV-77)
+// ============================================================================
+//
+// The native `algorithms::island` module requires the `parallel` feature
+// (rayon), which is disabled for the WASM build (`fugue-evo` is pulled in with
+// `default-features = false, features = ["std"]`, and rayon threads are not
+// available in wasm32). Rather than pull an unusable dependency into the wasm
+// binary, this is a self-contained single-threaded island model built on top of
+// the incremental stepping API (`SimpleGA::step_generation`) plus the migration
+// helpers (`SimpleGaRun::best_genomes` / `SimpleGA::inject_migrants`). It mirrors
+// the native model's Ring / FullyConnected / Star topologies with best-k
+// migration.
+
+/// Migration topology for the island model.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, Default)]
+pub enum IslandTopology {
+    /// Each island sends its emigrants to the next island (index + 1, wrapping).
+    #[default]
+    Ring,
+    /// Each island sends its emigrants to every other island.
+    FullyConnected,
+    /// All spokes send to the hub (island 0); the hub sends to every spoke.
+    Star,
+}
+
+impl IslandTopology {
+    /// Target island indices that `source` migrates to.
+    fn targets(&self, source: usize, num_islands: usize) -> Vec<usize> {
+        match self {
+            IslandTopology::Ring => vec![(source + 1) % num_islands],
+            IslandTopology::FullyConnected => (0..num_islands).filter(|&i| i != source).collect(),
+            IslandTopology::Star => {
+                if source == 0 {
+                    (1..num_islands).collect()
+                } else {
+                    vec![0]
+                }
+            }
+        }
+    }
+}
+
+/// A single-threaded island-model GA over a built-in fitness function.
+///
+/// Runs `numIslands` independent populations that evolve with the same
+/// incremental GA and periodically exchange their best individuals according to
+/// the chosen [`IslandTopology`] (AUDIT EV-77).
+#[wasm_bindgen]
+pub struct IslandModelOptimizer {
+    config: OptimizationConfig,
+    fitness_name: String,
+    num_islands: usize,
+    migration_interval: usize,
+    migration_size: usize,
+    topology: IslandTopology,
+}
+
+#[wasm_bindgen]
+impl IslandModelOptimizer {
+    /// Create an island model with `num_islands` islands of the given dimension.
+    #[wasm_bindgen(constructor)]
+    pub fn new(dimension: usize, num_islands: usize) -> Self {
+        Self {
+            config: OptimizationConfig::new(dimension),
+            fitness_name: "sphere".to_string(),
+            num_islands: num_islands.max(1),
+            migration_interval: 5,
+            migration_size: 1,
+            topology: IslandTopology::Ring,
+        }
+    }
+
+    /// Set the population size per island.
+    #[wasm_bindgen(js_name = setPopulationSize)]
+    pub fn set_population_size(&mut self, size: usize) {
+        self.config.set_population_size(size);
+    }
+
+    /// Set the maximum number of generations.
+    #[wasm_bindgen(js_name = setMaxGenerations)]
+    pub fn set_max_generations(&mut self, gens: usize) {
+        self.config.set_max_generations(gens);
+    }
+
+    /// Set the bounds for all dimensions.
+    #[wasm_bindgen(js_name = setBounds)]
+    pub fn set_bounds(&mut self, lower: f64, upper: f64) {
+        self.config.set_bounds(lower, upper);
+    }
+
+    /// Set the random seed (0 for entropy).
+    #[wasm_bindgen(js_name = setSeed)]
+    pub fn set_seed(&mut self, seed: u64) {
+        self.config.set_seed(seed);
+    }
+
+    /// Set the tournament size for selection.
+    #[wasm_bindgen(js_name = setTournamentSize)]
+    pub fn set_tournament_size(&mut self, size: usize) {
+        self.config.set_tournament_size(size);
+    }
+
+    /// Set the built-in fitness function by name.
+    #[wasm_bindgen(js_name = setFitness)]
+    pub fn set_fitness(&mut self, name: &str) {
+        self.fitness_name = name.to_string();
+    }
+
+    /// Set the number of generations between migration events.
+    #[wasm_bindgen(js_name = setMigrationInterval)]
+    pub fn set_migration_interval(&mut self, interval: usize) {
+        self.migration_interval = interval.max(1);
+    }
+
+    /// Set the number of (best) individuals each island sends per migration.
+    #[wasm_bindgen(js_name = setMigrationSize)]
+    pub fn set_migration_size(&mut self, size: usize) {
+        self.migration_size = size.max(1);
+    }
+
+    /// Set the migration topology.
+    #[wasm_bindgen(js_name = setTopology)]
+    pub fn set_topology(&mut self, topology: IslandTopology) {
+        self.topology = topology;
+    }
+
+    /// The number of islands.
+    #[wasm_bindgen(js_name = numIslands, getter)]
+    pub fn num_islands(&self) -> usize {
+        self.num_islands
+    }
+
+    /// Run the island model to completion and return the global-best result.
+    ///
+    /// The returned [`OptimizationResult`] holds the best genome/fitness across
+    /// all islands, the summed evaluation count, and a per-generation trajectory
+    /// of the global best-so-far fitness.
+    #[wasm_bindgen]
+    pub fn optimize(&self) -> Result<OptimizationResult, JsValue> {
+        let n = self.num_islands;
+
+        // Build the islands. Each gets a distinct but deterministic RNG seed so
+        // the populations differ yet the whole run is reproducible.
+        let mut islands: Vec<SteppedRun> = Vec::with_capacity(n);
+        for i in 0..n {
+            let ga = build_stepped_ga(&self.config, &self.fitness_name)?;
+            let island_seed = if self.config.seed == 0 {
+                0 // entropy for every island
+            } else {
+                self.config.seed.wrapping_add(i as u64 + 1)
+            };
+            let mut rng = create_rng(island_seed);
+            let state = ga.init_run(&mut rng).map_err(evolution_error_to_js)?;
+            islands.push(SteppedRun { ga, state, rng });
+        }
+
+        let mut history: Vec<f64> = Vec::with_capacity(self.config.max_generations);
+
+        for generation in 0..self.config.max_generations {
+            // Advance every island one generation.
+            for island in islands.iter_mut() {
+                island
+                    .ga
+                    .step_generation(&mut island.state, &mut island.rng)
+                    .map_err(evolution_error_to_js)?;
+            }
+
+            // Migrate on the configured interval (never on generation 0).
+            if n > 1 && generation > 0 && generation % self.migration_interval == 0 {
+                // Snapshot emigrants from every source first (immutable reads),
+                // then inject into targets (mutable writes).
+                let mut deliveries: Vec<(usize, Vec<RealVector>)> = Vec::new();
+                for source in 0..n {
+                    let migrants = islands[source].state.best_genomes(self.migration_size);
+                    for target in self.topology.targets(source, n) {
+                        deliveries.push((target, migrants.clone()));
+                    }
+                }
+                for (target, migrants) in deliveries {
+                    let island = &mut islands[target];
+                    island.ga.inject_migrants(&mut island.state, migrants);
+                }
+            }
+
+            // Track the global best-so-far across islands.
+            let global_best = islands
+                .iter()
+                .map(|isl| isl.state.best_fitness())
+                .fold(f64::NEG_INFINITY, f64::max);
+            history.push(global_best);
+        }
+
+        // Collect the global-best solution and summed evaluations.
+        let mut best_fitness = f64::NEG_INFINITY;
+        let mut best_genome: Vec<f64> = Vec::new();
+        let mut total_evaluations = 0usize;
+        for island in &islands {
+            total_evaluations += island.state.evaluations();
+            let f = island.state.best_fitness();
+            if f > best_fitness {
+                best_fitness = f;
+                best_genome = island.state.best_genome().genes().to_vec();
+            }
+        }
+
+        Ok(OptimizationResult::new(
+            best_genome,
+            best_fitness,
+            self.config.max_generations,
+            total_evaluations,
+            history,
+        ))
     }
 }

@@ -880,3 +880,178 @@ fn test_wasm_candidate_methods() {
     assert!(json.contains("id"));
     assert!(json.contains("genome"));
 }
+
+// ============================================================================
+// Stepped / Incremental Optimizer Tests (AUDIT EV-34)
+// ============================================================================
+
+use fugue_evo_wasm::{IslandModelOptimizer, IslandTopology, SteppedRealOptimizer};
+
+#[wasm_bindgen_test]
+fn test_stepped_optimizer_incremental_progress() {
+    let mut s = SteppedRealOptimizer::new(3);
+    s.set_population_size(20);
+    s.set_max_generations(15);
+    s.set_bounds(-5.0, 5.0);
+    s.set_fitness("sphere");
+    s.set_seed(99);
+
+    assert!(!s.is_started());
+    assert!(s.step(5).expect("step should succeed"));
+    assert!(s.is_started());
+    assert_eq!(s.current_generation(), 5);
+    assert!(s.best_fitness().is_finite());
+    assert_eq!(s.fitness_history().len(), 6); // generations 0..=5
+    assert!(s.evaluations() > 0);
+}
+
+#[wasm_bindgen_test]
+fn test_stepped_optimizer_finishes_and_matches_one_shot() {
+    // Driving the step loop to completion must equal the one-shot optimize()
+    // for the same seed/config.
+    let mut s = SteppedRealOptimizer::new(3);
+    s.set_population_size(20);
+    s.set_max_generations(15);
+    s.set_bounds(-5.0, 5.0);
+    s.set_fitness("sphere");
+    s.set_seed(99);
+    while s.step(4).expect("step") {}
+    assert!(s.is_finished());
+    assert_eq!(s.current_generation(), 15);
+
+    let mut one = RealVectorOptimizer::new(3);
+    one.set_population_size(20);
+    one.set_max_generations(15);
+    one.set_bounds(-5.0, 5.0);
+    one.set_fitness("sphere");
+    one.set_seed(99);
+    let r = one.optimize().expect("optimize");
+
+    assert!((r.best_fitness() - s.best_fitness()).abs() < 1e-12);
+}
+
+#[wasm_bindgen_test]
+fn test_stepped_optimizer_early_cancel_snapshot() {
+    let mut s = SteppedRealOptimizer::new(2);
+    s.set_population_size(15);
+    s.set_max_generations(50);
+    s.set_bounds(-5.0, 5.0);
+    s.set_fitness("sphere");
+    s.set_seed(3);
+
+    s.step(3).expect("step");
+    let snapshot = s.get_result().expect("get_result");
+    assert_eq!(snapshot.generations(), 3);
+    assert!(!s.is_finished());
+    assert_eq!(snapshot.best_genome().len(), 2);
+}
+
+// ============================================================================
+// Island Model Tests (AUDIT EV-77)
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_island_model_runs_with_migration() {
+    let mut o = IslandModelOptimizer::new(3, 4);
+    assert_eq!(o.num_islands(), 4);
+    o.set_population_size(20);
+    o.set_max_generations(20);
+    o.set_bounds(-5.0, 5.0);
+    o.set_fitness("sphere");
+    o.set_seed(1);
+    o.set_migration_interval(5);
+    o.set_migration_size(2);
+    o.set_topology(IslandTopology::Ring);
+
+    let result = o.optimize().expect("island model should succeed");
+    assert_eq!(result.best_genome().len(), 3);
+    assert!(result.best_fitness().is_finite());
+    assert_eq!(result.fitness_history().len(), 20);
+}
+
+#[wasm_bindgen_test]
+fn test_island_model_topologies() {
+    for topo in [
+        IslandTopology::Ring,
+        IslandTopology::FullyConnected,
+        IslandTopology::Star,
+    ] {
+        let mut o = IslandModelOptimizer::new(2, 3);
+        o.set_population_size(12);
+        o.set_max_generations(12);
+        o.set_bounds(-5.0, 5.0);
+        o.set_fitness("sphere");
+        o.set_seed(42);
+        o.set_topology(topo);
+        let result = o.optimize().expect("topology run should succeed");
+        assert_eq!(result.best_genome().len(), 2);
+    }
+}
+
+// ============================================================================
+// CMA-ES fitness history is a trajectory (AUDIT EV-76)
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_cmaes_fitness_history_is_trajectory() {
+    let mut o = RealVectorOptimizer::new(4);
+    o.set_algorithm(Algorithm::CmaES);
+    o.set_cmaes_sigma(0.5);
+    o.set_population_size(16);
+    o.set_max_generations(30);
+    o.set_bounds(-5.0, 5.0);
+    o.set_fitness("sphere");
+    o.set_seed(7);
+
+    let result = o.optimize().expect("CMA-ES should succeed");
+    // Was a single flat point pre-fix; now a full per-generation trajectory.
+    assert!(result.fitness_history().len() > 1);
+}
+
+// ============================================================================
+// NSGA-II reports the real evaluation count (AUDIT EV-33)
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_nsga2_real_evaluation_count() {
+    let pop = 12;
+    let gens = 6;
+    let mut o = Nsga2Optimizer::new(2, 2);
+    o.set_population_size(pop);
+    o.set_max_generations(gens);
+    o.set_seed(123);
+
+    let result = o
+        .optimize_zdt(ZdtProblem::Zdt1)
+        .expect("ZDT1 should succeed");
+    // Real count is pop*(gens+1); the old fabricated value was pop*gens*2.
+    assert_eq!(result.evaluations(), pop * (gens + 1));
+    assert_ne!(result.evaluations(), pop * gens * 2);
+}
+
+// ============================================================================
+// Structured error info at the JS boundary (AUDIT EV-32 / EV-09)
+// ============================================================================
+
+#[wasm_bindgen_test]
+fn test_structured_error_has_type_field() {
+    use wasm_bindgen::JsValue;
+    // population_size == 0 makes SimpleGA::build() fail with a Configuration
+    // error, which must surface as a structured {type, message} object rather
+    // than a bare string.
+    let mut o = RealVectorOptimizer::new(3);
+    o.set_population_size(0);
+    o.set_fitness("sphere");
+
+    let err: JsValue = o.optimize().expect_err("should fail with pop size 0");
+    // A structured error is a JS object exposing a `type` string; a bare string
+    // error would not.
+    assert!(err.is_object(), "error should be a structured object");
+    let type_field =
+        js_sys::Reflect::get(&err, &JsValue::from_str("type")).expect("has a type field");
+    let type_str = type_field.as_string().expect("type is a string");
+    assert_eq!(type_str, "ConfigError");
+    let message_field =
+        js_sys::Reflect::get(&err, &JsValue::from_str("message")).expect("has a message field");
+    assert!(message_field.as_string().is_some());
+}
