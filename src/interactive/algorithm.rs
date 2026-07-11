@@ -449,6 +449,10 @@ where
                 ratings.iter().map(|(id, _)| *id).collect::<Vec<_>>()
             }
             EvaluationResponse::PairwiseWinner(winner) => {
+                // Capture BOTH compared ids returned by process_pairwise so the
+                // winner AND the loser have their fitness re-synced from the
+                // (now Bradley-Terry-refit, EV-06) aggregator, not just the winner.
+                let mut ids = Vec::new();
                 if let AlgorithmState::AwaitingEvaluation {
                     pending_request_ids,
                 } = &self.state
@@ -456,12 +460,16 @@ where
                     if pending_request_ids.len() == 2 {
                         let id_a = pending_request_ids[0];
                         let id_b = pending_request_ids[1];
-                        self.session
+                        ids = self
+                            .session
                             .aggregator
-                            .process_pairwise(id_a, id_b, *winner);
+                            .process_pairwise(id_a, id_b, *winner)
+                            .into_iter()
+                            .map(|(id, _)| id)
+                            .collect();
                     }
                 }
-                winner.map(|w| vec![w]).unwrap_or_default()
+                ids
             }
             EvaluationResponse::BatchSelected(selected) => {
                 if let AlgorithmState::AwaitingEvaluation {
@@ -477,7 +485,8 @@ where
             EvaluationResponse::Skip => Vec::new(),
         };
 
-        // Update candidate fitness estimates with uncertainty
+        // Update candidate fitness estimates with uncertainty. These are pure
+        // setters (they do NOT touch evaluation_count — see EV-26 / EV-64).
         for id in updated {
             if let Some(estimate) = self.session.aggregator.get_fitness_estimate(&id) {
                 self.session.update_fitness_with_uncertainty(id, estimate);
@@ -487,7 +496,10 @@ where
             }
         }
 
-        // Mark candidates as evaluated based on pending request
+        // Single owner of evaluation counting (EV-26 / EV-64): every candidate
+        // that was actually presented in this request is counted exactly once,
+        // regardless of whether the aggregator produced an estimate for it. This
+        // is symmetric in pairwise mode (both compared candidates get +1).
         if let AlgorithmState::AwaitingEvaluation {
             pending_request_ids,
         } = &self.state
@@ -621,23 +633,27 @@ where
             return;
         }
 
-        // Preserve elites - collect first to avoid borrow issues
+        // Preserve elites - collect first to avoid borrow issues.
+        //
+        // EV-63: carry each elite over WITH its original CandidateId (and its
+        // accumulated evaluation history: fitness estimate, uncertainty, and
+        // evaluation_count) intact. The FitnessAggregator keys every candidate's
+        // ratings/wins/comparisons by CandidateId, so re-minting a fresh id here
+        // (the previous behavior) orphaned all of an elite's feedback every
+        // generation and violated the documented stable-ID contract. Elites stay
+        // at the front of the population, matching the `elitism_count..` reset of
+        // `unevaluated_indices` below.
         let mut new_population: Vec<Candidate<G>> = Vec::with_capacity(pop_size);
-        let elites: Vec<_> = self
+        let elites: Vec<Candidate<G>> = self
             .session
             .ranked_candidates()
             .into_iter()
             .take(self.config.elitism_count)
-            .map(|c| (c.genome.clone(), c.fitness_estimate))
+            .cloned()
             .collect();
 
-        let next_gen = self.session.generation + 1;
-        for (genome, fitness) in elites {
-            let id = self.session.next_id();
-            let mut candidate = Candidate::with_generation(id, genome, next_gen);
-            // Preserve elite fitness
-            candidate.fitness_estimate = fitness;
-            new_population.push(candidate);
+        for elite in elites {
+            new_population.push(elite);
         }
 
         // Fill rest with offspring

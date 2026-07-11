@@ -295,14 +295,22 @@ impl FitnessAggregator {
                 }
             }
             AggregationModel::Elo { k_factor, .. } => {
-                // Elo variance approximation based on K-factor and game count
+                // EV-98: an Elo rating is a constant-step stochastic-approximation
+                // (EWMA-style) estimate, NOT an average of `n` Bernoulli draws, so
+                // its uncertainty does not decay to 0 as 1/n. Linearizing the
+                // update near equilibrium gives a stationary random-walk variance
+                // floor of `k·s/2` on the RATING scale, where `s = 400/ln(10)` is
+                // the logistic rating scale. We report that floor plus a 1/n
+                // transient, both in rating² units (the same scale as the reported
+                // rating mean), so the variance shrinks with games toward a
+                // positive floor rather than spuriously toward 0.
                 let n_games = stats.total_comparisons();
                 let variance = if n_games == 0 {
                     f64::INFINITY
                 } else {
-                    // Approximate variance: decreases with games, proportional to K²
-                    let base_var = k_factor * k_factor * 0.25; // Bernoulli variance factor
-                    base_var / n_games as f64
+                    let s = 400.0 / std::f64::consts::LN_10;
+                    let steady_state = k_factor * s / 2.0; // rating² floor
+                    steady_state + k_factor * k_factor / (4.0 * n_games as f64)
                 };
                 FitnessEstimate::new(stats.model_score, variance, n_games)
             }
@@ -319,14 +327,25 @@ impl FitnessAggregator {
                 };
                 FitnessEstimate::new(stats.model_score, variance, n_comparisons)
             }
-            AggregationModel::ImplicitRanking { .. } => {
-                // Binomial variance on selection rate
+            AggregationModel::ImplicitRanking {
+                selected_bonus,
+                not_selected_penalty,
+                ..
+            } => {
+                // EV-98: `model_score = base + bonus·S − penalty·(n−S)
+                //                    = C + (bonus + penalty)·S`, a linear map of the
+                // selection count `S ~ Binomial(n, p)`. Propagate the count
+                // variance through that map so the reported variance is on the SAME
+                // (score) scale as the reported mean, instead of the raw [0,1]
+                // selection-proportion variance `p(1−p)/n` used previously:
+                //   Var(score) = (bonus + penalty)²·n·p·(1−p).
                 let n = stats.times_selected + stats.times_passed;
                 if n == 0 {
                     FitnessEstimate::uninformative(stats.model_score)
                 } else {
                     let p = stats.times_selected as f64 / n as f64;
-                    let variance = p * (1.0 - p) / n as f64;
+                    let slope = selected_bonus + not_selected_penalty;
+                    let variance = slope * slope * n as f64 * p * (1.0 - p);
                     FitnessEstimate::new(stats.model_score, variance, n)
                 }
             }
@@ -689,6 +708,19 @@ impl FitnessAggregator {
             }
         }
 
+        // EV-06: Bradley-Terry strengths are fit by a batch MLE, so a single
+        // comparison changes NO score until the model is re-fit. Do it here,
+        // immediately after recording and BEFORE any fitness read, so the live
+        // interactive loop actually exerts selection pressure from pairwise
+        // feedback (previously `recompute_all()` ran only in tests, leaving every
+        // candidate frozen at its initial strength).
+        if matches!(
+            self.model,
+            AggregationModel::BradleyTerry { .. } | AggregationModel::BradleyTerrySimple { .. }
+        ) {
+            self.recompute_all();
+        }
+
         vec![id_a, id_b]
             .into_iter()
             .filter_map(|id| self.get_fitness(&id).map(|f| (id, f)))
@@ -888,6 +920,93 @@ mod tests {
         let estimate_a = agg.get_fitness_estimate(&CandidateId(0)).unwrap();
         assert!(estimate_a.variance.is_finite());
         assert!(estimate_a.observation_count > 0);
+    }
+
+    #[test]
+    fn test_bradley_terry_process_pairwise_updates_fitness() {
+        // regression: EV-06 — recording a comparison via the LIVE entry point
+        // (`process_pairwise`) must re-fit the Bradley-Terry MLE so fitness
+        // reflects it. Pre-fix, `process_pairwise` left every candidate frozen at
+        // its initial strength (recompute_all ran only in tests), so pairwise
+        // feedback exerted zero selection pressure.
+        use crate::interactive::bradley_terry::BradleyTerryOptimizer;
+        let mut agg = FitnessAggregator::new(AggregationModel::BradleyTerry {
+            initial_strength: 1.0,
+            optimizer: BradleyTerryOptimizer::default(),
+        });
+        let a = CandidateId(0);
+        let b = CandidateId(1);
+        let c = CandidateId(2);
+
+        // A beats B beats C (plus A beats C), repeatedly, via the live path only.
+        for _ in 0..8 {
+            agg.process_pairwise(a, b, Some(a));
+            agg.process_pairwise(b, c, Some(b));
+            agg.process_pairwise(a, c, Some(a));
+        }
+
+        let fa = agg.get_fitness(&a).unwrap();
+        let fb = agg.get_fitness(&b).unwrap();
+        let fc = agg.get_fitness(&c).unwrap();
+        assert!(fa > fb, "A ({fa}) should outrank B ({fb})");
+        assert!(fb > fc, "B ({fb}) should outrank C ({fc})");
+        // Strengths must be meaningfully separated, not all == initial_strength.
+        assert!((fa - fb).abs() > 1e-3);
+        assert!((fb - fc).abs() > 1e-3);
+    }
+
+    #[test]
+    fn test_implicit_ranking_variance_on_score_scale() {
+        // regression: EV-98 — ImplicitRanking variance must be on the score scale
+        // (bonus+penalty)²·n·p·(1−p), not the [0,1] proportion variance p(1−p)/n.
+        let mut agg = FitnessAggregator::new(AggregationModel::ImplicitRanking {
+            selected_bonus: 2.0,
+            not_selected_penalty: 1.0,
+            base_fitness: 5.0,
+        });
+        let id = CandidateId(0);
+        // Presented 4 times: selected twice, passed twice -> p = 0.5, n = 4.
+        agg.record_batch_selection(&[id], &[]);
+        agg.record_batch_selection(&[id], &[]);
+        agg.record_batch_selection(&[], &[id]);
+        agg.record_batch_selection(&[], &[id]);
+
+        let est = agg.get_fitness_estimate(&id).unwrap();
+        let slope = 2.0 + 1.0;
+        let expected = slope * slope * 4.0 * 0.5 * 0.5; // = 9.0
+        assert!(
+            (est.variance - expected).abs() < 1e-9,
+            "got {}",
+            est.variance
+        );
+        // The old proportion formula would have given 0.5·0.5/4 = 0.0625.
+        assert!(est.variance > 1.0);
+    }
+
+    #[test]
+    fn test_elo_variance_has_positive_floor() {
+        // regression: EV-98 — Elo variance must approach a positive steady-state
+        // floor (k·s/2 on the rating scale), not decay toward 0 as 1/n_games.
+        let mut agg = FitnessAggregator::new(AggregationModel::Elo {
+            initial_rating: 1500.0,
+            k_factor: 32.0,
+        });
+        let a = CandidateId(0);
+        let b = CandidateId(1);
+        for _ in 0..200 {
+            agg.record_comparison(a, b);
+        }
+        let est = agg.get_fitness_estimate(&a).unwrap();
+        let s = 400.0 / std::f64::consts::LN_10;
+        let floor = 32.0 * s / 2.0;
+        assert!(
+            est.variance >= floor,
+            "variance {} below floor {}",
+            est.variance,
+            floor
+        );
+        // The old formula k²·0.25/n = 256/200 ≈ 1.28 would be far below the floor.
+        assert!(est.variance > 100.0);
     }
 
     #[test]
