@@ -28,6 +28,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout sibling fugue (path dependency)
+        run: git clone --depth 1 --branch "${GITHUB_HEAD_REF:-main}" https://github.com/alexnodeland/fugue.git "$GITHUB_WORKSPACE/../fugue" || git clone --depth 1 --branch main https://github.com/alexnodeland/fugue.git "$GITHUB_WORKSPACE/../fugue"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
