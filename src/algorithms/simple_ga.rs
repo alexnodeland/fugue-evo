@@ -1057,7 +1057,26 @@ where
     }
 
     /// Run the genetic algorithm
+    ///
+    /// This is a thin driver over the incremental stepping API
+    /// ([`SimpleGA::init_run`], [`SimpleGA::step_generation`],
+    /// [`SimpleGA::finish_run`]); it is guaranteed to produce the same result as
+    /// driving those methods manually (AUDIT EV-34).
     pub fn run<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<G, F>, EvolutionError> {
+        let mut state = self.init_run(rng)?;
+        while self.step_generation(&mut state, rng)? {}
+        Ok(self.finish_run(state))
+    }
+
+    /// Initialize an incremental run: build and evaluate the initial population
+    /// and record generation-0 statistics.
+    ///
+    /// The returned [`SimpleGaRun`] can then be advanced one generation at a time
+    /// with [`SimpleGA::step_generation`] and consumed with
+    /// [`SimpleGA::finish_run`]. This is the incremental counterpart to
+    /// [`SimpleGA::run`], letting callers (e.g. the WASM bindings) report
+    /// progress and cancel early (AUDIT EV-34).
+    pub fn init_run<R: Rng>(&self, rng: &mut R) -> Result<SimpleGaRun<G, F>, EvolutionError> {
         let start_time = Instant::now();
 
         // Initialize population
@@ -1070,11 +1089,11 @@ where
         let eval_time = eval_start.elapsed();
 
         let mut stats = EvolutionStats::new();
-        let mut evaluations = population.len();
+        let evaluations = population.len();
         let mut fitness_history: Vec<f64> = Vec::new();
 
         // Track best individual
-        let mut best_individual = population
+        let best_individual = population
             .best()
             .ok_or(EvolutionError::EmptyPopulation)?
             .clone();
@@ -1085,139 +1104,298 @@ where
         fitness_history.push(gen_stats.best_fitness);
         stats.record(gen_stats);
 
-        // Main evolution loop
-        loop {
-            // Check termination
-            let state = EvolutionState {
-                generation: population.generation(),
-                evaluations,
-                best_fitness: best_individual.fitness_value().to_f64(),
-                population: &population,
-                fitness_history: &fitness_history,
-            };
+        Ok(SimpleGaRun {
+            population,
+            best_individual,
+            evaluations,
+            fitness_history,
+            stats,
+            start_time,
+            terminated: false,
+        })
+    }
 
-            if self.termination.should_terminate(&state) {
-                stats.set_termination_reason(self.termination.reason());
-                break;
-            }
-
-            let gen_start = Instant::now();
-
-            // Create new generation
-            let mut new_population: Population<G, F> =
-                Population::with_capacity(self.config.population_size);
-
-            // Elitism: copy best individuals
-            if self.config.elitism {
-                let mut sorted = population.clone();
-                sorted.sort_by_fitness();
-                for i in 0..self.config.elite_count.min(sorted.len()) {
-                    new_population.push(sorted[i].clone());
-                }
-            }
-
-            // Selection pool
-            let selection_pool: Vec<(G, f64)> = population.as_fitness_pairs();
-
-            // Generate offspring
-            let _selection_start = Instant::now();
-            let mut selection_time = std::time::Duration::ZERO;
-            let mut crossover_time = std::time::Duration::ZERO;
-            let mut mutation_time = std::time::Duration::ZERO;
-
-            while new_population.len() < self.config.population_size {
-                // Selection
-                let sel_start = Instant::now();
-                let parent1_idx = self.selection.select(&selection_pool, rng);
-                let parent2_idx = self.selection.select(&selection_pool, rng);
-                selection_time += sel_start.elapsed();
-
-                let parent1 = &selection_pool[parent1_idx].0;
-                let parent2 = &selection_pool[parent2_idx].0;
-
-                // Crossover
-                let cross_start = Instant::now();
-                let (mut child1, mut child2) =
-                    if rng.gen::<f64>() < self.config.crossover_probability {
-                        match self.crossover.crossover(parent1, parent2, rng).genome() {
-                            Some((c1, c2)) => (c1, c2),
-                            None => (parent1.clone(), parent2.clone()),
-                        }
-                    } else {
-                        (parent1.clone(), parent2.clone())
-                    };
-                crossover_time += cross_start.elapsed();
-
-                // Mutation
-                let mut_start = Instant::now();
-                self.mutation.mutate(&mut child1, rng);
-                self.mutation.mutate(&mut child2, rng);
-                mutation_time += mut_start.elapsed();
-
-                // Add to new population
-                new_population.push(Individual::with_generation(
-                    child1,
-                    population.generation() + 1,
-                ));
-                if new_population.len() < self.config.population_size {
-                    new_population.push(Individual::with_generation(
-                        child2,
-                        population.generation() + 1,
-                    ));
-                }
-            }
-
-            // Truncate to exact size
-            while new_population.len() > self.config.population_size {
-                new_population.pop();
-            }
-
-            // Evaluate new population (sequential only)
-            let eval_start = Instant::now();
-            new_population.evaluate(&self.fitness);
-            let eval_time = eval_start.elapsed();
-            evaluations += new_population.len()
-                - (if self.config.elitism {
-                    self.config.elite_count
-                } else {
-                    0
-                });
-
-            // Update generation counter
-            new_population.set_generation(population.generation() + 1);
-            population = new_population;
-
-            // Update best individual
-            if let Some(best) = population.best() {
-                if best.is_better_than(&best_individual) {
-                    best_individual = best.clone();
-                }
-            }
-
-            // Record statistics
-            let timing = TimingStats::new()
-                .with_selection(selection_time)
-                .with_crossover(crossover_time)
-                .with_mutation(mutation_time)
-                .with_evaluation(eval_time)
-                .with_total(gen_start.elapsed());
-
-            let gen_stats =
-                GenerationStats::from_population(&population, population.generation(), evaluations)
-                    .with_timing(timing);
-            fitness_history.push(gen_stats.best_fitness);
-            stats.record(gen_stats);
+    /// Advance an incremental run by a single generation.
+    ///
+    /// Returns `Ok(true)` if a generation was executed, or `Ok(false)` if the
+    /// termination criterion fired (in which case `state` is left otherwise
+    /// unchanged and marked terminated). This mirrors exactly one iteration of
+    /// [`SimpleGA::run`]'s main loop, including the termination check performed
+    /// before the generation body.
+    pub fn step_generation<R: Rng>(
+        &self,
+        state: &mut SimpleGaRun<G, F>,
+        rng: &mut R,
+    ) -> Result<bool, EvolutionError> {
+        if state.terminated {
+            return Ok(false);
         }
 
-        stats.set_runtime(start_time.elapsed());
+        // Check termination
+        let evo_state = EvolutionState {
+            generation: state.population.generation(),
+            evaluations: state.evaluations,
+            best_fitness: state.best_individual.fitness_value().to_f64(),
+            population: &state.population,
+            fitness_history: &state.fitness_history,
+        };
 
-        Ok(EvolutionResult::new(
-            best_individual.genome,
-            best_individual.fitness.unwrap(),
-            population.generation(),
-            evaluations,
+        if self.termination.should_terminate(&evo_state) {
+            state
+                .stats
+                .set_termination_reason(self.termination.reason());
+            state.terminated = true;
+            return Ok(false);
+        }
+
+        let gen_start = Instant::now();
+
+        // Create new generation
+        let mut new_population: Population<G, F> =
+            Population::with_capacity(self.config.population_size);
+
+        // Elitism: copy best individuals
+        if self.config.elitism {
+            let mut sorted = state.population.clone();
+            sorted.sort_by_fitness();
+            for i in 0..self.config.elite_count.min(sorted.len()) {
+                new_population.push(sorted[i].clone());
+            }
+        }
+
+        // Selection pool
+        let selection_pool: Vec<(G, f64)> = state.population.as_fitness_pairs();
+
+        // Generate offspring
+        let _selection_start = Instant::now();
+        let mut selection_time = std::time::Duration::ZERO;
+        let mut crossover_time = std::time::Duration::ZERO;
+        let mut mutation_time = std::time::Duration::ZERO;
+
+        while new_population.len() < self.config.population_size {
+            // Selection
+            let sel_start = Instant::now();
+            let parent1_idx = self.selection.select(&selection_pool, rng);
+            let parent2_idx = self.selection.select(&selection_pool, rng);
+            selection_time += sel_start.elapsed();
+
+            let parent1 = &selection_pool[parent1_idx].0;
+            let parent2 = &selection_pool[parent2_idx].0;
+
+            // Crossover
+            let cross_start = Instant::now();
+            let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability {
+                match self.crossover.crossover(parent1, parent2, rng).genome() {
+                    Some((c1, c2)) => (c1, c2),
+                    None => (parent1.clone(), parent2.clone()),
+                }
+            } else {
+                (parent1.clone(), parent2.clone())
+            };
+            crossover_time += cross_start.elapsed();
+
+            // Mutation
+            let mut_start = Instant::now();
+            self.mutation.mutate(&mut child1, rng);
+            self.mutation.mutate(&mut child2, rng);
+            mutation_time += mut_start.elapsed();
+
+            // Add to new population
+            new_population.push(Individual::with_generation(
+                child1,
+                state.population.generation() + 1,
+            ));
+            if new_population.len() < self.config.population_size {
+                new_population.push(Individual::with_generation(
+                    child2,
+                    state.population.generation() + 1,
+                ));
+            }
+        }
+
+        // Truncate to exact size
+        while new_population.len() > self.config.population_size {
+            new_population.pop();
+        }
+
+        // Evaluate new population (sequential only)
+        let eval_start = Instant::now();
+        new_population.evaluate(&self.fitness);
+        let eval_time = eval_start.elapsed();
+        state.evaluations += new_population.len()
+            - (if self.config.elitism {
+                self.config.elite_count
+            } else {
+                0
+            });
+
+        // Update generation counter
+        new_population.set_generation(state.population.generation() + 1);
+        state.population = new_population;
+
+        // Update best individual
+        if let Some(best) = state.population.best() {
+            if best.is_better_than(&state.best_individual) {
+                state.best_individual = best.clone();
+            }
+        }
+
+        // Record statistics
+        let timing = TimingStats::new()
+            .with_selection(selection_time)
+            .with_crossover(crossover_time)
+            .with_mutation(mutation_time)
+            .with_evaluation(eval_time)
+            .with_total(gen_start.elapsed());
+
+        let gen_stats = GenerationStats::from_population(
+            &state.population,
+            state.population.generation(),
+            state.evaluations,
         )
-        .with_stats(stats))
+        .with_timing(timing);
+        state.fitness_history.push(gen_stats.best_fitness);
+        state.stats.record(gen_stats);
+
+        Ok(true)
+    }
+
+    /// Consume an incremental run and produce the final [`EvolutionResult`],
+    /// mirroring the tail of [`SimpleGA::run`].
+    pub fn finish_run(&self, mut state: SimpleGaRun<G, F>) -> EvolutionResult<G, F> {
+        state.stats.set_runtime(state.start_time.elapsed());
+
+        EvolutionResult::new(
+            state.best_individual.genome,
+            state
+                .best_individual
+                .fitness
+                .expect("best individual is always evaluated"),
+            state.population.generation(),
+            state.evaluations,
+        )
+        .with_stats(state.stats)
+    }
+
+    /// Inject migrant genomes into an in-progress run, replacing the current
+    /// worst individuals.
+    ///
+    /// Each migrant is evaluated with this GA's own fitness function (so a genome
+    /// that emigrated from another island is scored under the receiving island's
+    /// objective) and overwrites one of the worst individuals in the population.
+    /// The best-so-far individual is refreshed and the evaluation counter is
+    /// advanced by the number of migrants accepted. Used to build island-model
+    /// migration on top of the incremental stepping API (AUDIT EV-77).
+    pub fn inject_migrants(&self, state: &mut SimpleGaRun<G, F>, migrants: Vec<G>) {
+        if migrants.is_empty() {
+            return;
+        }
+
+        // Sort best-first so the worst individuals sit at the tail.
+        state.population.sort_by_fitness();
+        let n = state.population.len();
+        if n == 0 {
+            return;
+        }
+        let k = migrants.len().min(n);
+
+        let evaluated: Vec<Individual<G, F>> = migrants
+            .into_iter()
+            .take(k)
+            .map(|genome| {
+                let value = self.fitness.evaluate(&genome);
+                Individual::with_fitness(genome, value)
+            })
+            .collect();
+
+        {
+            let individuals = state.population.individuals_mut();
+            for (i, individual) in evaluated.into_iter().enumerate() {
+                let idx = n - 1 - i; // replace worst-first
+                individuals[idx] = individual;
+            }
+        }
+        state.evaluations += k;
+
+        // Refresh the tracked best individual.
+        if let Some(best) = state.population.best() {
+            if best.is_better_than(&state.best_individual) {
+                state.best_individual = best.clone();
+            }
+        }
+    }
+}
+
+/// Mutable state for driving a [`SimpleGA`] one generation at a time.
+///
+/// Produced by [`SimpleGA::init_run`], advanced by
+/// [`SimpleGA::step_generation`], and consumed by [`SimpleGA::finish_run`]. This
+/// is the incremental counterpart to [`SimpleGA::run`] (AUDIT EV-34): callers can
+/// drive the generation loop, read progress via the getters below, and cancel
+/// early — all without changing `run`'s behavior, since `run` is implemented in
+/// terms of these methods.
+#[cfg(not(feature = "parallel"))]
+pub struct SimpleGaRun<G, F = f64>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+{
+    population: Population<G, F>,
+    best_individual: Individual<G, F>,
+    evaluations: usize,
+    fitness_history: Vec<f64>,
+    stats: EvolutionStats,
+    start_time: Instant,
+    terminated: bool,
+}
+
+#[cfg(not(feature = "parallel"))]
+impl<G, F> SimpleGaRun<G, F>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+{
+    /// Number of generations completed so far.
+    pub fn generation(&self) -> usize {
+        self.population.generation()
+    }
+
+    /// Total fitness evaluations performed so far.
+    pub fn evaluations(&self) -> usize {
+        self.evaluations
+    }
+
+    /// Best fitness found so far (as `f64`).
+    pub fn best_fitness(&self) -> f64 {
+        self.best_individual.fitness_value().to_f64()
+    }
+
+    /// The best genome found so far.
+    pub fn best_genome(&self) -> &G {
+        &self.best_individual.genome
+    }
+
+    /// Per-generation best-so-far fitness trajectory (index 0 is generation 0).
+    pub fn fitness_history(&self) -> &[f64] {
+        &self.fitness_history
+    }
+
+    /// `true` once the termination criterion has fired.
+    pub fn is_terminated(&self) -> bool {
+        self.terminated
+    }
+
+    /// Clone the best `k` genomes in the current population (best first).
+    ///
+    /// Used to select emigrants for island-model migration (AUDIT EV-77).
+    pub fn best_genomes(&self, k: usize) -> Vec<G> {
+        let mut sorted = self.population.clone();
+        sorted.sort_by_fitness();
+        sorted
+            .iter()
+            .take(k)
+            .map(|ind| ind.genome.clone())
+            .collect()
     }
 }
 
@@ -1444,6 +1622,94 @@ mod tests {
         ); // Sphere is negated, so closer to 0 is better
         assert!(result.generations <= 100);
         assert!(result.evaluations > 0);
+    }
+
+    // regression: EV-34 — the incremental stepping API (init_run / step_generation
+    // / finish_run) must reproduce run() exactly, since run() is implemented in
+    // terms of it. Only compiled in the non-parallel build where the API exists.
+    #[cfg(not(feature = "parallel"))]
+    #[test]
+    fn test_step_api_matches_run() {
+        use rand::SeedableRng;
+
+        let build = || {
+            SimpleGABuilder::new()
+                .population_size(30)
+                .bounds(MultiBounds::symmetric(5.12, 6))
+                .selection(TournamentSelection::new(3))
+                .crossover(SbxCrossover::new(20.0))
+                .mutation(PolynomialMutation::new(20.0))
+                .fitness(Sphere::new(6))
+                .max_generations(25)
+                .build()
+                .unwrap()
+        };
+
+        // One-shot run().
+        let ga_a = build();
+        let mut rng_a = rand::rngs::StdRng::seed_from_u64(2024);
+        let run_result = ga_a.run(&mut rng_a).unwrap();
+
+        // Manual stepping with the same seed.
+        let ga_b = build();
+        let mut rng_b = rand::rngs::StdRng::seed_from_u64(2024);
+        let mut state = ga_b.init_run(&mut rng_b).unwrap();
+        let mut steps = 0;
+        while ga_b.step_generation(&mut state, &mut rng_b).unwrap() {
+            steps += 1;
+        }
+        assert!(state.is_terminated());
+        assert_eq!(steps, 25, "should take exactly max_generations steps");
+        let step_result = ga_b.finish_run(state);
+
+        assert_eq!(run_result.generations, step_result.generations);
+        assert_eq!(run_result.evaluations, step_result.evaluations);
+        assert_eq!(run_result.best_fitness, step_result.best_fitness);
+        assert_eq!(
+            run_result.best_genome.genes(),
+            step_result.best_genome.genes()
+        );
+    }
+
+    // regression: EV-77 — migration helpers used by the WASM island model.
+    #[cfg(not(feature = "parallel"))]
+    #[test]
+    fn test_inject_migrants_replaces_worst() {
+        use rand::SeedableRng;
+
+        let ga = SimpleGABuilder::new()
+            .population_size(20)
+            .bounds(MultiBounds::symmetric(5.12, 4))
+            .selection(TournamentSelection::new(3))
+            .crossover(SbxCrossover::new(20.0))
+            .mutation(PolynomialMutation::new(20.0))
+            .fitness(Sphere::new(4))
+            .max_generations(10)
+            .build()
+            .unwrap();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut state = ga.init_run(&mut rng).unwrap();
+        for _ in 0..3 {
+            ga.step_generation(&mut state, &mut rng).unwrap();
+        }
+
+        let evals_before = state.evaluations();
+        // The optimum for the (negated) Sphere is the origin; inject it and the
+        // best-so-far must improve to ~0 and the evaluation count must rise.
+        let optimum = RealVector::new(vec![0.0; 4]);
+        ga.inject_migrants(&mut state, vec![optimum]);
+
+        assert_eq!(state.evaluations(), evals_before + 1);
+        assert!(
+            state.best_fitness() > -1e-9,
+            "injected optimum should become the best (got {})",
+            state.best_fitness()
+        );
+
+        // best_genomes returns clones of the top individuals.
+        let top = state.best_genomes(2);
+        assert_eq!(top.len(), 2);
     }
 
     #[test]
