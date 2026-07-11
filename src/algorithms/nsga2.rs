@@ -39,35 +39,70 @@ pub trait MultiObjectiveFitness<G> {
     fn evaluate(&self, genome: &G) -> Vec<f64>;
 }
 
-/// Implement MultiObjectiveFitness for closures
+/// Adapts a closure into a [`MultiObjectiveFitness`] with an explicit objective
+/// count.
+///
+/// A bare `Fn(&G) -> Vec<f64>` cannot report how many objectives it produces,
+/// so the previous blanket impl hardcoded `num_objectives() == 2`, silently
+/// mis-reporting the count for any 3+ objective problem (EV-85). This wrapper
+/// requires the caller to state the true objective count at construction.
+///
+/// ```
+/// use fugue_evo::algorithms::nsga2::{ClosureMultiObjective, MultiObjectiveFitness};
+/// use fugue_evo::genome::real_vector::RealVector;
+/// use fugue_evo::genome::traits::RealValuedGenome;
+///
+/// let fitness = ClosureMultiObjective::new(3, |g: &RealVector| {
+///     let x = g.genes()[0];
+///     vec![x, x * x, x + 1.0]
+/// });
+/// assert_eq!(fitness.num_objectives(), 3);
+/// ```
+pub struct ClosureMultiObjective<G, F> {
+    num_objectives: usize,
+    f: F,
+    _phantom: std::marker::PhantomData<fn() -> G>,
+}
+
+impl<G, F> ClosureMultiObjective<G, F>
+where
+    F: Fn(&G) -> Vec<f64>,
+{
+    /// Wrap `f`, declaring that it returns `num_objectives` objective values.
+    pub fn new(num_objectives: usize, f: F) -> Self {
+        Self {
+            num_objectives,
+            f,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 #[cfg(feature = "parallel")]
-impl<G, F> MultiObjectiveFitness<G> for F
+impl<G, F> MultiObjectiveFitness<G> for ClosureMultiObjective<G, F>
 where
     F: Fn(&G) -> Vec<f64> + Send + Sync,
 {
     fn num_objectives(&self) -> usize {
-        // This is a limitation - closure doesn't know number of objectives
-        // Users should use the explicit trait implementation for better type safety
-        2 // Default assumption
+        self.num_objectives
     }
 
     fn evaluate(&self, genome: &G) -> Vec<f64> {
-        self(genome)
+        (self.f)(genome)
     }
 }
 
-/// Implement MultiObjectiveFitness for closures
 #[cfg(not(feature = "parallel"))]
-impl<G, F> MultiObjectiveFitness<G> for F
+impl<G, F> MultiObjectiveFitness<G> for ClosureMultiObjective<G, F>
 where
     F: Fn(&G) -> Vec<f64>,
 {
     fn num_objectives(&self) -> usize {
-        2 // Default assumption
+        self.num_objectives
     }
 
     fn evaluate(&self, genome: &G) -> Vec<f64> {
-        self(genome)
+        (self.f)(genome)
     }
 }
 
@@ -234,6 +269,33 @@ pub fn calculate_crowding_distance<G: EvolutionaryGenome>(
     }
 }
 
+/// Recompute crowding distance for every non-dominated front separately.
+///
+/// Crowding distance is only defined *within* a single front (Deb et al. 2002,
+/// Section III-B): the neighbours and the per-objective min/max range must be
+/// taken from members of the same rank. Groups `population` indices by `rank`
+/// (already assigned by [`fast_non_dominated_sort`]) and calls
+/// [`calculate_crowding_distance`] once per front.
+///
+/// Computing crowding over the whole mixed-rank population instead (the former
+/// behaviour, EV-13) interleaves individuals of different fronts, so a member's
+/// neighbours and the range come from the wrong front — corrupting the values
+/// read by binary-tournament parent selection and reported to callers.
+pub fn recompute_crowding_distance_per_front<G: EvolutionaryGenome>(
+    population: &mut [Nsga2Individual<G>],
+) {
+    use std::collections::BTreeMap;
+
+    let mut fronts: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (i, ind) in population.iter().enumerate() {
+        fronts.entry(ind.rank).or_default().push(i);
+    }
+
+    for front in fronts.values() {
+        calculate_crowding_distance(population, front);
+    }
+}
+
 /// Crowded comparison operator
 ///
 /// Returns true if a is better than b (lower rank, or same rank with higher crowding distance)
@@ -311,13 +373,29 @@ where
     }
 
     /// Binary tournament selection with crowded comparison
+    ///
+    /// Draws two *distinct* competitors (sampling without replacement) so a
+    /// candidate never competes against itself, matching Deb's binary
+    /// tournament (EV-84). With a single individual the two competitors are
+    /// unavoidably the same.
     pub fn tournament_select<'a, R: Rng>(
         &self,
         population: &'a [Nsga2Individual<G>],
         rng: &mut R,
     ) -> &'a Nsga2Individual<G> {
-        let i = rng.gen_range(0..population.len());
-        let j = rng.gen_range(0..population.len());
+        let len = population.len();
+        let i = rng.gen_range(0..len);
+        // Draw the second competitor from the remaining `len - 1` indices and
+        // shift past `i`, guaranteeing `j != i` without a rejection loop.
+        let j = if len > 1 {
+            let mut j = rng.gen_range(0..len - 1);
+            if j >= i {
+                j += 1;
+            }
+            j
+        } else {
+            i
+        };
 
         if crowded_comparison(&population[i], &population[j]) {
             &population[i]
@@ -421,9 +499,8 @@ where
             }
         }
 
-        // Update crowding distance for the entire new population
-        let all_indices: Vec<usize> = (0..new_pop.len()).collect();
-        calculate_crowding_distance(&mut new_pop, &all_indices);
+        // Update crowding distance per non-dominated front (EV-13)
+        recompute_crowding_distance_per_front(&mut new_pop);
 
         *population = new_pop;
     }
@@ -442,8 +519,7 @@ where
 
         // Initial non-dominated sort
         fast_non_dominated_sort(&mut population);
-        let all_indices: Vec<usize> = (0..population.len()).collect();
-        calculate_crowding_distance(&mut population, &all_indices);
+        recompute_crowding_distance_per_front(&mut population);
 
         for _ in 0..max_generations {
             self.step(&mut population, fitness, crossover, mutation, rng);
@@ -554,8 +630,8 @@ where
             }
         }
 
-        let all_indices: Vec<usize> = (0..new_pop.len()).collect();
-        calculate_crowding_distance(&mut new_pop, &all_indices);
+        // Update crowding distance per non-dominated front (EV-13)
+        recompute_crowding_distance_per_front(&mut new_pop);
 
         *population = new_pop;
     }
@@ -573,8 +649,7 @@ where
         let mut population = self.initialize_population(fitness, bounds, rng);
 
         fast_non_dominated_sort(&mut population);
-        let all_indices: Vec<usize> = (0..population.len()).collect();
-        calculate_crowding_distance(&mut population, &all_indices);
+        recompute_crowding_distance_per_front(&mut population);
 
         for _ in 0..max_generations {
             self.step_bounded(&mut population, fitness, crossover, mutation, bounds, rng);
@@ -667,6 +742,105 @@ mod tests {
         // Middle point should have finite distance
         assert!(population[1].crowding_distance.is_finite());
         assert!(population[1].crowding_distance > 0.0);
+    }
+
+    #[test]
+    fn test_crowding_distance_per_front() {
+        // regression: EV-13
+        // Two fronts: rank-0 tradeoff front {A,B,C,D} and rank-1 singleton {E}.
+        // Deb (2002) per-front crowding: A,D = inf (front-0 boundaries),
+        // B = C = 4/3, and E = inf (sole member of its own front). The pre-fix
+        // whole-population computation instead gives E a finite value (~0.667)
+        // and shrinks the interior front-0 values.
+        let build = || {
+            vec![
+                Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![1.0, 4.0]), // A
+                Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![2.0, 3.0]), // B
+                Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![3.0, 2.0]), // C
+                Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![4.0, 1.0]), // D
+                Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![3.0, 3.0]), // E
+            ]
+        };
+
+        // Correct: per-front crowding.
+        let mut pop = build();
+        fast_non_dominated_sort(&mut pop);
+        assert_eq!(pop[0].rank, 0);
+        assert_eq!(pop[4].rank, 1, "E is dominated by B and C");
+        recompute_crowding_distance_per_front(&mut pop);
+        assert!(
+            pop[0].crowding_distance.is_infinite(),
+            "A is a front-0 boundary"
+        );
+        assert!(
+            pop[3].crowding_distance.is_infinite(),
+            "D is a front-0 boundary"
+        );
+        assert!(
+            (pop[1].crowding_distance - 4.0 / 3.0).abs() < 1e-9,
+            "B = 4/3"
+        );
+        assert!(
+            (pop[2].crowding_distance - 4.0 / 3.0).abs() < 1e-9,
+            "C = 4/3"
+        );
+        assert!(
+            pop[4].crowding_distance.is_infinite(),
+            "E is the sole member of its front and must be infinite"
+        );
+
+        // The pre-fix whole-population computation wrongly makes E finite.
+        let mut pop_all = build();
+        fast_non_dominated_sort(&mut pop_all);
+        let all: Vec<usize> = (0..pop_all.len()).collect();
+        calculate_crowding_distance(&mut pop_all, &all);
+        assert!(
+            pop_all[4].crowding_distance.is_finite(),
+            "whole-population crowding (pre-fix behaviour) makes E finite"
+        );
+    }
+
+    #[test]
+    fn test_tournament_select_draws_distinct_competitors() {
+        // regression: EV-84
+        // With a size-2 population where individual 0 strictly dominates
+        // individual 1, a distinct binary tournament ALWAYS returns the
+        // rank-0 individual. The pre-fix code drew i and j independently, so
+        // with probability 1/4 it drew i == j == 1 and returned the worse
+        // individual; over many trials that surfaces reliably.
+        use rand::SeedableRng;
+
+        let mut population = vec![
+            Nsga2Individual::<RealVector>::new(RealVector::new(vec![0.0]), vec![0.0, 0.0]),
+            Nsga2Individual::<RealVector>::new(RealVector::new(vec![1.0]), vec![1.0, 1.0]),
+        ];
+        fast_non_dominated_sort(&mut population);
+        assert_eq!(population[0].rank, 0);
+        assert_eq!(population[1].rank, 1);
+
+        let nsga2: Nsga2<RealVector, Zdt1, SbxCrossover, PolynomialMutation> = Nsga2::new(2);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+        for _ in 0..2000 {
+            let selected = nsga2.tournament_select(&population, &mut rng);
+            assert_eq!(
+                selected.rank, 0,
+                "a distinct tournament must never return the dominated individual"
+            );
+        }
+    }
+
+    #[test]
+    fn test_closure_multiobjective_reports_true_count() {
+        // regression: EV-85 - closure fitness reports its true objective count.
+        let fitness = ClosureMultiObjective::new(3, |g: &RealVector| {
+            let x = g.genes()[0];
+            vec![x, x * x, x + 1.0]
+        });
+        assert_eq!(fitness.num_objectives(), 3);
+        assert_eq!(
+            fitness.evaluate(&RealVector::new(vec![2.0])),
+            vec![2.0, 4.0, 3.0]
+        );
     }
 
     #[test]
