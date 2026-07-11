@@ -247,19 +247,27 @@ where
         self.aggregator.set_generation(self.generation);
     }
 
-    /// Update fitness estimate for a candidate
+    /// Update fitness estimate for a candidate.
+    ///
+    /// This is a pure setter: it does **not** increment `evaluation_count`.
+    /// Evaluation counting is owned solely by the caller (see
+    /// `InteractiveGA::provide_response`), which counts each presented candidate
+    /// exactly once per response. Previously this method also called
+    /// `record_evaluation()`, which — combined with the caller's explicit loop —
+    /// double-counted every evaluation (EV-26 / EV-64).
     pub fn update_fitness(&mut self, id: CandidateId, fitness: f64) {
         if let Some(candidate) = self.get_candidate_mut(id) {
             candidate.set_fitness(fitness);
-            candidate.record_evaluation();
         }
     }
 
-    /// Update fitness with full uncertainty information
+    /// Update fitness with full uncertainty information.
+    ///
+    /// Pure setter; does **not** increment `evaluation_count` (see
+    /// [`InteractiveSession::update_fitness`]).
     pub fn update_fitness_with_uncertainty(&mut self, id: CandidateId, estimate: FitnessEstimate) {
         if let Some(candidate) = self.get_candidate_mut(id) {
             candidate.set_fitness_with_uncertainty(estimate);
-            candidate.record_evaluation();
         }
     }
 

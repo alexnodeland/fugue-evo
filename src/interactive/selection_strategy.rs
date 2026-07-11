@@ -219,8 +219,9 @@ impl SelectionStrategy {
                         // First pass: just pick two under-evaluated
                         indices[1].0
                     } else {
-                        // Pick most informative pair among adequately covered
-                        self.find_informative_pair(candidates, aggregator, rng)
+                        // Pick most informative partner among adequately covered,
+                        // excluding `a` so we can never return a self-pair (EV-68).
+                        self.find_informative_pair(candidates, aggregator, Some(a), rng)
                     }
                 } else {
                     return None;
@@ -296,25 +297,30 @@ impl SelectionStrategy {
     where
         G: EvolutionaryGenome,
     {
+        // Normalize by the batch's mean variance so the coverage bonus is on a
+        // comparable, model-agnostic scale (EV-69).
+        let variances: Vec<f64> = candidates
+            .iter()
+            .map(|c| {
+                aggregator
+                    .get_fitness_estimate(&c.id)
+                    .map(|e| e.variance)
+                    .unwrap_or(f64::INFINITY)
+            })
+            .collect();
+        let var_scale = mean_variance_scale(&variances);
+
         let mut scores: Vec<(usize, f64)> = candidates
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let uncertainty = aggregator
-                    .get_fitness_estimate(&c.id)
-                    .map(|e| {
-                        if e.variance.is_infinite() {
-                            f64::MAX
-                        } else {
-                            e.variance
-                        }
-                    })
-                    .unwrap_or(f64::MAX);
-
-                // Bonus for fewer evaluations
-                let coverage_bonus = 1.0 / (c.evaluation_count as f64 + 1.0);
-
-                let score = uncertainty_weight * uncertainty + coverage_bonus;
+                let score = normalized_uncertainty_score(
+                    variances[i],
+                    c.evaluation_count,
+                    var_scale,
+                    uncertainty_weight,
+                    1.0,
+                );
                 (i, score)
             })
             .collect();
@@ -390,16 +396,8 @@ impl SelectionStrategy {
                 }
 
                 let r: f64 = rng.gen();
-                let mut cumsum = 0.0;
-                let mut chosen_idx = 0;
-
-                for (idx, (_, w)) in remaining.iter().enumerate() {
-                    cumsum += w;
-                    if r < cumsum {
-                        chosen_idx = idx;
-                        break;
-                    }
-                }
+                let weights_now: Vec<f64> = remaining.iter().map(|(_, w)| *w).collect();
+                let chosen_idx = inverse_cdf_pick(&weights_now, r);
 
                 let (i, _) = remaining.remove(chosen_idx);
                 selected.push(i);
@@ -473,18 +471,15 @@ impl SelectionStrategy {
                 .collect();
             let total: f64 = weights.iter().sum();
 
+            // Same inverse-CDF sampler as the batch path, with the last-index
+            // residual fallback (EV-100) so the two paths behave consistently.
+            let normalized: Vec<f64> = weights.iter().map(|w| w / total).collect();
             let r: f64 = rng.gen();
-            let mut cumsum = 0.0;
-
-            for ((pair, _), w) in pair_scores.iter().zip(weights.iter()) {
-                cumsum += w / total;
-                if r < cumsum {
-                    return Some(*pair);
-                }
-            }
+            let idx = inverse_cdf_pick(&normalized, r);
+            return Some(pair_scores[idx].0);
         }
 
-        // Return highest scoring pair
+        // Deterministic (temperature <= 0): return highest scoring pair.
         pair_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Some(pair_scores[0].0)
     }
@@ -501,30 +496,35 @@ impl SelectionStrategy {
     where
         G: EvolutionaryGenome,
     {
+        // Normalize by the batch's mean variance so the exploration bonus is on a
+        // comparable, model-agnostic scale (EV-69).
+        let variances: Vec<f64> = candidates
+            .iter()
+            .map(|c| {
+                aggregator
+                    .get_fitness_estimate(&c.id)
+                    .map(|e| e.variance)
+                    .unwrap_or(f64::INFINITY)
+            })
+            .collect();
+        let var_scale = mean_variance_scale(&variances);
+
         let mut scores: Vec<(usize, f64)> = candidates
             .iter()
             .enumerate()
             .map(|(i, c)| {
                 let score = if c.evaluation_count < min_evaluations {
-                    // Must evaluate - infinite priority
+                    // Must evaluate - infinite priority (ranks above any covered
+                    // candidate, whose normalized score is <= UNOBSERVED + bonus).
                     f64::MAX
                 } else {
-                    // Base uncertainty
-                    let uncertainty = aggregator
-                        .get_fitness_estimate(&c.id)
-                        .map(|e| {
-                            if e.variance.is_infinite() {
-                                1e6
-                            } else {
-                                e.variance
-                            }
-                        })
-                        .unwrap_or(1e6);
-
-                    // Exploration bonus for fewer evaluations
-                    let bonus = exploration_bonus / (c.evaluation_count as f64 + 1.0);
-
-                    uncertainty + bonus
+                    normalized_uncertainty_score(
+                        variances[i],
+                        c.evaluation_count,
+                        var_scale,
+                        1.0,
+                        exploration_bonus,
+                    )
                 };
                 (i, score)
             })
@@ -539,11 +539,15 @@ impl SelectionStrategy {
             .collect()
     }
 
-    /// Find an informative pair among adequately covered candidates
+    /// Find an informative partner among adequately covered candidates.
+    ///
+    /// When `exclude` is `Some(a)`, index `a` is never returned, so callers that
+    /// have already committed to `a` cannot receive a self-pair `(a, a)` (EV-68).
     fn find_informative_pair<G, R>(
         &self,
         candidates: &[Candidate<G>],
         aggregator: &FitnessAggregator,
+        exclude: Option<usize>,
         rng: &mut R,
     ) -> usize
     where
@@ -559,6 +563,7 @@ impl SelectionStrategy {
         let mut scores: Vec<(usize, f64)> = candidates
             .iter()
             .enumerate()
+            .filter(|(i, _)| Some(*i) != exclude)
             .map(|(i, _)| {
                 let score = estimates
                     .iter()
@@ -570,6 +575,13 @@ impl SelectionStrategy {
             })
             .collect();
 
+        // With `exclude` set and >= 2 candidates the caller guarantees at least
+        // one remaining index; fall back to the excluded index only if somehow
+        // nothing else exists (never on the reachable path).
+        if scores.is_empty() {
+            return exclude.unwrap_or(0);
+        }
+
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Add some randomness to avoid always picking the same
@@ -579,33 +591,128 @@ impl SelectionStrategy {
     }
 }
 
-/// Compute entropy of pairwise comparison outcome
+/// Inverse-CDF sample over a (normalized) weight vector.
 ///
-/// Entropy is maximized when P(A beats B) = 0.5 (most uncertain)
+/// Returns the first index whose cumulative weight exceeds `r`. If floating-point
+/// round-off leaves the cumulative sum just below `r` so that no prefix qualifies,
+/// it falls back to the **last** index — the standard inverse-CDF residual choice
+/// (EV-100) — instead of the old behavior of defaulting to index 0, which biased
+/// selection toward the first remaining candidate.
+fn inverse_cdf_pick(weights: &[f64], r: f64) -> usize {
+    let mut cumsum = 0.0;
+    for (idx, w) in weights.iter().enumerate() {
+        cumsum += w;
+        if r < cumsum {
+            return idx;
+        }
+    }
+    weights.len().saturating_sub(1)
+}
+
+/// Score magnitude assigned to an unobserved (infinite-variance) candidate after
+/// normalization.
+///
+/// Large enough to dominate any normalized *finite* uncertainty (which is ~O(1)
+/// after dividing by the mean variance), so unobserved candidates keep top
+/// priority, but finite so the coverage bonus can still order equally-unobserved
+/// candidates and no `f64::MAX + bonus` overflow occurs.
+const UNOBSERVED_NORMALIZED_UNCERTAINTY: f64 = 1e6;
+
+/// Mean of the finite, positive variances in `variances` (EV-69).
+///
+/// Used to put raw model variances on a comparable, model-agnostic scale before
+/// an exploration/coverage bonus is added. Returns `1.0` when nothing finite is
+/// available to average, leaving the bonus as the sole differentiator.
+fn mean_variance_scale(variances: &[f64]) -> f64 {
+    let (sum, count) = variances
+        .iter()
+        .filter(|v| v.is_finite() && **v > 0.0)
+        .fold((0.0, 0usize), |(s, c), v| (s + v, c + 1));
+    if count == 0 {
+        1.0
+    } else {
+        sum / count as f64
+    }
+}
+
+/// Combine a candidate's raw variance and evaluation count into an acquisition
+/// score with a model-agnostic scale (EV-69).
+///
+/// The variance is divided by the batch's mean variance (`var_scale`) so the
+/// additive exploration/coverage bonus has a comparable influence regardless of
+/// the aggregation model's native variance magnitude (DirectRating ~O(1), Elo
+/// ~O(10²), ImplicitRanking ~O(10⁻²)). Previously the bonus was added to the raw
+/// variance and was therefore either inert or dominant depending on the model.
+fn normalized_uncertainty_score(
+    variance: f64,
+    eval_count: usize,
+    var_scale: f64,
+    uncertainty_weight: f64,
+    bonus_coeff: f64,
+) -> f64 {
+    let normalized = if variance.is_finite() {
+        variance / var_scale
+    } else {
+        UNOBSERVED_NORMALIZED_UNCERTAINTY
+    };
+    let bonus = bonus_coeff / (eval_count as f64 + 1.0);
+    uncertainty_weight * normalized + bonus
+}
+
+/// Maximum binary entropy, in **nats** (`ln 2`).
+///
+/// This is the sentinel returned for pairs whose comparison outcome is entirely
+/// unknown (an unobserved candidate / infinite variance). Keeping it equal to
+/// the true maximum of [`binary_entropy`] — rather than the mismatched `1.0`
+/// (which is 1 *bit*, not 1 nat) — means unobserved and observed pair scores are
+/// on the same scale (EV-99). Unobserved pairs still get priority through the
+/// coverage/exploration terms of the selection strategies, not through an
+/// inflated entropy.
+const MAX_BINARY_ENTROPY_NATS: f64 = std::f64::consts::LN_2;
+
+/// Compute the entropy (in nats) of a pairwise comparison outcome.
+///
+/// Entropy is maximized (`ln 2`) when `P(A beats B) = 0.5` (most uncertain) and
+/// approaches `0` as the outcome becomes determined.
 fn pairwise_entropy(a: Option<&FitnessEstimate>, b: Option<&FitnessEstimate>) -> f64 {
     match (a, b) {
         (Some(est_a), Some(est_b)) => {
-            // Approximate P(A beats B) using normal approximation
             let mean_diff = est_a.mean - est_b.mean;
             let var_diff = est_a.variance + est_b.variance;
 
-            if var_diff.is_infinite() || var_diff <= 0.0 {
-                // Maximum entropy when we know nothing
-                return 1.0;
+            if var_diff.is_infinite() {
+                // At least one estimate is completely unobserved -> outcome
+                // genuinely unknown, so report the maximum entropy sentinel.
+                return MAX_BINARY_ENTROPY_NATS;
+            }
+
+            if var_diff <= 0.0 {
+                // Both candidates are perfectly measured (EV-70). The outcome is
+                // then fully DETERMINED by the means: entropy ~0 unless the means
+                // also tie (a genuine coin flip). Returning the max here — as the
+                // old code did — wrongly made the strategy spend comparisons on
+                // pairs it is already certain about.
+                return if mean_diff.abs() < f64::EPSILON {
+                    MAX_BINARY_ENTROPY_NATS
+                } else {
+                    0.0
+                };
             }
 
             // P(A > B) ≈ Φ((μ_A - μ_B) / sqrt(σ²_A + σ²_B))
             let z = mean_diff / var_diff.sqrt();
             let p = normal_cdf(z);
 
-            // Binary entropy: -p*log(p) - (1-p)*log(1-p)
             binary_entropy(p)
         }
-        _ => 1.0, // Maximum entropy for unobserved
+        _ => MAX_BINARY_ENTROPY_NATS, // Unobserved pair
     }
 }
 
-/// Binary entropy: H(p) = -p*log(p) - (1-p)*log(1-p)
+/// Binary entropy in **nats**: `H(p) = -p·ln(p) - (1-p)·ln(1-p)`.
+///
+/// Maximized at `p = 0.5` with value `ln 2 ≈ 0.6931` nats (not `1.0`, which
+/// would be 1 bit / log-base-2). See [`MAX_BINARY_ENTROPY_NATS`].
 fn binary_entropy(p: f64) -> f64 {
     let p = p.clamp(1e-10, 1.0 - 1e-10);
     -(p * p.ln() + (1.0 - p) * (1.0 - p).ln())
@@ -799,5 +906,110 @@ mod tests {
 
         let pair = strategy.select_pair(&candidates, &aggregator, &mut rng);
         assert!(pair.is_none()); // Can't make a pair from 1 candidate
+    }
+
+    #[test]
+    fn test_inverse_cdf_pick_fallback_is_last() {
+        // regression: EV-100 — when the cumulative weight never reaches `r`
+        // (floating-point residual), the fallback must be the LAST index, not 0.
+        let weights = vec![0.3, 0.3, 0.3]; // sums to 0.9 < 1.0
+        assert_eq!(inverse_cdf_pick(&weights, 0.95), 2); // pre-fix returned 0
+                                                         // Normal inverse-CDF behavior still holds.
+        assert_eq!(inverse_cdf_pick(&weights, 0.1), 0);
+        assert_eq!(inverse_cdf_pick(&weights, 0.4), 1);
+        assert_eq!(inverse_cdf_pick(&weights, 0.7), 2);
+    }
+
+    #[test]
+    fn test_entropy_sentinel_is_nats() {
+        // regression: EV-99 — the unobserved/degenerate sentinel must be the max
+        // binary entropy in NATS (ln 2), matching binary_entropy's maximum, not 1.0.
+        assert!((MAX_BINARY_ENTROPY_NATS - std::f64::consts::LN_2).abs() < 1e-12);
+        let unobserved = pairwise_entropy(None, None);
+        assert!((unobserved - binary_entropy(0.5)).abs() < 1e-9);
+        assert!((unobserved - std::f64::consts::LN_2).abs() < 1e-9);
+        assert!(unobserved < 1.0); // ln 2 = 0.693..., not the old 1.0 (bit)
+    }
+
+    #[test]
+    fn test_pairwise_entropy_known_below_unknown() {
+        // regression: EV-70 — a pair of perfectly-known candidates with different
+        // means has a DETERMINED outcome (entropy ~0) and must score BELOW an
+        // unobserved pair (max entropy). The old code returned max entropy for the
+        // zero-variance case, inverting active-learning priority.
+        let known_a = FitnessEstimate::new(9.0, 0.0, 100);
+        let known_b = FitnessEstimate::new(1.0, 0.0, 100);
+        let known = pairwise_entropy(Some(&known_a), Some(&known_b));
+
+        let unknown_a = FitnessEstimate::uninformative(5.0); // infinite variance
+        let unknown_b = FitnessEstimate::uninformative(5.0);
+        let unknown = pairwise_entropy(Some(&unknown_a), Some(&unknown_b));
+
+        assert!(
+            known < unknown,
+            "known {known} should score below unknown {unknown}"
+        );
+        assert!(known < 1e-6, "determined outcome should be ~0, got {known}");
+        // Degenerate: zero variance AND equal means -> genuine coin flip -> max.
+        let tie_a = FitnessEstimate::new(5.0, 0.0, 100);
+        let tie_b = FitnessEstimate::new(5.0, 0.0, 100);
+        assert!(
+            (pairwise_entropy(Some(&tie_a), Some(&tie_b)) - std::f64::consts::LN_2).abs() < 1e-9
+        );
+    }
+
+    #[test]
+    fn test_coverage_aware_never_returns_self_pair() {
+        // regression: EV-68 — CoverageAware select_pair must never return (a, a),
+        // even when the least-evaluated candidate is also the most informative.
+        let mut candidates = make_candidates(2);
+        candidates[0].evaluation_count = 2;
+        candidates[1].evaluation_count = 2; // both >= min_evaluations
+        let aggregator = FitnessAggregator::new(AggregationModel::default());
+        let mut rng = rand::thread_rng();
+        let strategy = SelectionStrategy::CoverageAware {
+            min_evaluations: 1,
+            exploration_bonus: 1.0,
+        };
+        for _ in 0..200 {
+            let (a, b) = strategy
+                .select_pair(&candidates, &aggregator, &mut rng)
+                .unwrap();
+            assert_ne!(a, b, "select_pair returned a self-pair");
+        }
+    }
+
+    #[test]
+    fn test_normalized_uncertainty_scale_invariant() {
+        // regression: EV-69 — the exploration/coverage bonus must have a
+        // model-agnostic influence: scaling ALL variances by a constant must not
+        // change the ranking. Un-normalized scoring flips the ranking instead.
+        let counts = [1usize, 100usize];
+        let variances = [1.0, 1.05];
+        let var_scale = mean_variance_scale(&variances);
+        let s_a = normalized_uncertainty_score(variances[0], counts[0], var_scale, 1.0, 1.0);
+        let s_b = normalized_uncertainty_score(variances[1], counts[1], var_scale, 1.0, 1.0);
+
+        let variances_big: Vec<f64> = variances.iter().map(|v| v * 100.0).collect();
+        let scale_big = mean_variance_scale(&variances_big);
+        let s_a_big =
+            normalized_uncertainty_score(variances_big[0], counts[0], scale_big, 1.0, 1.0);
+        let s_b_big =
+            normalized_uncertainty_score(variances_big[1], counts[1], scale_big, 1.0, 1.0);
+
+        // Ranking preserved across variance scales.
+        assert_eq!(s_a > s_b, s_a_big > s_b_big);
+        assert!(
+            s_a > s_b,
+            "the low-count candidate should win via the bonus"
+        );
+
+        // Contrast: raw variance + fixed bonus flips the ranking under scaling.
+        let raw_a = variances[0] + 1.0 / (counts[0] as f64 + 1.0);
+        let raw_b = variances[1] + 1.0 / (counts[1] as f64 + 1.0);
+        let raw_a_big = variances_big[0] + 1.0 / (counts[0] as f64 + 1.0);
+        let raw_b_big = variances_big[1] + 1.0 / (counts[1] as f64 + 1.0);
+        assert!(raw_a > raw_b); // A wins at small scale...
+        assert!(raw_a_big < raw_b_big); // ...but B wins at large scale (the bug).
     }
 }
