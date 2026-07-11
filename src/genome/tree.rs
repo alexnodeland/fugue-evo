@@ -881,7 +881,10 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
     // as a debug-build panic to catch the bug during development, and fall back to
     // index 0 in release rather than silently indexing out of range on decode.
     fn encode_function(func: &F) -> usize {
-        match F::functions().iter().position(|candidate| candidate == func) {
+        match F::functions()
+            .iter()
+            .position(|candidate| candidate == func)
+        {
             Some(idx) => idx,
             None => {
                 debug_assert!(
@@ -1202,7 +1205,10 @@ mod tests {
                 TreeGenome::new(root, 3);
             let recovered: TreeGenome<ArithmeticTerminal, ArithmeticFunction> =
                 TreeGenome::from_trace(&original.to_trace()).unwrap();
-            assert_eq!(original, recovered, "variant {f:?} lost identity on round-trip");
+            assert_eq!(
+                original, recovered,
+                "variant {f:?} lost identity on round-trip"
+            );
             for vars in [[2.0, 3.0], [-1.5, 0.75]] {
                 let (a, b) = (recovered.evaluate(&vars), original.evaluate(&vars));
                 // Bit-identical (NaN-aware): the same function on the same inputs

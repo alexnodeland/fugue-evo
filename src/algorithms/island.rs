@@ -1019,8 +1019,11 @@ mod tests {
         // carried over unchanged when everyone is an elite.
         island.population.evaluate(&fitness);
         island.population.sort_by_fitness();
-        let before: Vec<RealVector> =
-            island.population.iter().map(|ind| ind.genome.clone()).collect();
+        let before: Vec<RealVector> = island
+            .population
+            .iter()
+            .map(|ind| ind.genome.clone())
+            .collect();
 
         // elitism (25) deliberately exceeds pop (20); this panicked pre-fix.
         let elitism = 25;
@@ -1043,15 +1046,22 @@ mod tests {
         // Every original genome survives (elitism == whole population => no
         // reproduction). Order is preserved because elites are pushed in sorted
         // order and no offspring follow.
-        let after: Vec<RealVector> =
-            island.population.iter().map(|ind| ind.genome.clone()).collect();
+        let after: Vec<RealVector> = island
+            .population
+            .iter()
+            .map(|ind| ind.genome.clone())
+            .collect();
         assert_eq!(
             after.len(),
             before.len(),
             "no offspring should be created when elite_count == pop_len"
         );
         for (a, b) in after.iter().zip(before.iter()) {
-            assert_eq!(a.as_vec(), b.as_vec(), "all elites must be carried unchanged");
+            assert_eq!(
+                a.as_vec(),
+                b.as_vec(),
+                "all elites must be carried unchanged"
+            );
         }
     }
 }

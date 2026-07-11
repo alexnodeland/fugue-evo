@@ -45,7 +45,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // higher-is-better) value, so we flip its sign back here to report the
     // textbook Sphere objective (sum of squares, minimized at 0.0).
     println!("Optimization complete!");
-    println!("  Best fitness (sum of squares): {:.6}", -result.best_fitness);
+    println!(
+        "  Best fitness (sum of squares): {:.6}",
+        -result.best_fitness
+    );
     println!("  Generations:  {}", result.generations);
     println!("  Evaluations:  {}", result.evaluations);
     println!("\nBest solution:");
