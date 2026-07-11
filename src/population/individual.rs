@@ -82,7 +82,21 @@ where
     }
 
     /// Set the fitness value
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fitness is non-finite (`NaN`). A `NaN` fitness is always a
+    /// bug in the fitness function (e.g. a division by zero or `log` of a
+    /// negative number) and silently corrupts every downstream comparison
+    /// (`best`/`worst`/`sort_by_fitness`), so it is rejected at the source
+    /// rather than propagated (EV-07). Infinities are permitted (e.g.
+    /// `ParetoFitness` uses `+inf` crowding distances).
     pub fn set_fitness(&mut self, fitness: F) {
+        assert!(
+            !fitness.to_f64().is_nan(),
+            "Individual::set_fitness received a NaN fitness value; \
+             fitness functions must return a finite (non-NaN) value"
+        );
         self.fitness = Some(fitness);
     }
 
@@ -97,8 +111,27 @@ where
     }
 
     /// Get a mutable reference to the genome
+    ///
+    /// Mutating the genome invalidates any cached fitness (EV-28): the stored
+    /// value was computed for the *previous* genome, so this clears
+    /// `self.fitness` and resets the evaluated flag. Callers that only need
+    /// read access should use [`genome`](Self::genome) to preserve the cache.
+    ///
+    /// Note: the `genome` field is public for backwards compatibility; direct
+    /// assignment (`individual.genome = ...`) bypasses this invalidation, so
+    /// prefer [`genome_mut`](Self::genome_mut) or [`set_genome`](Self::set_genome).
     pub fn genome_mut(&mut self) -> &mut G {
+        self.fitness = None;
         &mut self.genome
+    }
+
+    /// Replace the genome, clearing any cached fitness
+    ///
+    /// Like [`genome_mut`](Self::genome_mut), this invalidates the cached
+    /// fitness so the new genome is re-evaluated (EV-28).
+    pub fn set_genome(&mut self, genome: G) {
+        self.genome = genome;
+        self.fitness = None;
     }
 
     /// Check if this individual is better than another
@@ -243,5 +276,38 @@ mod tests {
 
         individual.genome_mut().genes_mut()[0] = 100.0;
         assert_eq!(individual.genome()[0], 100.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "NaN")]
+    fn test_set_fitness_rejects_nan() {
+        // regression: EV-07 -- reject non-finite fitness at the source.
+        let mut individual: Individual<RealVector> = Individual::new(RealVector::new(vec![1.0]));
+        individual.set_fitness(f64::NAN);
+    }
+
+    #[test]
+    fn test_genome_mut_clears_cached_fitness() {
+        // regression: EV-28 -- mutating the genome must invalidate the cache.
+        let genome = RealVector::new(vec![1.0, 2.0, 3.0]);
+        let mut individual = Individual::with_fitness(genome, 42.0);
+        assert!(individual.is_evaluated());
+
+        individual.genome_mut().genes_mut()[0] = 100.0;
+        assert!(
+            !individual.is_evaluated(),
+            "cached fitness must be cleared after genome_mut()"
+        );
+    }
+
+    #[test]
+    fn test_set_genome_clears_cached_fitness() {
+        // regression: EV-28 -- set_genome must invalidate the cache too.
+        let mut individual = Individual::with_fitness(RealVector::new(vec![1.0]), 42.0);
+        assert!(individual.is_evaluated());
+
+        individual.set_genome(RealVector::new(vec![2.0]));
+        assert!(!individual.is_evaluated());
+        assert_eq!(individual.genome()[0], 2.0);
     }
 }
