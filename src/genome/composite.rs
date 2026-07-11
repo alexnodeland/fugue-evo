@@ -194,7 +194,7 @@ where
 fn namespace_into(src: &Trace, namespace: &str, dst: &mut Trace) {
     for (addr, choice) in &src.choices {
         dst.insert_choice(
-            Address(format!("{}/{}", namespace, addr.0)),
+            Address::new(format!("{}/{}", namespace, addr.as_str())),
             choice.value.clone(),
             choice.logp,
         );
@@ -209,8 +209,12 @@ fn extract_namespace(trace: &Trace, namespace: &str) -> (Trace, bool) {
     let mut sub = Trace::default();
     let mut found = false;
     for (addr, choice) in &trace.choices {
-        if let Some(rest) = addr.0.strip_prefix(&prefix) {
-            sub.insert_choice(Address(rest.to_string()), choice.value.clone(), choice.logp);
+        if let Some(rest) = addr.as_str().strip_prefix(&prefix) {
+            sub.insert_choice(
+                Address::new(rest.to_string()),
+                choice.value.clone(),
+                choice.logp,
+            );
             found = true;
         }
     }

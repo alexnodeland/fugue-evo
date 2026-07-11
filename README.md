@@ -125,34 +125,35 @@ Parallel evolution with multiple subpopulations and periodic migration. Supports
 
 ## Development
 
-fugue-evo depends on the published `fugue-ppl = "0.1.0"` release from
-crates.io, not a `path` dependency onto the sibling `fugue` checkout, even
-though both crates live side by side under the same `fugue-ecosystem` parent
-directory. This is a deliberate choice, not an oversight: `fugue-evo` and
-`fugue` are developed and audited independently and often have in-progress,
-momentarily-uncompilable work on `fugue`'s `main` branch at any given time, so
-hard-wiring the build to `../fugue`'s working tree would make `fugue-evo`'s
-own build only as stable as whatever `fugue` happens to look like on disk
-right now (verified: pointing this dependency at `path = "../fugue"` compiled
-cleanly at one point during this remediation, then started failing minutes
-later from unrelated concurrent edits to `fugue`, with no change on the
-`fugue-evo` side — exactly the fragility a hard path dependency should avoid
-for a crate published independently to crates.io).
-
-To develop `fugue-evo` and `fugue` together and pick up local edits to
-`../fugue` immediately (without publishing `fugue-ppl` first), add a
-`[patch]` override to your own **local, uncommitted** top-level `Cargo.toml`
-(or an `--config` override) rather than to this crate's tracked manifest:
+fugue-evo depends on the co-developed sibling `fugue` crate via a path
+dependency, so its probabilistic-programming bridge is built and tested
+against the actual co-developed source rather than a registry release the two
+crates were never exercised against together:
 
 ```toml
-[patch.crates-io]
-fugue-ppl = { path = "../fugue" }
+[dependencies]
+fugue-ppl = { path = "../fugue", version = "0.1.0" }
 ```
 
-Run `cargo check` afterward to confirm your local `fugue` checkout actually
-still satisfies `fugue-evo`'s usage before relying on it; drop the `[patch]`
-block (or just don't commit it) to fall back to the pinned, known-good
-registry release.
+Both crates live side by side under the same `fugue-ecosystem` parent
+directory and are audited together (audit finding EV-30). This became the
+committed default once `fugue`'s own 2026-07 audit remediation landed with a
+green full-test gate; earlier in the remediation the sibling checkout was
+frequently mid-edit and momentarily uncompilable, which is why the dependency
+had been pinned to the published registry release until the sibling stabilized.
+The `version = "0.1.0"` field is honored if `fugue-ppl` is ever resolved from
+crates.io instead (e.g. the sibling checkout is absent).
+
+To build against the published crates.io release rather than your local
+`../fugue` checkout, replace the dependency with:
+
+```toml
+[dependencies]
+fugue-ppl = "0.1.0"
+```
+
+Run `cargo check` after switching either way to confirm the resolved `fugue`
+version actually satisfies `fugue-evo`'s usage.
 
 ## License
 
