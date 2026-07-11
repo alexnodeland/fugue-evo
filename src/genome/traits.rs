@@ -51,7 +51,32 @@ pub trait EvolutionaryGenome: Clone + Send + Sync + Serialize + DeserializeOwned
     /// Compute dimensionality for adaptive operators
     fn dimension(&self) -> usize;
 
-    /// Generate a random genome within the given bounds
+    /// Generate a random genome within the given bounds.
+    ///
+    /// # Interpretation of `bounds`
+    ///
+    /// `MultiBounds` semantically describes a set of per-dimension numeric
+    /// `[min, max]` intervals, but only the real-valued genome types
+    /// ([`RealVector`](crate::genome::real_vector::RealVector),
+    /// [`DynamicRealVector`](crate::genome::dynamic_real_vector::DynamicRealVector))
+    /// actually consult the `min`/`max` fields. For every other built-in genome
+    /// type, **only `bounds.dimension()` (the *count* of intervals) is
+    /// consulted** — it is repurposed as a stand-in for the genome's structural
+    /// size, and the `min`/`max` values are ignored:
+    ///
+    /// - [`BitString`](crate::genome::bit_string::BitString): `dimension()` is
+    ///   the number of bits. Prefer
+    ///   [`BitString::generate_with_len`](crate::genome::bit_string::BitString::generate_with_len).
+    /// - [`Permutation`](crate::genome::permutation::Permutation): `dimension()`
+    ///   is the permutation length. Prefer
+    ///   [`Permutation::generate_with_len`](crate::genome::permutation::Permutation::generate_with_len).
+    /// - [`TreeGenome`](crate::genome::tree::TreeGenome): `dimension()` is
+    ///   remapped to a maximum tree depth. Prefer
+    ///   [`TreeGenome::generate_with_depth`](crate::genome::tree::TreeGenome::generate_with_depth).
+    ///
+    /// When you are not generating real-valued genomes, use the per-type honest
+    /// constructors listed above; they make the size/depth parameter explicit
+    /// instead of overloading `MultiBounds`.
     fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self;
 
     /// Get the genome's genes as a slice (for numeric genomes)
@@ -64,10 +89,35 @@ pub trait EvolutionaryGenome: Clone + Send + Sync + Serialize + DeserializeOwned
         None
     }
 
-    /// Distance metric between two genomes (default: 0.0)
-    fn distance(&self, _other: &Self) -> f64 {
-        0.0
-    }
+    /// Distance metric between two genomes.
+    ///
+    /// This is a **required** method: there is deliberately no default
+    /// implementation, because a silent fallback (e.g. always `0.0`) would make
+    /// every pair of genomes look identical and silently break diversity-driven
+    /// mechanisms (niching, crowding, speciation).
+    ///
+    /// # Panics
+    ///
+    /// Implementations panic when the two genomes are structurally incompatible
+    /// (for fixed-structure genomes, this means different lengths / dimensions).
+    /// A structural mismatch is an invariant violation by the caller rather than
+    /// a recoverable condition. Use [`try_distance`](Self::try_distance) when a
+    /// fallible comparison is required.
+    ///
+    /// (Genome types whose comparison is meaningfully defined across differing
+    /// structures — e.g. [`DynamicRealVector`](crate::genome::dynamic_real_vector::DynamicRealVector),
+    /// which adds a length penalty, and [`TreeGenome`](crate::genome::tree::TreeGenome),
+    /// which compares size/depth — never panic.)
+    fn distance(&self, other: &Self) -> f64;
+
+    /// Fallible distance metric.
+    ///
+    /// Returns `Err(GenomeError::DimensionMismatch { .. })` (or another
+    /// [`GenomeError`]) when the two genomes are structurally incompatible,
+    /// instead of panicking as [`distance`](Self::distance) does. For genome
+    /// types whose distance is defined across differing structures this always
+    /// returns `Ok`.
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError>;
 
     /// Get the address prefix used for trace storage (default: "gene")
     fn trace_prefix() -> &'static str {
@@ -213,12 +263,24 @@ mod tests {
         }
 
         fn distance(&self, other: &Self) -> f64 {
-            self.genes
+            self.try_distance(other)
+                .expect("distance: genomes have mismatched dimension")
+        }
+
+        fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+            if self.genes.len() != other.genes.len() {
+                return Err(GenomeError::DimensionMismatch {
+                    expected: self.genes.len(),
+                    actual: other.genes.len(),
+                });
+            }
+            Ok(self
+                .genes
                 .iter()
                 .zip(other.genes.iter())
                 .map(|(a, b)| (a - b).powi(2))
                 .sum::<f64>()
-                .sqrt()
+                .sqrt())
         }
     }
 
@@ -363,6 +425,26 @@ mod tests {
             Self { bits }
         }
 
+        fn distance(&self, other: &Self) -> f64 {
+            self.try_distance(other)
+                .expect("distance: genomes have mismatched dimension")
+        }
+
+        fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+            if self.bits.len() != other.bits.len() {
+                return Err(GenomeError::DimensionMismatch {
+                    expected: self.bits.len(),
+                    actual: other.bits.len(),
+                });
+            }
+            Ok(self
+                .bits
+                .iter()
+                .zip(other.bits.iter())
+                .filter(|(a, b)| a != b)
+                .count() as f64)
+        }
+
         fn trace_prefix() -> &'static str {
             "bit"
         }
@@ -448,6 +530,27 @@ mod tests {
             let mut perm: Vec<usize> = (0..n).collect();
             perm.shuffle(rng);
             Self { perm }
+        }
+
+        fn distance(&self, other: &Self) -> f64 {
+            self.try_distance(other)
+                .expect("distance: genomes have mismatched dimension")
+        }
+
+        fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+            if self.perm.len() != other.perm.len() {
+                return Err(GenomeError::DimensionMismatch {
+                    expected: self.perm.len(),
+                    actual: other.perm.len(),
+                });
+            }
+            // Hamming-style positional disagreement (sufficient for the mock).
+            Ok(self
+                .perm
+                .iter()
+                .zip(other.perm.iter())
+                .filter(|(a, b)| a != b)
+                .count() as f64)
         }
 
         fn trace_prefix() -> &'static str {

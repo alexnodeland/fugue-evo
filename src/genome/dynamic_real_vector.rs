@@ -216,6 +216,88 @@ impl DynamicRealVector {
             max_length: self.max_length,
         }
     }
+
+    /// Fallibly generate a random variable-length vector from `bounds`.
+    ///
+    /// `bounds.dimension()` is interpreted as the maximum length (minimum length
+    /// 1) and the per-dimension `[min, max]` intervals bound the sampled gene
+    /// values. Returns `Err(GenomeError::InvalidStructure)` for empty
+    /// (0-dimension) `bounds`, which cannot yield a valid non-empty genome —
+    /// this replaces the previous panic on the inverted range `1..=0`.
+    pub fn try_generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Result<Self, GenomeError> {
+        let max_len = bounds.dimension();
+        if max_len == 0 {
+            return Err(GenomeError::InvalidStructure(
+                "Cannot generate a DynamicRealVector from empty (0-dimension) bounds".to_string(),
+            ));
+        }
+        let min_len = 1;
+        let length = if min_len == max_len {
+            min_len
+        } else {
+            rng.gen_range(min_len..=max_len)
+        };
+
+        let genes: Vec<f64> = (0..length)
+            .map(|i| {
+                // `length <= max_len == dimension()`, so `get(i)` is always Some;
+                // fall back to the first bound defensively.
+                let b = bounds
+                    .get(i)
+                    .or_else(|| bounds.get(0))
+                    .expect("bounds is non-empty");
+                rng.gen_range(b.min..=b.max)
+            })
+            .collect();
+
+        Ok(Self {
+            genes,
+            min_length: min_len,
+            max_length: max_len,
+        })
+    }
+
+    /// Generate a random variable-length vector with explicit length bounds.
+    ///
+    /// This is the honest constructor for random generation: the length is
+    /// sampled uniformly from `[min_length, max_length]` and each gene is
+    /// sampled from the corresponding entry of `value_bounds` (falling back to
+    /// the first entry when the sampled length exceeds the number of provided
+    /// bounds). Unlike
+    /// [`EvolutionaryGenome::generate`](crate::genome::traits::EvolutionaryGenome::generate),
+    /// it does not overload a `MultiBounds`' dimension as a length.
+    pub fn generate_with_len<R: Rng>(
+        rng: &mut R,
+        min_length: usize,
+        max_length: usize,
+        value_bounds: &MultiBounds,
+    ) -> Result<Self, GenomeError> {
+        if min_length > max_length {
+            return Err(GenomeError::InvalidStructure(format!(
+                "min_length ({min_length}) > max_length ({max_length})"
+            )));
+        }
+        if value_bounds.dimension() == 0 {
+            return Err(GenomeError::InvalidStructure(
+                "value_bounds must have at least one dimension".to_string(),
+            ));
+        }
+        let length = if min_length == max_length {
+            min_length
+        } else {
+            rng.gen_range(min_length..=max_length)
+        };
+        let genes: Vec<f64> = (0..length)
+            .map(|i| {
+                let b = value_bounds
+                    .get(i)
+                    .or_else(|| value_bounds.get(0))
+                    .expect("value_bounds is non-empty");
+                rng.gen_range(b.min..=b.max)
+            })
+            .collect();
+        Self::new(genes, min_length, max_length)
+    }
 }
 
 impl EvolutionaryGenome for DynamicRealVector {
@@ -224,11 +306,14 @@ impl EvolutionaryGenome for DynamicRealVector {
 
     /// Convert DynamicRealVector to Fugue trace.
     ///
-    /// Stores genes at "gene#i" and metadata at "meta#min_length" and "meta#max_length".
+    /// Stores genes at `"<trace_prefix()>#i"` and metadata at "meta#min_length",
+    /// "meta#max_length" and "meta#length". The gene address prefix is taken
+    /// from [`Self::trace_prefix`] so that the prefix advertised by the trait and
+    /// the prefix actually written can never diverge.
     fn to_trace(&self) -> Trace {
         let mut trace = Trace::default();
         for (i, &gene) in self.genes.iter().enumerate() {
-            trace.insert_choice(addr!("gene", i), ChoiceValue::F64(gene), 0.0);
+            trace.insert_choice(addr!(Self::trace_prefix(), i), ChoiceValue::F64(gene), 0.0);
         }
         // Store length constraints in trace
         trace.insert_choice(
@@ -263,7 +348,7 @@ impl EvolutionaryGenome for DynamicRealVector {
 
         let mut genes = Vec::new();
         let mut i = 0;
-        while let Some(val) = trace.get_f64(&addr!("gene", i)) {
+        while let Some(val) = trace.get_f64(&addr!(Self::trace_prefix(), i)) {
             genes.push(val);
             i += 1;
             // Stop if we've reached expected length (handles sparse traces)
@@ -291,37 +376,27 @@ impl EvolutionaryGenome for DynamicRealVector {
         self.genes.len()
     }
 
+    /// Generate a random variable-length vector.
+    ///
+    /// `bounds.dimension()` is interpreted as the maximum length (minimum length
+    /// 1); the per-dimension `[min, max]` intervals bound the sampled gene
+    /// values. For empty (0-dimension) `bounds` there is nothing to sample, so
+    /// this degrades gracefully to an empty genome instead of panicking on an
+    /// inverted `gen_range(1..=0)`. Use [`try_generate`](Self::try_generate) if
+    /// you want that degenerate case reported as an error, or
+    /// [`generate_with_len`](Self::generate_with_len) for explicit length bounds.
     fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
-        // Generate with random length within the bounds
-        let min_len = 1;
-        let max_len = bounds.dimension();
-        let length = if min_len == max_len {
-            min_len
-        } else {
-            rng.gen_range(min_len..=max_len)
-        };
-
-        let genes: Vec<f64> = (0..length)
-            .map(|i| {
-                let b = if i < bounds.dimension() {
-                    bounds.get(i).unwrap()
-                } else {
-                    // Use first bound if we exceed bounds dimension
-                    bounds.get(0).unwrap()
-                };
-                rng.gen_range(b.min..=b.max)
-            })
-            .collect();
-
-        Self {
-            genes,
-            min_length: min_len,
-            max_length: max_len,
-        }
+        Self::try_generate(rng, bounds).unwrap_or_else(|_| Self {
+            genes: Vec::new(),
+            min_length: 0,
+            max_length: 0,
+        })
     }
 
     fn distance(&self, other: &Self) -> f64 {
-        // Euclidean distance for common genes, plus penalty for different lengths
+        // Euclidean distance for common genes, plus penalty for different
+        // lengths. Comparing genomes of different lengths is *meaningful* for a
+        // variable-length representation, so this never panics.
         let common_len = self.genes.len().min(other.genes.len());
         let mut dist_sq = 0.0;
 
@@ -333,6 +408,12 @@ impl EvolutionaryGenome for DynamicRealVector {
         // Add penalty for length difference
         let length_penalty = (self.genes.len() as f64 - other.genes.len() as f64).abs();
         dist_sq.sqrt() + length_penalty
+    }
+
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        // Length differences are expected and handled by a penalty, so distance
+        // is always well-defined; this never returns Err.
+        Ok(self.distance(other))
     }
 
     fn trace_prefix() -> &'static str {
@@ -509,5 +590,63 @@ mod tests {
         let genome = DynamicRealVector::new(vec![3.0, 4.0], 1, 10).unwrap();
         assert!((genome.norm() - 5.0).abs() < 0.001);
         assert!((genome.norm_squared() - 25.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_generate_empty_bounds_does_not_panic() {
+        // regression: EV-58 — generate previously called gen_range(1..=0) for
+        // 0-dimensional bounds, which panics ("cannot sample empty range").
+        let bounds = MultiBounds::new(vec![]);
+        let mut rng = rand::thread_rng();
+        let genome = DynamicRealVector::generate(&mut rng, &bounds);
+        assert_eq!(genome.dimension(), 0);
+    }
+
+    #[test]
+    fn test_try_generate_empty_bounds_errors() {
+        // regression: EV-58 — the fallible form reports the degenerate case.
+        let bounds = MultiBounds::new(vec![]);
+        let mut rng = rand::thread_rng();
+        assert!(DynamicRealVector::try_generate(&mut rng, &bounds).is_err());
+
+        // Non-empty bounds still succeed.
+        let ok_bounds = MultiBounds::symmetric(5.0, 4);
+        let g = DynamicRealVector::try_generate(&mut rng, &ok_bounds).unwrap();
+        assert!(g.dimension() >= 1 && g.dimension() <= 4);
+    }
+
+    #[test]
+    fn test_trace_prefix_matches_addresses() {
+        // regression: EV-91 — the address prefix used by to_trace/from_trace is
+        // now derived from trace_prefix(), so they cannot diverge.
+        use fugue::addr;
+        let genome = DynamicRealVector::new(vec![1.0, 2.0, 3.0], 1, 5).unwrap();
+        let trace = genome.to_trace();
+        let prefix = DynamicRealVector::trace_prefix();
+
+        // Values are stored under the advertised prefix...
+        assert!(trace.get_f64(&addr!(prefix, 0)).is_some());
+        assert_eq!(trace.get_f64(&addr!(prefix, 0)), Some(1.0));
+        // ...and round-tripping via that prefix recovers the genome.
+        let restored = DynamicRealVector::from_trace(&trace).unwrap();
+        assert_eq!(restored.genes(), genome.genes());
+    }
+
+    #[test]
+    fn test_generate_with_len_explicit() {
+        // EV-94: honest constructor takes explicit length bounds and value bounds.
+        let mut rng = rand::thread_rng();
+        let value_bounds = MultiBounds::symmetric(2.0, 6);
+        let g = DynamicRealVector::generate_with_len(&mut rng, 3, 5, &value_bounds).unwrap();
+        assert!(g.dimension() >= 3 && g.dimension() <= 5);
+        for gene in g.genes() {
+            assert!(*gene >= -2.0 && *gene <= 2.0);
+        }
+        // Rejects inverted length bounds and empty value bounds.
+        assert!(DynamicRealVector::generate_with_len(&mut rng, 5, 3, &value_bounds).is_err());
+        assert!(
+            DynamicRealVector::generate_with_len(&mut rng, 1, 3, &MultiBounds::new(vec![]))
+                .is_err()
+        );
     }
 }

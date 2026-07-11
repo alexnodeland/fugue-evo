@@ -5,6 +5,7 @@
 pub mod bit_string;
 pub mod bounds;
 pub mod composite;
+pub mod dynamic_ops;
 pub mod dynamic_real_vector;
 pub mod permutation;
 pub mod real_vector;
@@ -15,6 +16,7 @@ pub mod prelude {
     pub use super::bit_string::*;
     pub use super::bounds::*;
     pub use super::composite::*;
+    pub use super::dynamic_ops::*;
     pub use super::dynamic_real_vector::*;
     pub use super::permutation::*;
     pub use super::real_vector::*;
