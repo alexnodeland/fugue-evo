@@ -19,20 +19,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Define the problem dimension
     const DIM: usize = 10;
 
-    // Create the fitness function (Sphere minimizes to 0 at origin)
-    // We negate because fugue-evo maximizes by default
+    // Create the fitness function. `Sphere` already reports higher-is-better
+    // fitness (it internally negates the sum of squares), so a fitness of 0 at
+    // the origin is optimal and no negation is needed here.
     let fitness = Sphere::new(DIM);
 
     // Define search bounds: each dimension in [-5.12, 5.12]
     let bounds = MultiBounds::symmetric(5.12, DIM);
 
-    // Build and run the Simple GA
-    let result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
+    // Build and run the Simple GA.
+    //
+    // The `real_valued()` entry point pins the genome/fitness types and installs
+    // sensible operator defaults (tournament selection, SBX crossover, polynomial
+    // mutation), so the quickstart needs no turbofish. Any default is overridable
+    // with `.selection(..)` / `.crossover(..)` / `.mutation(..)`.
+    let result = SimpleGABuilder::real_valued()
         .population_size(100)
         .bounds(bounds)
-        .selection(TournamentSelection::new(3))
-        .crossover(SbxCrossover::new(20.0))
-        .mutation(PolynomialMutation::new(20.0))
         .fitness(fitness)
         .max_generations(200)
         .build()?
