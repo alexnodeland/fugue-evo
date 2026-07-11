@@ -664,11 +664,15 @@ impl BenchmarkFunction for DixonPrice {
     }
 
     fn optimal_solution(&self) -> Option<Vec<f64>> {
-        // Optimal solution: x_i = 2^(-(2^i - 2) / 2^i)
+        // Canonical Dixon-Price global minimizer (1-based index j = 1..d):
+        //     x_j = 2^{ -(2^j - 2) / 2^j }
+        // Here `i` is 0-based, so the 1-based index is j = i + 1 and both the
+        // numerator and denominator exponents must use `i + 1` consistently.
         let optimal: Vec<f64> = (0..self.dimension)
             .map(|i| {
-                let exp_num = (1u64 << i) as f64 - 2.0;
-                let exp_den = (1u64 << (i + 1)) as f64;
+                let two_pow_j = (1u64 << (i + 1)) as f64; // 2^{i+1} = 2^j
+                let exp_num = two_pow_j - 2.0; // 2^j - 2
+                let exp_den = two_pow_j; // 2^j
                 2.0_f64.powf(-exp_num / exp_den)
             })
             .collect();
@@ -1206,6 +1210,25 @@ mod tests {
         let dp = DixonPrice::new(5);
         assert_eq!(dp.name(), "Dixon-Price");
         assert_eq!(dp.dimension(), 5);
+    }
+
+    // regression: EV-15 — optimal_solution() must actually be the global minimizer,
+    // i.e. evaluate_raw() at the declared optimum must be (numerically) zero.
+    // The pre-fix exponent used 2^i-2 over 2^{i+1}, yielding f > 0.85 at every
+    // dimension, so this test fails on the old code.
+    #[test]
+    fn test_dixonprice_optimal_solution_is_optimum() {
+        for dim in 2..=6 {
+            let dp = DixonPrice::new(dim);
+            let opt = dp
+                .optimal_solution()
+                .expect("Dixon-Price exposes an optimal solution");
+            let value = dp.evaluate_raw(&opt);
+            assert!(
+                value < 1e-12,
+                "f(optimal_solution()) for dim={dim} was {value}, expected < 1e-12"
+            );
+        }
     }
 
     // Styblinski-Tang tests

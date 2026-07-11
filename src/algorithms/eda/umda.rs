@@ -23,18 +23,57 @@ use crate::population::individual::Individual;
 use crate::population::population::Population;
 use crate::termination::{EvolutionState, MaxGenerations, TerminationCriterion};
 
-/// Configuration for UMDA
+/// Select references to the genomes of the `count` best individuals, ordered by
+/// [`Individual::is_better_than`] (EV-80).
+///
+/// Using `is_better_than` rather than the `to_f64`-descending order of
+/// `Population::sort_by_fitness` keeps truncation selection correct for every
+/// `FitnessValue` — including non-scalar fitnesses whose f64 projection does not
+/// agree with their intrinsic ordering.
+fn select_top_genomes<G, F>(population: &Population<G, F>, count: usize) -> Vec<&G>
+where
+    G: EvolutionaryGenome,
+    F: FitnessValue,
+{
+    let mut ranked: Vec<&Individual<G, F>> = population.iter().collect();
+    ranked.sort_by(|a, b| {
+        if a.is_better_than(b) {
+            std::cmp::Ordering::Less
+        } else if b.is_better_than(a) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    ranked
+        .into_iter()
+        .take(count)
+        .map(|ind| ind.genome())
+        .collect()
+}
+
+/// Configuration for UMDA.
+///
+/// The builder ([`UMDABuilder`]) validates these fields in `build()` and returns
+/// an error for out-of-range values (EV-79) — it no longer silently clamps them.
+/// All fields are public, so constructing `UMDAConfig` directly is a deliberate
+/// escape hatch that **bypasses that validation**; if you build the struct by
+/// hand, keep the documented ranges yourself.
 #[derive(Clone, Debug)]
 pub struct UMDAConfig {
-    /// Population size
+    /// Population size (must be >= 1).
     pub population_size: usize,
-    /// Selection ratio (top proportion selected for model learning)
+    /// Selection ratio: the top proportion selected for model learning. Must lie
+    /// in the open-closed interval `(0.0, 1.0]`.
     pub selection_ratio: f64,
-    /// Minimum variance to prevent collapse (for continuous)
+    /// Minimum variance to prevent collapse (continuous). Must be >= 0.0.
     pub min_variance: f64,
-    /// Probability bounds for binary (to prevent determinism)
+    /// Probability bounds `(min, max)` for binary UMDA (to prevent determinism).
+    /// Must satisfy `0.0 < min <= max < 1.0`.
     pub prob_bounds: (f64, f64),
-    /// Learning rate for model update (1.0 = replace, <1.0 = blend with previous)
+    /// Learning rate for the model update (`1.0` = replace, `<1.0` = blend with
+    /// the previous model). Must lie in `(0.0, 1.0]`; `0.0` is rejected because it
+    /// makes the update a no-op (the model never learns).
     pub learning_rate: f64,
 }
 
@@ -47,6 +86,43 @@ impl Default for UMDAConfig {
             prob_bounds: (0.01, 0.99),
             learning_rate: 1.0,
         }
+    }
+}
+
+impl UMDAConfig {
+    /// Validate the configuration ranges (EV-79). Called by `build()`; returns a
+    /// [`EvolutionError::Configuration`] describing the first out-of-range field.
+    pub fn validate(&self) -> Result<(), EvolutionError> {
+        if self.population_size == 0 {
+            return Err(EvolutionError::Configuration(
+                "population_size must be >= 1".to_string(),
+            ));
+        }
+        if !(self.selection_ratio > 0.0 && self.selection_ratio <= 1.0) {
+            return Err(EvolutionError::Configuration(format!(
+                "selection_ratio must be in (0.0, 1.0], got {}",
+                self.selection_ratio
+            )));
+        }
+        if !(self.learning_rate > 0.0 && self.learning_rate <= 1.0) {
+            return Err(EvolutionError::Configuration(format!(
+                "learning_rate must be in (0.0, 1.0], got {}",
+                self.learning_rate
+            )));
+        }
+        if self.min_variance < 0.0 {
+            return Err(EvolutionError::Configuration(format!(
+                "min_variance must be >= 0.0, got {}",
+                self.min_variance
+            )));
+        }
+        let (pmin, pmax) = self.prob_bounds;
+        if !(pmin > 0.0 && pmin <= pmax && pmax < 1.0) {
+            return Err(EvolutionError::Configuration(format!(
+                "prob_bounds must satisfy 0.0 < min <= max < 1.0, got ({pmin}, {pmax})"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -101,27 +177,29 @@ where
         self
     }
 
-    /// Set the selection ratio
+    /// Set the selection ratio (must be in `(0.0, 1.0]`; validated in `build()`).
     pub fn selection_ratio(mut self, ratio: f64) -> Self {
-        self.config.selection_ratio = ratio.clamp(0.1, 0.9);
+        self.config.selection_ratio = ratio;
         self
     }
 
-    /// Set the minimum variance
+    /// Set the minimum variance (must be >= 0.0; validated in `build()`).
     pub fn min_variance(mut self, variance: f64) -> Self {
         self.config.min_variance = variance;
         self
     }
 
-    /// Set probability bounds for binary UMDA
+    /// Set probability bounds for binary UMDA (must satisfy
+    /// `0.0 < min <= max < 1.0`; validated in `build()`).
     pub fn prob_bounds(mut self, min: f64, max: f64) -> Self {
-        self.config.prob_bounds = (min.clamp(0.001, 0.5), max.clamp(0.5, 0.999));
+        self.config.prob_bounds = (min, max);
         self
     }
 
-    /// Set the learning rate for model update
+    /// Set the learning rate for the model update (must be in `(0.0, 1.0]`;
+    /// validated in `build()`).
     pub fn learning_rate(mut self, rate: f64) -> Self {
-        self.config.learning_rate = rate.clamp(0.0, 1.0);
+        self.config.learning_rate = rate;
         self
     }
 
@@ -185,6 +263,9 @@ pub struct ContinuousUnivariateModel {
 }
 
 impl ContinuousUnivariateModel {
+    /// Maximum number of rejection retries per coordinate before clamping (EV-39).
+    pub const MAX_REJECTION_RETRIES: usize = 100;
+
     /// Create from bounds (initial uniform-ish distribution)
     pub fn from_bounds(bounds: &MultiBounds) -> Self {
         let means: Vec<f64> = bounds.bounds.iter().map(|b| b.center()).collect();
@@ -207,12 +288,14 @@ impl ContinuousUnivariateModel {
             // Compute sample mean
             let mean: f64 = selected.iter().map(|g| g.genes()[i]).sum::<f64>() / n;
 
-            // Compute sample variance
-            let variance: f64 = selected
+            // Compute the unbiased (Bessel-corrected, n-1) sample variance (EV-81).
+            // The n-1 denominator avoids systematically under-estimating spread,
+            // which would otherwise nudge the model toward premature contraction.
+            let sum_sq: f64 = selected
                 .iter()
                 .map(|g| (g.genes()[i] - mean).powi(2))
-                .sum::<f64>()
-                / n;
+                .sum::<f64>();
+            let variance: f64 = if n > 1.0 { sum_sq / (n - 1.0) } else { 0.0 };
 
             // Apply learning rate and bounds
             self.means[i] =
@@ -222,7 +305,14 @@ impl ContinuousUnivariateModel {
         }
     }
 
-    /// Sample a new individual from the model
+    /// Sample a new individual from the model.
+    ///
+    /// EV-39: each coordinate is drawn by rejection from the truncated Gaussian —
+    /// out-of-bounds draws are retried up to [`Self::MAX_REJECTION_RETRIES`] times
+    /// before falling back to a clamp. For interior-optimum problems this makes
+    /// the boundary "atoms" (probability mass piled on a bound by naive clamping)
+    /// vanish, so the accepted samples that feed the next variance estimate are
+    /// genuine spread rather than collapsed boundary points.
     pub fn sample<R: Rng>(&self, bounds: &MultiBounds, rng: &mut R) -> RealVector {
         let genes: Vec<f64> = self
             .means
@@ -232,7 +322,19 @@ impl ContinuousUnivariateModel {
             .map(|((mean, var), bound)| {
                 let normal =
                     Normal::new(*mean, var.sqrt()).unwrap_or(Normal::new(*mean, 0.1).unwrap());
-                let value = normal.sample(rng);
+
+                let mut value = normal.sample(rng);
+                let mut retries = 0;
+                while (value < bound.min || value > bound.max)
+                    && retries < Self::MAX_REJECTION_RETRIES
+                {
+                    value = normal.sample(rng);
+                    retries += 1;
+                }
+
+                // Fallback only when rejection failed to land in-bounds (e.g. the
+                // whole feasible interval is deep in a Gaussian tail): clamp so the
+                // returned genome always respects the box constraints.
                 value.clamp(bound.min, bound.max)
             })
             .collect();
@@ -249,6 +351,9 @@ where
 {
     /// Build the continuous UMDA instance
     pub fn build(self) -> Result<ContinuousUMDA<F, Fit, Term>, EvolutionError> {
+        // EV-79: validate configured ranges instead of silently clamping.
+        self.config.validate()?;
+
         let bounds = self
             .bounds
             .ok_or_else(|| EvolutionError::Configuration("Bounds must be specified".to_string()))?;
@@ -294,11 +399,21 @@ where
         UMDABuilder::new()
     }
 
-    /// Run the UMDA algorithm
+    /// Run the UMDA algorithm.
     pub fn run<R: Rng>(
         &self,
         rng: &mut R,
     ) -> Result<EvolutionResult<RealVector, F>, EvolutionError> {
+        self.run_with_model(rng).map(|(result, _model)| result)
+    }
+
+    /// Run the UMDA algorithm and also return the final learned univariate model
+    /// (EV-10), so callers/tests can inspect whether the distribution actually
+    /// converged toward the optimum rather than merely tracking a best-so-far.
+    pub fn run_with_model<R: Rng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<(EvolutionResult<RealVector, F>, ContinuousUnivariateModel), EvolutionError> {
         let start_time = Instant::now();
 
         // Initialize model
@@ -343,15 +458,10 @@ where
 
             let gen_start = Instant::now();
 
-            // Sort and select top individuals
-            population.sort_by_fitness();
+            // Select the top individuals by is_better_than order (EV-80).
             let select_count =
                 (self.config.population_size as f64 * self.config.selection_ratio).ceil() as usize;
-            let selected: Vec<&RealVector> = population
-                .iter()
-                .take(select_count)
-                .map(|ind| &ind.genome)
-                .collect();
+            let selected: Vec<&RealVector> = select_top_genomes(&population, select_count);
 
             // Update model from selected individuals
             model.update(&selected, &self.config);
@@ -387,10 +497,10 @@ where
 
         stats.set_runtime(start_time.elapsed());
 
-        Ok(
+        let result =
             EvolutionResult::new(best.genome, best.fitness.unwrap(), generation, evaluations)
-                .with_stats(stats),
-        )
+                .with_stats(stats);
+        Ok((result, model))
     }
 }
 
@@ -458,6 +568,9 @@ where
 {
     /// Build the binary UMDA instance
     pub fn build(self) -> Result<BinaryUMDA<F, Fit, Term>, EvolutionError> {
+        // EV-79: validate configured ranges instead of silently clamping.
+        self.config.validate()?;
+
         let bounds = self
             .bounds
             .ok_or_else(|| EvolutionError::Configuration("Bounds must be specified".to_string()))?;
@@ -503,11 +616,20 @@ where
         UMDABuilder::new()
     }
 
-    /// Run the UMDA algorithm
+    /// Run the UMDA algorithm.
     pub fn run<R: Rng>(
         &self,
         rng: &mut R,
     ) -> Result<EvolutionResult<BitString, F>, EvolutionError> {
+        self.run_with_model(rng).map(|(result, _model)| result)
+    }
+
+    /// Run the UMDA algorithm and also return the final learned univariate model
+    /// (EV-10), so callers/tests can check the learned probabilities converged.
+    pub fn run_with_model<R: Rng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<(EvolutionResult<BitString, F>, BinaryUnivariateModel), EvolutionError> {
         let start_time = Instant::now();
 
         // Get dimension from bounds
@@ -555,15 +677,10 @@ where
 
             let gen_start = Instant::now();
 
-            // Sort and select top individuals
-            population.sort_by_fitness();
+            // Select the top individuals by is_better_than order (EV-80).
             let select_count =
                 (self.config.population_size as f64 * self.config.selection_ratio).ceil() as usize;
-            let selected: Vec<&BitString> = population
-                .iter()
-                .take(select_count)
-                .map(|ind| &ind.genome)
-                .collect();
+            let selected: Vec<&BitString> = select_top_genomes(&population, select_count);
 
             // Update model from selected individuals
             model.update(&selected, &self.config);
@@ -599,10 +716,10 @@ where
 
         stats.set_runtime(start_time.elapsed());
 
-        Ok(
+        let result =
             EvolutionResult::new(best.genome, best.fitness.unwrap(), generation, evaluations)
-                .with_stats(stats),
-        )
+                .with_stats(stats);
+        Ok((result, model))
     }
 }
 
@@ -610,7 +727,9 @@ where
 mod tests {
     use super::*;
     use crate::fitness::benchmarks::{OneMax, Sphere};
+    use crate::genome::bounds::Bounds;
     use crate::termination::MaxEvaluations;
+    use rand::SeedableRng;
 
     #[test]
     fn test_continuous_umda_builder() {
@@ -626,53 +745,205 @@ mod tests {
         assert!(umda.is_ok());
     }
 
-    #[test]
-    fn test_continuous_umda_sphere() {
-        let mut rng = rand::thread_rng();
-        let bounds = MultiBounds::symmetric(5.12, 10);
+    /// Best Sphere fitness (higher = better; Sphere is negated) found by pure
+    /// uniform random search over `budget` samples — the EV-10 baseline.
+    fn random_search_sphere_best<R: Rng>(
+        dim: usize,
+        half_width: f64,
+        budget: usize,
+        rng: &mut R,
+    ) -> f64 {
+        let sphere = Sphere::new(dim);
+        let mut best = f64::NEG_INFINITY;
+        for _ in 0..budget {
+            let genes: Vec<f64> = (0..dim)
+                .map(|_| rng.gen_range(-half_width..half_width))
+                .collect();
+            let f = sphere.evaluate(&RealVector::new(genes));
+            if f > best {
+                best = f;
+            }
+        }
+        best
+    }
 
+    /// Best OneMax fitness found by pure uniform random search — EV-10 baseline.
+    fn random_search_onemax_best<R: Rng>(dim: usize, budget: usize, rng: &mut R) -> usize {
+        let onemax = OneMax::new(dim);
+        let mut best = 0usize;
+        for _ in 0..budget {
+            let bits: Vec<bool> = (0..dim).map(|_| rng.gen::<bool>()).collect();
+            let f = onemax.evaluate(&BitString::new(bits));
+            if f > best {
+                best = f;
+            }
+        }
+        best
+    }
+
+    // regression: EV-10 — a working UMDA must (a) beat a same-budget pure random
+    // search by a fixed margin and (b) actually learn a model whose means move to
+    // the optimum. A broken UMDA that never converges would still clear the old
+    // `best_fitness > -50` bar (random search alone reaches ~-12), so this test
+    // fails for pure random search and for a non-learning model.
+    #[test]
+    fn test_continuous_umda_beats_random_search() {
+        let budget = 5000;
+        let dim = 10;
+        let half_width = 5.12;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let umda: ContinuousUMDA<f64, _, _> = UMDABuilder::new()
             .population_size(100)
             .selection_ratio(0.3)
-            .min_variance(0.01)
-            .bounds(bounds)
-            .fitness(Sphere::new(10))
-            .termination(MaxEvaluations::new(5000))
+            .min_variance(0.001)
+            .bounds(MultiBounds::symmetric(half_width, dim))
+            .fitness(Sphere::new(dim))
+            .termination(MaxEvaluations::new(budget))
             .build()
             .unwrap();
+        let (result, model) = umda.run_with_model(&mut rng).unwrap();
 
-        let result = umda.run(&mut rng).unwrap();
+        let mut baseline_rng = rand::rngs::StdRng::seed_from_u64(42);
+        let random_best = random_search_sphere_best(dim, half_width, budget, &mut baseline_rng);
 
-        // Should find improvement
         assert!(
-            result.best_fitness > -50.0,
-            "Expected fitness > -50, got {}",
+            result.best_fitness > random_best + 5.0,
+            "UMDA best {} should beat random search {} by a clear margin",
+            result.best_fitness,
+            random_best
+        );
+        assert!(
+            result.best_fitness > -2.0,
+            "UMDA should get close to the optimum, got {}",
             result.best_fitness
         );
+
+        // The learned distribution itself must have moved toward the optimum.
+        for (i, m) in model.means.iter().enumerate() {
+            assert!(
+                m.abs() < 0.5,
+                "learned mean[{i}] = {m} did not converge toward the optimum (0)"
+            );
+        }
     }
 
+    // regression: EV-10 — binary UMDA must beat a same-budget random search and
+    // learn probabilities that converge toward 1. Random search over 3000 draws
+    // tops out around 16 ones, so a broken UMDA cannot clear the >= 19 bar.
     #[test]
-    fn test_binary_umda_onemax() {
-        let mut rng = rand::thread_rng();
-        let bounds = MultiBounds::uniform(crate::genome::bounds::Bounds::unit(), 20);
+    fn test_binary_umda_beats_random_search() {
+        let budget = 3000;
+        let dim = 20;
 
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         let umda: BinaryUMDA<usize, _, _> = UMDABuilder::new()
             .population_size(100)
             .selection_ratio(0.3)
-            .prob_bounds(0.05, 0.95)
-            .bounds(bounds)
-            .fitness(OneMax::new(20))
-            .termination(MaxEvaluations::new(3000))
+            .prob_bounds(0.02, 0.98)
+            .bounds(MultiBounds::uniform(Bounds::unit(), dim))
+            .fitness(OneMax::new(dim))
+            .termination(MaxEvaluations::new(budget))
             .build()
             .unwrap();
+        let (result, model) = umda.run_with_model(&mut rng).unwrap();
 
-        let result = umda.run(&mut rng).unwrap();
+        let mut baseline_rng = rand::rngs::StdRng::seed_from_u64(7);
+        let random_best = random_search_onemax_best(dim, budget, &mut baseline_rng);
 
-        // Should find good solution
         assert!(
-            result.best_fitness >= 15,
-            "Expected fitness >= 15, got {}",
+            result.best_fitness > random_best,
+            "UMDA best {} should beat random search {}",
+            result.best_fitness,
+            random_best
+        );
+        assert!(
+            result.best_fitness >= 19,
+            "UMDA should nearly solve OneMax, got {}",
             result.best_fitness
+        );
+
+        // The learned probabilities must have converged toward 1.
+        for (i, p) in model.probabilities.iter().enumerate() {
+            assert!(
+                *p > 0.8,
+                "learned probability[{i}] = {p} did not converge toward 1"
+            );
+        }
+    }
+
+    // regression: EV-79 — build() validates configured ranges and returns an error
+    // instead of silently clamping (or accepting a no-op learning_rate of 0).
+    #[test]
+    fn test_umda_builder_validation_rejects_out_of_range() {
+        let bounds = MultiBounds::symmetric(5.0, 4);
+
+        let bad_ratio: Result<ContinuousUMDA<f64, _, _>, _> = UMDABuilder::new()
+            .population_size(50)
+            .selection_ratio(1.5)
+            .bounds(bounds.clone())
+            .fitness(Sphere::new(4))
+            .max_generations(5)
+            .build();
+        assert!(bad_ratio.is_err(), "selection_ratio 1.5 must be rejected");
+
+        let zero_lr: Result<ContinuousUMDA<f64, _, _>, _> = UMDABuilder::new()
+            .population_size(50)
+            .learning_rate(0.0)
+            .bounds(bounds.clone())
+            .fitness(Sphere::new(4))
+            .max_generations(5)
+            .build();
+        assert!(
+            zero_lr.is_err(),
+            "learning_rate 0.0 (a no-op) must be rejected"
+        );
+
+        let bad_probs: Result<BinaryUMDA<usize, _, _>, _> = UMDABuilder::new()
+            .population_size(50)
+            .prob_bounds(0.6, 0.4)
+            .bounds(MultiBounds::uniform(Bounds::unit(), 4))
+            .fitness(OneMax::new(4))
+            .max_generations(5)
+            .build();
+        assert!(
+            bad_probs.is_err(),
+            "prob_bounds with min > max must be rejected"
+        );
+
+        let ok: Result<ContinuousUMDA<f64, _, _>, _> = UMDABuilder::new()
+            .population_size(50)
+            .selection_ratio(0.3)
+            .learning_rate(0.5)
+            .bounds(bounds)
+            .fitness(Sphere::new(4))
+            .max_generations(5)
+            .build();
+        assert!(ok.is_ok(), "a valid configuration must still build");
+    }
+
+    // regression: EV-81 — the continuous model uses the unbiased (n-1) sample
+    // variance. For selected values {1,2,3} at a dimension the Bessel-corrected
+    // variance is 1.0, whereas the old biased /n estimate gave 2/3.
+    #[test]
+    fn test_continuous_variance_is_bessel_corrected() {
+        let bounds = MultiBounds::symmetric(5.0, 1);
+        let mut model = ContinuousUnivariateModel::from_bounds(&bounds);
+        let config = UMDAConfig {
+            learning_rate: 1.0,
+            min_variance: 1e-12, // don't let the floor mask the estimate
+            ..Default::default()
+        };
+
+        let g1 = RealVector::new(vec![1.0]);
+        let g2 = RealVector::new(vec![2.0]);
+        let g3 = RealVector::new(vec![3.0]);
+        model.update(&[&g1, &g2, &g3], &config);
+
+        assert!(
+            (model.variances[0] - 1.0).abs() < 1e-9,
+            "expected Bessel-corrected variance 1.0, got {}",
+            model.variances[0]
         );
     }
 
@@ -737,5 +1008,75 @@ mod tests {
 
         // With learning rate 0.5, new mean = 0.5 * 2.0 + 0.5 * 0.0 = 1.0
         assert!((model.means[0] - (0.5 * 2.0 + 0.5 * initial_mean)).abs() < 0.01);
+    }
+
+    // regression: EV-39 — sampling rejects out-of-bounds draws instead of clamping,
+    // so a model mean sitting exactly on a bound does not pile ~50% of samples on
+    // that boundary (which shrinks the next variance estimate). Rejection yields
+    // essentially zero exact-boundary samples; the old clamp yielded ~half.
+    #[test]
+    fn test_sample_rejection_avoids_boundary_pileup() {
+        let bounds = MultiBounds::symmetric(5.0, 1); // [-5, 5]
+        let mut model = ContinuousUnivariateModel::from_bounds(&bounds);
+        model.means[0] = 5.0; // mean exactly on the upper bound
+        model.variances[0] = 1.0; // non-trivial spread
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(123);
+        let n = 2000;
+        let on_boundary = (0..n)
+            .filter(|_| {
+                let g = model.sample(&bounds, &mut rng);
+                (g.genes()[0] - 5.0).abs() < 1e-12
+            })
+            .count();
+
+        assert!(
+            on_boundary <= 2,
+            "rejection sampling should not pile samples on the boundary, got {on_boundary}/{n}"
+        );
+    }
+
+    /// A fitness where LOWER is better while `to_f64` still reports the raw value —
+    /// so `is_better_than` and `to_f64`-descending order disagree (mirrors the
+    /// ParetoFitness hazard flagged by EV-80).
+    #[derive(Clone, Debug, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+    struct LowerBetter(f64);
+
+    impl FitnessValue for LowerBetter {
+        fn to_f64(&self) -> f64 {
+            self.0
+        }
+        fn is_better_than(&self, other: &Self) -> bool {
+            self.0 < other.0
+        }
+    }
+
+    // regression: EV-80 — truncation selection ranks by is_better_than, not by
+    // to_f64-descending order. With a lower-is-better fitness, the top pick must be
+    // the lowest value; a to_f64-descending sort (the pre-fix behavior) would pick
+    // the highest.
+    #[test]
+    fn test_select_top_uses_is_better_than() {
+        let mut pop: Population<RealVector, LowerBetter> = Population::new();
+        pop.push(Individual::with_fitness(
+            RealVector::new(vec![30.0]),
+            LowerBetter(3.0),
+        ));
+        pop.push(Individual::with_fitness(
+            RealVector::new(vec![10.0]),
+            LowerBetter(1.0),
+        ));
+        pop.push(Individual::with_fitness(
+            RealVector::new(vec![20.0]),
+            LowerBetter(2.0),
+        ));
+
+        let top = select_top_genomes(&pop, 1);
+        assert_eq!(top.len(), 1);
+        assert_eq!(
+            top[0].genes()[0],
+            10.0,
+            "selection should pick the is_better_than-best (lowest) individual"
+        );
     }
 }
