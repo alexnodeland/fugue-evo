@@ -8,15 +8,18 @@
 
 #[cfg(feature = "checkpoint")]
 mod recovery;
+mod rng;
 mod state;
 
 #[cfg(feature = "checkpoint")]
 pub use recovery::*;
+pub use rng::*;
 pub use state::*;
 
 /// Prelude for checkpoint module
 pub mod prelude {
     #[cfg(feature = "checkpoint")]
     pub use super::recovery::*;
+    pub use super::rng::*;
     pub use super::state::*;
 }
