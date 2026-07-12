@@ -1346,15 +1346,51 @@ mod tests {
 
     #[test]
     fn test_deep_tree_position_collectors_no_overflow() {
-        // regression: EV-60 — the position collectors must be iterative: calling
-        // positions()/terminal_positions()/function_positions() on a ~100k-deep
-        // tree must not overflow the call stack.
-        let depth = 100_000usize;
+        // regression: EV-60 — the position collectors must be *iterative*
+        // (explicit work stack), never recursive: calling
+        // positions()/terminal_positions()/function_positions() on a
+        // pathologically deep tree must not overflow the call stack.
+        //
+        // We prove that property directly and cheaply by running the collectors
+        // inside a thread whose stack is capped at 64 KiB. A recursive collector
+        // uses ~one call frame per tree level; at `depth = 2_000` that is 2000
+        // frames, and even a minimal debug-build frame here (self ptr, the
+        // `path` fat pointer, a `&mut Vec`, a per-node `child_path` local, saved
+        // frame pointer + return address — well over the 64 KiB / 2000 ≈ 32 B
+        // budget per frame, in practice ~100 B) blows past 64 KiB by several
+        // multiples, so a recursive regression overflows and aborts the thread.
+        // The iterative implementation uses a single frame plus a heap-allocated
+        // work stack, so its stack footprint is independent of depth and fits
+        // comfortably.
+        //
+        // `depth = 2_000` also keeps the collectors' *output* modest: each
+        // returns the full root-path for every node, ~depth²/2 usizes ≈ 16 MB.
+        // The former `depth = 100_000` produced Σ path lengths ≈ 5e9 usizes
+        // ≈ 40 GB, which OOM-killed the 16 GB Linux CI runner (it only survived
+        // on macOS because every path element is 0 and memory compression
+        // flattened the pages). The positions() API is deliberately unchanged.
+        let depth = 2_000usize;
+
+        // Build (and below, dismantle) the tree on the main thread. Construction
+        // is an explicit bottom-up loop and Drop is iterative, so both are
+        // stack-safe, but keeping them off the tiny stack isolates the property
+        // under test to the collectors alone. The tree is `move`d into the
+        // small-stack thread and handed straight back out so it is never dropped
+        // on the 64 KiB stack.
         let tree = deep_tree(depth);
-        assert_eq!(tree.root.positions().len(), depth + 1);
-        // One terminal (the single leaf) and `depth` function nodes.
-        assert_eq!(tree.root.terminal_positions().len(), 1);
-        assert_eq!(tree.root.function_positions().len(), depth);
+        let tree = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                assert_eq!(tree.root.positions().len(), depth + 1);
+                // One terminal (the single leaf) and `depth` function nodes.
+                assert_eq!(tree.root.terminal_positions().len(), 1);
+                assert_eq!(tree.root.function_positions().len(), depth);
+                tree
+            })
+            .expect("spawn 64 KiB-stack thread")
+            .join()
+            .expect("position collectors overflowed a 64 KiB stack (recursive regression?)");
+
         tree.dismantle();
     }
 
