@@ -643,7 +643,7 @@ impl<T: Terminal, F: Function> TreeGenome<T, F> {
     /// Generate a random tree with an explicit maximum depth.
     ///
     /// This is the honest constructor for random generation: unlike
-    /// [`EvolutionaryGenome::generate`](crate::genome::traits::EvolutionaryGenome::generate),
+    /// [`EvolutionaryGenome::generate`],
     /// which overloads `MultiBounds` and remaps its *dimension count* to a depth,
     /// this takes the maximum depth directly. It uses ramped half-and-half
     /// between depth 2 and `max_depth` (both clamped to at least 1).

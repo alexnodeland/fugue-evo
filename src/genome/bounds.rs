@@ -34,9 +34,14 @@ impl Bounds {
     /// Returns `Err(GenomeError::InvalidStructure)` when `min > max`. A
     /// degenerate (`min == max`) bound is permitted.
     pub fn try_new(min: f64, max: f64) -> Result<Self, GenomeError> {
-        // `!(min <= max)` also rejects NaN operands (a NaN comparison is always
-        // false), matching the invariant the previous `assert!(min <= max)` held.
-        if !(min <= max) {
+        // Reject `min > max` and any NaN operand. `partial_cmp` returns `None`
+        // when either side is NaN, so NaN bounds are rejected exactly as the
+        // prior `!(min <= max)` guard did (a NaN comparison is always false),
+        // matching the invariant the original `assert!(min <= max)` held.
+        if matches!(
+            min.partial_cmp(&max),
+            None | Some(std::cmp::Ordering::Greater)
+        ) {
             return Err(GenomeError::InvalidStructure(format!(
                 "Invalid bounds: min ({min}) must be <= max ({max})"
             )));
@@ -266,6 +271,15 @@ mod tests {
         assert!(Bounds::try_new(-5.0, 5.0).is_ok());
         // Degenerate min == max is allowed.
         assert!(Bounds::try_new(3.0, 3.0).is_ok());
+    }
+
+    #[test]
+    fn test_bounds_try_new_rejects_nan() {
+        // regression: NaN bounds must be rejected. `partial_cmp` yields `None`
+        // for a NaN operand, preserving the previous `!(min <= max)` behavior.
+        assert!(Bounds::try_new(f64::NAN, 5.0).is_err());
+        assert!(Bounds::try_new(-5.0, f64::NAN).is_err());
+        assert!(Bounds::try_new(f64::NAN, f64::NAN).is_err());
     }
 
     #[test]

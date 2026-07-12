@@ -44,7 +44,7 @@ impl BitString {
     /// Generate a random bit string of an explicit length.
     ///
     /// This is the honest constructor for random generation: unlike
-    /// [`EvolutionaryGenome::generate`](crate::genome::traits::EvolutionaryGenome::generate),
+    /// [`EvolutionaryGenome::generate`],
     /// which overloads `MultiBounds` and only reads its dimension count, this
     /// takes the number of bits directly.
     pub fn generate_with_len<R: Rng>(rng: &mut R, len: usize) -> Self {

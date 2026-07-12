@@ -11,8 +11,8 @@
 //!    handler that [`crate::fugue_integration::evolution_model::EvolutionModel`]
 //!    uses to inject `factor(β·f(x))` into a genome's trace.
 //!
-//! 2. **Operation hooks** ([`LoggingHandler`], [`RateLimitingHandler`],
-//!    [`ConditionalHandler`], …).  These are *not* Fugue handlers — they are
+//! 2. **Operation hooks** ([`LoggingHook`], [`RateLimitingHook`],
+//!    [`ConditionalHook`], …).  These are *not* Fugue handlers — they are
 //!    plain before/after callbacks used to observe, log, or rate-limit the
 //!    trace-based genetic operators in [`super::trace_operators`].  They do not
 //!    participate in probabilistic scoring; the probability mass of an operator
@@ -142,7 +142,7 @@ impl Handler for TraceScoringHandler {
 /// `inner`, the resulting trace has exactly the same `log_prior`,
 /// `log_likelihood`, and `log_factors` the inner handler would have produced on
 /// its own — only now the ordered list of `(address, value)` sample events is
-/// also available via [`RecordingHandler::events`].
+/// also available via `RecordingHandler::events`.
 pub struct RecordingHandler<H: Handler> {
     inner: H,
     events: Arc<Mutex<Vec<(Address, ChoiceValue)>>>,

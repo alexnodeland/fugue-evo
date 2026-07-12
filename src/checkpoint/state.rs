@@ -100,13 +100,13 @@ where
     /// Set RNG state from raw serialized bytes.
     ///
     /// Prefer [`Checkpoint::with_rng`] for a type-checked capture of a
-    /// [`SnapshotRng`].
+    /// [`SnapshotRng`](crate::checkpoint::rng::SnapshotRng).
     pub fn with_rng_state(mut self, state: Vec<u8>) -> Self {
         self.rng_state = Some(state);
         self
     }
 
-    /// Capture a [`SnapshotRng`]'s full state into this checkpoint (EV-02).
+    /// Capture a [`SnapshotRng`](crate::checkpoint::rng::SnapshotRng)'s full state into this checkpoint (EV-02).
     ///
     /// Restoring the checkpoint's RNG via [`Checkpoint::restore_rng`] and
     /// continuing evolution then reproduces the exact stochastic trajectory a
@@ -121,7 +121,7 @@ where
         Ok(self)
     }
 
-    /// Restore a [`SnapshotRng`] previously captured via [`Checkpoint::with_rng`].
+    /// Restore a [`SnapshotRng`](crate::checkpoint::rng::SnapshotRng) previously captured via [`Checkpoint::with_rng`].
     ///
     /// Returns `Ok(None)` if no RNG state was stored in this checkpoint.
     pub fn restore_rng<R: crate::checkpoint::rng::SnapshotRng>(

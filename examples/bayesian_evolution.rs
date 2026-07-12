@@ -51,7 +51,8 @@ impl Fitness for Quadratic {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Evolution as Bayesian Inference ===\n");
 
-    let mut rng = StdRng::seed_from_u64(2026_07_10);
+    // Fixed seed for reproducibility (audit date 2026-07-10).
+    let mut rng = StdRng::seed_from_u64(20260710);
 
     // ---------------------------------------------------------------------
     // Part 1: Tempered SMC over the Boltzmann posterior.

@@ -219,8 +219,8 @@ impl DynamicRealVector {
 
     /// Fallibly generate a random variable-length vector from `bounds`.
     ///
-    /// `bounds.dimension()` is interpreted as the maximum length (minimum length
-    /// 1) and the per-dimension `[min, max]` intervals bound the sampled gene
+    /// `bounds.dimension()` is interpreted as the maximum length (minimum length 1)
+    /// and the per-dimension `[min, max]` intervals bound the sampled gene
     /// values. Returns `Err(GenomeError::InvalidStructure)` for empty
     /// (0-dimension) `bounds`, which cannot yield a valid non-empty genome —
     /// this replaces the previous panic on the inverted range `1..=0`.
@@ -264,7 +264,7 @@ impl DynamicRealVector {
     /// sampled from the corresponding entry of `value_bounds` (falling back to
     /// the first entry when the sampled length exceeds the number of provided
     /// bounds). Unlike
-    /// [`EvolutionaryGenome::generate`](crate::genome::traits::EvolutionaryGenome::generate),
+    /// [`EvolutionaryGenome::generate`],
     /// it does not overload a `MultiBounds`' dimension as a length.
     pub fn generate_with_len<R: Rng>(
         rng: &mut R,

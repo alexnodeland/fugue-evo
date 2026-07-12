@@ -1070,7 +1070,7 @@ mod tests {
         // full step overshoots and lowers the penalized log-likelihood, so the
         // line search MUST backtrack and still finish no lower than it started.
         let comparisons = make_comparisons(&[(0, 1), (0, 1), (1, 2), (1, 2)]);
-        let ids = vec![CandidateId(0), CandidateId(1), CandidateId(2)];
+        let ids = [CandidateId(0), CandidateId(1), CandidateId(2)];
         let id_to_index: HashMap<CandidateId, usize> =
             ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let model = BradleyTerryModel::new(BradleyTerryOptimizer::default());
