@@ -105,9 +105,17 @@ impl<G: EvolutionaryGenome, F: FitnessValue> TerminationCriterion<G, F> for Fitn
             return false;
         }
 
+        // EV-73 / EV-105: measure the best-so-far improvement across the window
+        // (the largest gain over the window's starting value), not just the
+        // endpoint delta. `fitness_history` is the per-generation population best
+        // and is NOT guaranteed monotone (e.g. with elitism disabled), so a
+        // non-monotonic window such as [10, 90, 10] has zero endpoint delta yet
+        // clearly improved mid-window. Because `window[0]` is part of the window,
+        // `best_in_window - first` is always >= 0 and equals 0 exactly when the
+        // running best never rose above the window's opening value.
         let first = window[0];
-        let last = window[window.len() - 1];
-        let improvement = (last - first).abs();
+        let best_in_window = window.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let improvement = best_in_window - first;
 
         improvement < self.epsilon
     }
@@ -303,6 +311,36 @@ mod tests {
         // Stagnant
         let history = vec![5.0, 5.0, 5.0, 5.0, 5.0];
         let state = create_test_state(0, 0, 5.0, &pop, &history);
+        assert!(criterion.should_terminate(&state));
+    }
+
+    // regression: EV-73, EV-105 — a non-monotonic window must not be mistaken for
+    // stagnation. Endpoint-only logic ((last-first).abs()) reports [10, 90, 10] as
+    // "improvement == 0" and terminates; the best-so-far measure sees the mid-window
+    // rise to 90 and correctly reports progress.
+    #[test]
+    fn test_fitness_stagnation_nonmonotonic_window() {
+        let individuals = vec![Individual::with_fitness(RealVector::new(vec![1.0]), 10.0)];
+        let pop = Population::from_individuals(individuals);
+
+        let criterion = FitnessStagnation::new(3, 0.01);
+
+        // Rose then fell back: real improvement happened inside the window.
+        let history = vec![10.0, 90.0, 10.0];
+        let state = create_test_state(0, 0, 10.0, &pop, &history);
+        assert!(
+            !criterion.should_terminate(&state),
+            "non-monotonic window with a mid-window peak must not read as stagnant"
+        );
+
+        // Improve-then-regress must also not read as stagnant.
+        let history = vec![10.0, 90.0, 20.0];
+        let state = create_test_state(0, 0, 20.0, &pop, &history);
+        assert!(!criterion.should_terminate(&state));
+
+        // A monotone decline never rose above the opening value -> genuinely stagnant.
+        let history = vec![90.0, 50.0, 10.0];
+        let state = create_test_state(0, 0, 10.0, &pop, &history);
         assert!(criterion.should_terminate(&state));
     }
 

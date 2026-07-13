@@ -98,12 +98,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Problem: Maximize box volume with surface area = {}", target_surface_area);
     println!("Search space: [0.1, 10.0] for each dimension\n");
 
-    // Configure and run GA
-    let result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
+    // Configure and run GA. `real_valued()` pins the genome/fitness types (no
+    // turbofish) and installs tournament selection, SBX crossover, and polynomial
+    // mutation as defaults; here we override only the mutation probability.
+    let result = SimpleGABuilder::real_valued()
         .population_size(100)
         .bounds(bounds)
-        .selection(TournamentSelection::new(3))
-        .crossover(SbxCrossover::new(20.0))
         .mutation(PolynomialMutation::new(20.0).with_probability(0.1))
         .fitness(fitness)
         .max_generations(300)

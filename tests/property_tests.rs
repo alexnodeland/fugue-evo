@@ -1,16 +1,29 @@
 //! Property-based tests for fugue-evo
 //!
 //! Uses proptest to verify invariants and properties of the library.
+//!
+//! regression: EV-106 — every RNG-driven proptest previously seeded its `Rng`
+//! with `rand::thread_rng()`. Because the RNG draw happened *inside* the test
+//! body rather than through proptest's own generator, a failure's inputs
+//! (`dim`, `half_width`, ...) were reproducible via proptest's shrink/seed
+//! file, but the RNG-dependent genome generation was not: re-running the same
+//! failing case with the recorded inputs could pass or fail nondeterministically
+//! because `thread_rng()` draws fresh entropy every run. Threading an
+//! `any::<u64>()`-generated seed through proptest turns the RNG draw into a
+//! first-class, shrinkable, reproducible input: the same seed file byte-for-byte
+//! reproduces the same genome generation every time.
 
 use fugue_evo::prelude::*;
 use proptest::prelude::*;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 proptest! {
     // ==================== RealVector Properties ====================
 
     #[test]
-    fn real_vector_dimension_preserved(dim in 1usize..20) {
-        let mut rng = rand::thread_rng();
+    fn real_vector_dimension_preserved(dim in 1usize..20, seed in any::<u64>()) {
+        let mut rng = StdRng::seed_from_u64(seed);
         let bounds = MultiBounds::symmetric(5.0, dim);
         let genome = RealVector::generate(&mut rng, &bounds);
         prop_assert_eq!(genome.dimension(), dim);
@@ -19,9 +32,10 @@ proptest! {
     #[test]
     fn real_vector_genes_within_bounds(
         dim in 1usize..20,
-        half_width in 0.1f64..100.0
+        half_width in 0.1f64..100.0,
+        seed in any::<u64>()
     ) {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::seed_from_u64(seed);
         let bounds = MultiBounds::symmetric(half_width, dim);
         let genome = RealVector::generate(&mut rng, &bounds);
 
@@ -69,8 +83,8 @@ proptest! {
     // ==================== BitString Properties ====================
 
     #[test]
-    fn bit_string_dimension_preserved(len in 1usize..100) {
-        let mut rng = rand::thread_rng();
+    fn bit_string_dimension_preserved(len in 1usize..100, seed in any::<u64>()) {
+        let mut rng = StdRng::seed_from_u64(seed);
         let bounds = MultiBounds::symmetric(1.0, len);
         let genome = BitString::generate(&mut rng, &bounds);
         prop_assert_eq!(genome.dimension(), len);
@@ -95,16 +109,16 @@ proptest! {
     // ==================== Permutation Properties ====================
 
     #[test]
-    fn permutation_is_valid(n in 2usize..20) {
-        let mut rng = rand::thread_rng();
+    fn permutation_is_valid(n in 2usize..20, seed in any::<u64>()) {
+        let mut rng = StdRng::seed_from_u64(seed);
         let bounds = MultiBounds::symmetric(1.0, n);
         let genome = Permutation::generate(&mut rng, &bounds);
         prop_assert!(genome.is_valid_permutation());
     }
 
     #[test]
-    fn permutation_contains_all_elements(n in 2usize..20) {
-        let mut rng = rand::thread_rng();
+    fn permutation_contains_all_elements(n in 2usize..20, seed in any::<u64>()) {
+        let mut rng = StdRng::seed_from_u64(seed);
         let bounds = MultiBounds::symmetric(1.0, n);
         let genome = Permutation::generate(&mut rng, &bounds);
         let perm = genome.permutation();
@@ -116,8 +130,8 @@ proptest! {
     }
 
     #[test]
-    fn permutation_trace_roundtrip(n in 2usize..15) {
-        let mut rng = rand::thread_rng();
+    fn permutation_trace_roundtrip(n in 2usize..15, seed in any::<u64>()) {
+        let mut rng = StdRng::seed_from_u64(seed);
         let bounds = MultiBounds::symmetric(1.0, n);
         let original = Permutation::generate(&mut rng, &bounds);
         let trace = original.to_trace();
@@ -160,9 +174,10 @@ proptest! {
     #[test]
     fn sbx_crossover_produces_valid_offspring(
         eta in 1.0..30.0f64,
-        dim in 2usize..10
+        dim in 2usize..10,
+        seed in any::<u64>()
     ) {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::seed_from_u64(seed);
         let crossover = SbxCrossover::new(eta);
         let bounds = MultiBounds::symmetric(5.0, dim);
 
@@ -181,9 +196,10 @@ proptest! {
     #[test]
     fn tournament_selection_returns_valid_index(
         size in 2usize..10,
-        pop_size in 10usize..50
+        pop_size in 10usize..50,
+        seed in any::<u64>()
     ) {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::seed_from_u64(seed);
         let selection = TournamentSelection::new(size);
 
         // Create a population with fitness values
@@ -223,16 +239,16 @@ proptest! {
     // ==================== Population Properties ====================
 
     #[test]
-    fn population_maintains_size(pop_size in 5usize..50, dim in 2usize..10) {
-        let mut rng = rand::thread_rng();
+    fn population_maintains_size(pop_size in 5usize..50, dim in 2usize..10, seed in any::<u64>()) {
+        let mut rng = StdRng::seed_from_u64(seed);
         let bounds = MultiBounds::symmetric(5.0, dim);
         let population: Population<RealVector, f64> = Population::random(pop_size, &bounds, &mut rng);
         prop_assert_eq!(population.len(), pop_size);
     }
 
     #[test]
-    fn population_best_has_highest_fitness(pop_size in 5usize..30) {
-        let mut rng = rand::thread_rng();
+    fn population_best_has_highest_fitness(pop_size in 5usize..30, seed in any::<u64>()) {
+        let mut rng = StdRng::seed_from_u64(seed);
         let bounds = MultiBounds::symmetric(5.0, 5);
         let fitness = Sphere::new(5);
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Alex Nodeland"]
 description = "WebAssembly bindings for fugue-evo genetic algorithm library"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/alexnodeland/fugue-evo"
 keywords = ["genetic-algorithm", "wasm", "webassembly", "optimization"]
 categories = ["algorithms", "wasm"]
@@ -18,9 +18,11 @@ fugue-evo = { path = "../..", default-features = false, features = ["std"] }
 
 # WASM bindings
 wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-serde-wasm-bindgen = "0.6"
+
+# Better panic diagnostics at the JS boundary (logs Rust file/line to the
+# console instead of an opaque `unreachable` trap). See AUDIT EV-09.
+console_error_panic_hook = "0.1"
 
 # Serialization for JS interop
 serde = { version = "1.0", features = ["derive"] }
@@ -33,9 +35,10 @@ rand = "0.8"
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 
-[profile.release]
-opt-level = "s"
-lto = true
+# [profile.release] (opt-level = "s", lto = true) lives in the WORKSPACE ROOT
+# Cargo.toml (../../Cargo.toml), not here. Cargo only honors [profile.*] from
+# the workspace root manifest; a copy in a non-root member is silently ignored
+# (see AUDIT-2026-07.md EV-31). Edit the root manifest to change these.
 
 [package.metadata.wasm-pack.profile.release]
 # Enable wasm-opt for smaller bundle size (~20-30% reduction)

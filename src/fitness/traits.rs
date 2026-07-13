@@ -26,6 +26,41 @@ pub trait FitnessValue:
     fn is_worse_than(&self, other: &Self) -> bool {
         other.is_better_than(self)
     }
+
+    /// Total ordering by quality, where [`Ordering::Greater`] means `self` is
+    /// the better individual.
+    ///
+    /// This delegates to [`is_better_than`](FitnessValue::is_better_than) for
+    /// the quality comparison (never to a `to_f64()`-derived scalar, which can
+    /// disagree with the true ordering — see the `ParetoFitness` case where
+    /// infinite crowding distances collapse every rank to `+inf`). Any value
+    /// whose `to_f64()` is `NaN` is ranked strictly worst, so the result is a
+    /// genuine total order usable with `max_by`/`min_by`/`sort_by` even if a
+    /// `NaN` fitness slips past [`Individual::set_fitness`]'s guard (defense in
+    /// depth).
+    ///
+    /// [`Ordering::Greater`]: std::cmp::Ordering::Greater
+    /// [`Individual::set_fitness`]: crate::population::individual::Individual::set_fitness
+    fn cmp_by_quality(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let self_nan = self.to_f64().is_nan();
+        let other_nan = other.to_f64().is_nan();
+        match (self_nan, other_nan) {
+            (true, true) => Ordering::Equal,
+            // A NaN is strictly worse than any real fitness.
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => {
+                if self.is_better_than(other) {
+                    Ordering::Greater
+                } else if other.is_better_than(self) {
+                    Ordering::Less
+                } else {
+                    Ordering::Equal
+                }
+            }
+        }
+    }
 }
 
 impl FitnessValue for f64 {

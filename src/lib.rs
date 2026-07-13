@@ -16,23 +16,36 @@
 //!
 //! A Probabilistic Genetic Algorithm Library for Rust.
 //!
-//! This library implements genetic algorithms through the lens of probabilistic programming,
-//! treating evolution as Bayesian inference over solution spaces. It integrates with
-//! [fugue-ppl](https://github.com/fugue-ppl/fugue) for trace-based evolutionary operators.
+//! This library is primarily a broad, standalone **evolutionary computation**
+//! toolkit that *optionally* interoperates with the
+//! [fugue-ppl](https://github.com/fugue-ppl/fugue) probabilistic-programming
+//! library. Being precise about the coupling (EV-17): the default flagship
+//! algorithms — [`SimpleGA`](algorithms::simple_ga::SimpleGA), CMA-ES, NSGA-II,
+//! Island Model, Evolution Strategy, EDA/UMDA, SteadyState — are ordinary EC.
+//! They use fugue's [`Trace`](fugue::Trace) only as an address→value **data
+//! container** for the optional `to_trace`/`from_trace` round-trip; they never
+//! construct a fugue `Model` or call its inference engines. The genuine
+//! "evolution as Bayesian inference over solution spaces" machinery —
+//! `EvolutionarySMC` (tempered SMC over a Boltzmann posterior), `EvolutionStep`,
+//! and `BayesianAdaptiveGA` — lives entirely in the [`fugue_integration`]
+//! module (exercised by `examples/bayesian_evolution.rs`), which is where
+//! fugue's `Model`/`factor` inference path is actually used. Treat that module,
+//! not the default algorithms, as the "deep integration" story.
 //!
 //! ## Features
 //!
-//! - **Multiple Algorithms**: SimpleGA, CMA-ES, NSGA-II, Island Model, EDA, Interactive GA
+//! - **Multiple Algorithms**: SimpleGA, CMA-ES, NSGA-II, Island Model, EDA, Interactive GA (standalone EC)
 //! - **Flexible Genomes**: RealVector, BitString, Permutation, TreeGenome
 //! - **Modular Operators**: Pluggable selection, crossover, and mutation operators
-//! - **Adaptive Hyperparameters**: Bayesian learning of mutation rates and other parameters
-//! - **Production Ready**: Checkpointing, parallel evaluation, WASM support
+//! - **Adaptive Hyperparameters**: opt-in Thompson-sampling tuning of operator parameters (`SimpleGABuilder::adaptive_operators` + `SimpleGA::run_adaptive`)
+//! - **Optional Fugue integration**: [`fugue_integration`] adds a genuine tempered-SMC / Boltzmann inference path over evolutionary traces
+//! - **Production Ready**: Checkpointing (bit-identical resume), parallel evaluation, WASM support
 //!
 //! ## Core Concepts
 //!
-//! - **Fitness as Likelihood**: Selection pressure maps directly to Bayesian conditioning
-//! - **Learnable Operators**: Automatic inference of optimal hyperparameters using conjugate priors
-//! - **Trace-Based Evolution**: Deep Fugue integration enables novel probabilistic operators
+//! - **Fitness as Likelihood**: the exp(f/T) ↔ conditioning correspondence, realized concretely by [`BoltzmannSelection`](operators::selection::BoltzmannSelection) and by the tempered-SMC path in [`fugue_integration`]
+//! - **Learnable Operators**: opt-in online tuning of operator parameters via a Thompson-sampling bandit (`SimpleGABuilder::adaptive_operators` + `run_adaptive`); the default `run` path uses fixed parameters
+//! - **Trace-Based Evolution**: genomes round-trip through fugue [`Trace`](fugue::Trace)s as a data structure; the deeper Fugue-integrated inference (SMC/Boltzmann) is scoped to the [`fugue_integration`] module, not the default algorithms
 //! - **Type Safety**: Compile-time guarantees via Rust's type system
 //!
 //! ## Quick Start
@@ -58,13 +71,12 @@
 //!     // Define search bounds: 10 dimensions in [-5.12, 5.12]
 //!     let bounds = MultiBounds::symmetric(5.12, 10);
 //!
-//!     // Run optimization
-//!     let result = SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
+//!     // Run optimization. `real_valued()` pins the genome/fitness types (no
+//!     // turbofish) and pre-installs tournament selection, SBX crossover, and
+//!     // polynomial mutation as overridable defaults.
+//!     let result = SimpleGABuilder::real_valued()
 //!         .population_size(100)
 //!         .bounds(bounds)
-//!         .selection(TournamentSelection::new(3))
-//!         .crossover(SbxCrossover::new(20.0))
-//!         .mutation(PolynomialMutation::new(20.0))
 //!         .fitness(Sphere::new(10))
 //!         .max_generations(200)
 //!         .build()?

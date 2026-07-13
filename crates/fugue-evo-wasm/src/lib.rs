@@ -36,10 +36,22 @@ pub use interactive::*;
 pub use optimizers::*;
 pub use result::*;
 
-/// Initialize the WASM module
+/// Initialize the WASM module.
+///
+/// Installs [`console_error_panic_hook`] so that any Rust panic in the
+/// `fugue-evo` call graph is logged to the JavaScript console with its real
+/// Rust file/line and message, instead of surfacing as an opaque
+/// `RuntimeError: unreachable executed` (AUDIT EV-09).
+///
+/// Note: a Rust panic still aborts the *current* call with a wasm trap — this
+/// hook does not make panics recoverable, it makes them *diagnosable*. All
+/// fallible entry points in this crate additionally return `Result<_, JsValue>`
+/// with structured error information (see `error::evolution_error_to_js`) rather
+/// than panicking, and the JS-boundary fitness helpers use saturating fallbacks
+/// (`unwrap_or(...)`) rather than panicking unwraps.
 #[wasm_bindgen(start)]
 pub fn init() {
-    // WASM initialization complete
+    console_error_panic_hook::set_once();
 }
 
 /// Get the library version

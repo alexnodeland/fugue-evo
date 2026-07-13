@@ -21,18 +21,41 @@ use crate::population::individual::Individual;
 use crate::population::population::Population;
 use crate::termination::{EvolutionState, MaxGenerations, TerminationCriterion};
 
-/// Replacement strategy for steady-state GA
+/// Replacement strategy for steady-state GA.
+///
+/// EV-42: only [`ReplacementStrategy::ReplaceIfBetter`] is elitist (it accepts an
+/// offspring only when it improves on the individual it would replace). Every
+/// other strategy performs its replacement **unconditionally**, matching its
+/// documented meaning — in particular `ReplaceRandom` is a genuine, diversity-
+/// preserving stochastic replacement and may accept a worse offspring.
 #[derive(Clone, Debug, Default)]
 pub enum ReplacementStrategy {
-    /// Replace the worst individual(s) in the population
+    /// Replace the worst individual in the population, unconditionally. Because the
+    /// current best is never the replacement target, the population best is
+    /// preserved, but the population mean may temporarily worsen.
     #[default]
     ReplaceWorst,
-    /// Replace a randomly selected individual
+    /// Replace a uniformly-random individual, unconditionally (non-elitist). A
+    /// worse offspring can enter the population, preserving exploratory diversity.
     ReplaceRandom,
-    /// Replace the parent if offspring is better (generational replacement)
+    /// Replace the worse parent, but only if the offspring beats it
+    /// (generational replacement).
     ReplaceParent,
-    /// Use tournament selection to choose individual to replace (inverse tournament)
+    /// Replace the worst individual, but only if the offspring is strictly better
+    /// than it (the fully elitist, accept-if-better option).
+    ReplaceIfBetter,
+    /// Use an inverse tournament to choose a (likely poor) individual to replace,
+    /// then replace it unconditionally.
     TournamentWorst(usize),
+}
+
+impl ReplacementStrategy {
+    /// Whether replacement is gated on the offspring improving on its target
+    /// (EV-42). Only `ReplaceIfBetter` is elitist here; `ReplaceParent` carries
+    /// its own acceptance test in the main loop.
+    fn requires_improvement(&self) -> bool {
+        matches!(self, ReplacementStrategy::ReplaceIfBetter)
+    }
 }
 
 /// Configuration for the Steady-State GA
@@ -50,6 +73,11 @@ pub struct SteadyStateConfig {
     pub parallel_evaluation: bool,
     /// Number of steps per "generation" for statistics reporting
     pub steps_per_generation: usize,
+    /// EV-44: when true, an offspring whose genome equals an existing population
+    /// member is rejected instead of inserted, preventing the population from
+    /// collapsing to duplicates. This costs an O(population_size) genome
+    /// comparison per candidate offspring.
+    pub prevent_duplicates: bool,
 }
 
 impl Default for SteadyStateConfig {
@@ -61,6 +89,7 @@ impl Default for SteadyStateConfig {
             replacement: ReplacementStrategy::ReplaceWorst,
             parallel_evaluation: false,
             steps_per_generation: 50, // Report stats every 50 replacements
+            prevent_duplicates: false,
         }
     }
 }
@@ -149,6 +178,17 @@ where
     /// Set the number of steps per generation (for statistics)
     pub fn steps_per_generation(mut self, steps: usize) -> Self {
         self.config.steps_per_generation = steps;
+        self
+    }
+
+    /// Enable or disable duplicate avoidance (EV-44).
+    ///
+    /// When enabled, an offspring whose genome equals any current population
+    /// member is rejected rather than inserted. This preserves diversity but adds
+    /// an O(population_size) genome comparison per candidate offspring, and
+    /// requires the genome type to implement [`PartialEq`].
+    pub fn prevent_duplicates(mut self, enabled: bool) -> Self {
+        self.config.prevent_duplicates = enabled;
         self
     }
 
@@ -348,10 +388,12 @@ where
         SteadyStateBuilder::new()
     }
 
-    /// Find the index of the worst individual to replace
+    /// Find the index of the individual to replace for the configured strategy.
     fn find_replacement_index<R: Rng>(&self, population: &Population<G, F>, rng: &mut R) -> usize {
         match &self.config.replacement {
-            ReplacementStrategy::ReplaceWorst => {
+            // Both worst-targeting strategies aim at the least-fit individual; the
+            // accept-if-better gate for `ReplaceIfBetter` is applied by the caller.
+            ReplacementStrategy::ReplaceWorst | ReplacementStrategy::ReplaceIfBetter => {
                 // Find index of worst fitness
                 population
                     .iter()
@@ -387,8 +429,121 @@ where
         }
     }
 
-    /// Run the steady-state genetic algorithm
-    pub fn run<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<G, F>, EvolutionError> {
+    /// Generate exactly `offspring_count` evaluated children (EV-43).
+    ///
+    /// Each returned tuple is `(child, (parent1_idx, parent1_fitness),
+    /// (parent2_idx, parent2_fitness))`; the parent data drives `ReplaceParent`.
+    /// Fresh parents are selected per crossover pair, and only children that will
+    /// actually be considered are mutated and evaluated.
+    #[allow(clippy::type_complexity)]
+    fn generate_offspring<R: Rng>(
+        &self,
+        selection_pool: &[(G, f64)],
+        rng: &mut R,
+    ) -> Vec<(Individual<G, F>, (usize, f64), (usize, f64))> {
+        let target = self.config.offspring_count;
+        let mut offspring = Vec::with_capacity(target);
+
+        while offspring.len() < target {
+            let p1_idx = self.selection.select(selection_pool, rng);
+            let p2_idx = self.selection.select(selection_pool, rng);
+            let p1 = (p1_idx, selection_pool[p1_idx].1);
+            let p2 = (p2_idx, selection_pool[p2_idx].1);
+            let parent1 = &selection_pool[p1_idx].0;
+            let parent2 = &selection_pool[p2_idx].0;
+
+            let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability {
+                match self.crossover.crossover(parent1, parent2, rng).genome() {
+                    Some((c1, c2)) => (c1, c2),
+                    None => (parent1.clone(), parent2.clone()),
+                }
+            } else {
+                (parent1.clone(), parent2.clone())
+            };
+
+            self.mutation.mutate(&mut child1, rng);
+            let mut ind1 = Individual::new(child1);
+            ind1.set_fitness(self.fitness.evaluate(ind1.genome()));
+            offspring.push((ind1, p1, p2));
+
+            if offspring.len() < target {
+                self.mutation.mutate(&mut child2, rng);
+                let mut ind2 = Individual::new(child2);
+                ind2.set_fitness(self.fitness.evaluate(ind2.genome()));
+                offspring.push((ind2, p1, p2));
+            }
+        }
+
+        offspring
+    }
+
+    /// Insert an already-evaluated `child` into `population` per the configured
+    /// replacement strategy (EV-42) and duplicate policy (EV-44).
+    ///
+    /// The population may be left unchanged: a duplicate is rejected when
+    /// `prevent_duplicates` is set, `ReplaceParent` skips when the child does not
+    /// beat its worse parent, and `ReplaceIfBetter` skips when the child does not
+    /// beat the individual it targets. All other strategies replace their chosen
+    /// index unconditionally.
+    fn place_offspring<R: Rng>(
+        &self,
+        population: &mut Population<G, F>,
+        child: Individual<G, F>,
+        parent1: (usize, f64),
+        parent2: (usize, f64),
+        rng: &mut R,
+    ) where
+        G: PartialEq,
+    {
+        // EV-44: reject an exact duplicate of an existing genome if configured
+        // (O(population_size) genome comparison).
+        if self.config.prevent_duplicates
+            && population.iter().any(|ind| ind.genome() == child.genome())
+        {
+            return;
+        }
+
+        let replace_idx = match &self.config.replacement {
+            ReplacementStrategy::ReplaceParent => {
+                let (p1_idx, p1_fit) = parent1;
+                let (p2_idx, p2_fit) = parent2;
+                let child_fit = child.fitness_value().to_f64();
+                if child_fit > p1_fit.min(p2_fit) {
+                    if p1_fit < p2_fit {
+                        p1_idx
+                    } else {
+                        p2_idx
+                    }
+                } else {
+                    return; // offspring did not beat its worse parent
+                }
+            }
+            _ => self.find_replacement_index(population, rng),
+        };
+
+        // EV-42: only the elitist ReplaceIfBetter gates on improvement. Every
+        // other strategy (ReplaceRandom, ReplaceWorst, TournamentWorst) replaces
+        // its chosen index unconditionally, as documented.
+        if self.config.replacement.requires_improvement()
+            && !child
+                .fitness_value()
+                .is_better_than(population[replace_idx].fitness_value())
+        {
+            return;
+        }
+
+        population[replace_idx] = child;
+    }
+
+    /// Run the steady-state genetic algorithm.
+    ///
+    /// Requires `G: PartialEq` so the optional duplicate-avoidance policy
+    /// (`prevent_duplicates`) can compare genomes; all built-in genome types
+    /// satisfy this.
+    pub fn run<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<G, F>, EvolutionError>
+    where
+        G: PartialEq,
+    {
         let start_time = Instant::now();
 
         // Initialize population
@@ -440,66 +595,15 @@ where
             // Selection pool
             let selection_pool: Vec<(G, f64)> = population.as_fitness_pairs();
 
-            // Select parents
-            let parent1_idx = self.selection.select(&selection_pool, rng);
-            let parent2_idx = self.selection.select(&selection_pool, rng);
-            let parent1 = &selection_pool[parent1_idx].0;
-            let parent2 = &selection_pool[parent2_idx].0;
-
-            // Crossover
-            let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability {
-                match self.crossover.crossover(parent1, parent2, rng).genome() {
-                    Some((c1, c2)) => (c1, c2),
-                    None => (parent1.clone(), parent2.clone()),
-                }
-            } else {
-                (parent1.clone(), parent2.clone())
-            };
-
-            // Mutation
-            self.mutation.mutate(&mut child1, rng);
-            self.mutation.mutate(&mut child2, rng);
-
-            // Evaluate offspring
-            let mut offspring: Vec<Individual<G, F>> =
-                vec![Individual::new(child1), Individual::new(child2)];
-
-            for ind in &mut offspring {
-                let fitness = self.fitness.evaluate(&ind.genome);
-                ind.set_fitness(fitness);
-            }
+            // EV-43: generate and evaluate EXACTLY offspring_count children — no
+            // more, no fewer — so wasted evaluations don't inflate the counter or
+            // trip MaxEvaluations early, and offspring_count > 2 is honored.
+            let offspring = self.generate_offspring(&selection_pool, rng);
             evaluations += offspring.len();
 
-            // Replace individuals in population
-            for child in offspring.into_iter().take(self.config.offspring_count) {
-                let replace_idx = match &self.config.replacement {
-                    ReplacementStrategy::ReplaceParent => {
-                        // Only replace if child is better than worst parent
-                        let p1_fit = selection_pool[parent1_idx].1;
-                        let p2_fit = selection_pool[parent2_idx].1;
-                        let child_fit = child.fitness_value().to_f64();
-
-                        if child_fit > p1_fit.min(p2_fit) {
-                            if p1_fit < p2_fit {
-                                parent1_idx
-                            } else {
-                                parent2_idx
-                            }
-                        } else {
-                            continue; // Don't replace
-                        }
-                    }
-                    _ => self.find_replacement_index(&population, rng),
-                };
-
-                // Only replace if new individual is better than the one being replaced
-                // (optional: could be configurable)
-                if child
-                    .fitness_value()
-                    .is_better_than(population[replace_idx].fitness_value())
-                {
-                    population[replace_idx] = child;
-                }
+            // Replace individuals in the population.
+            for (child, parent1, parent2) in offspring {
+                self.place_offspring(&mut population, child, parent1, parent2, rng);
             }
 
             // Update best individual
@@ -550,11 +654,61 @@ where
     Fit: Fitness<Genome = G, Value = F> + Sync,
     Term: TerminationCriterion<G, F>,
 {
-    /// Run the steady-state genetic algorithm with bounded operators
-    pub fn run_bounded<R: Rng>(
+    /// Generate exactly `offspring_count` evaluated children with bounded
+    /// operators (EV-43). See [`SteadyStateGA::generate_offspring`].
+    #[allow(clippy::type_complexity)]
+    fn generate_offspring_bounded<R: Rng>(
         &self,
+        selection_pool: &[(G, f64)],
         rng: &mut R,
-    ) -> Result<EvolutionResult<G, F>, EvolutionError> {
+    ) -> Vec<(Individual<G, F>, (usize, f64), (usize, f64))> {
+        let target = self.config.offspring_count;
+        let mut offspring = Vec::with_capacity(target);
+
+        while offspring.len() < target {
+            let p1_idx = self.selection.select(selection_pool, rng);
+            let p2_idx = self.selection.select(selection_pool, rng);
+            let p1 = (p1_idx, selection_pool[p1_idx].1);
+            let p2 = (p2_idx, selection_pool[p2_idx].1);
+            let parent1 = &selection_pool[p1_idx].0;
+            let parent2 = &selection_pool[p2_idx].0;
+
+            let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability {
+                match self
+                    .crossover
+                    .crossover_bounded(parent1, parent2, &self.bounds, rng)
+                    .genome()
+                {
+                    Some((c1, c2)) => (c1, c2),
+                    None => (parent1.clone(), parent2.clone()),
+                }
+            } else {
+                (parent1.clone(), parent2.clone())
+            };
+
+            self.mutation.mutate_bounded(&mut child1, &self.bounds, rng);
+            let mut ind1 = Individual::new(child1);
+            ind1.set_fitness(self.fitness.evaluate(ind1.genome()));
+            offspring.push((ind1, p1, p2));
+
+            if offspring.len() < target {
+                self.mutation.mutate_bounded(&mut child2, &self.bounds, rng);
+                let mut ind2 = Individual::new(child2);
+                ind2.set_fitness(self.fitness.evaluate(ind2.genome()));
+                offspring.push((ind2, p1, p2));
+            }
+        }
+
+        offspring
+    }
+
+    /// Run the steady-state genetic algorithm with bounded operators.
+    ///
+    /// Requires `G: PartialEq` for the optional `prevent_duplicates` policy.
+    pub fn run_bounded<R: Rng>(&self, rng: &mut R) -> Result<EvolutionResult<G, F>, EvolutionError>
+    where
+        G: PartialEq,
+    {
         let start_time = Instant::now();
 
         // Initialize population
@@ -604,67 +758,14 @@ where
             // Selection pool
             let selection_pool: Vec<(G, f64)> = population.as_fitness_pairs();
 
-            // Select parents
-            let parent1_idx = self.selection.select(&selection_pool, rng);
-            let parent2_idx = self.selection.select(&selection_pool, rng);
-            let parent1 = &selection_pool[parent1_idx].0;
-            let parent2 = &selection_pool[parent2_idx].0;
-
-            // Crossover with bounds
-            let (mut child1, mut child2) = if rng.gen::<f64>() < self.config.crossover_probability {
-                match self
-                    .crossover
-                    .crossover_bounded(parent1, parent2, &self.bounds, rng)
-                    .genome()
-                {
-                    Some((c1, c2)) => (c1, c2),
-                    None => (parent1.clone(), parent2.clone()),
-                }
-            } else {
-                (parent1.clone(), parent2.clone())
-            };
-
-            // Mutation with bounds
-            self.mutation.mutate_bounded(&mut child1, &self.bounds, rng);
-            self.mutation.mutate_bounded(&mut child2, &self.bounds, rng);
-
-            // Evaluate offspring
-            let mut offspring: Vec<Individual<G, F>> =
-                vec![Individual::new(child1), Individual::new(child2)];
-
-            for ind in &mut offspring {
-                let fitness = self.fitness.evaluate(&ind.genome);
-                ind.set_fitness(fitness);
-            }
+            // EV-43: generate and evaluate EXACTLY offspring_count children with
+            // bounded operators.
+            let offspring = self.generate_offspring_bounded(&selection_pool, rng);
             evaluations += offspring.len();
 
-            // Replace individuals in population
-            for child in offspring.into_iter().take(self.config.offspring_count) {
-                let replace_idx = match &self.config.replacement {
-                    ReplacementStrategy::ReplaceParent => {
-                        let p1_fit = selection_pool[parent1_idx].1;
-                        let p2_fit = selection_pool[parent2_idx].1;
-                        let child_fit = child.fitness_value().to_f64();
-
-                        if child_fit > p1_fit.min(p2_fit) {
-                            if p1_fit < p2_fit {
-                                parent1_idx
-                            } else {
-                                parent2_idx
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                    _ => self.find_replacement_index(&population, rng),
-                };
-
-                if child
-                    .fitness_value()
-                    .is_better_than(population[replace_idx].fitness_value())
-                {
-                    population[replace_idx] = child;
-                }
+            // Replace individuals in the population.
+            for (child, parent1, parent2) in offspring {
+                self.place_offspring(&mut population, child, parent1, parent2, rng);
             }
 
             // Update best individual
@@ -704,11 +805,13 @@ where
 mod tests {
     use super::*;
     use crate::fitness::benchmarks::{OneMax, Sphere};
+    use crate::genome::real_vector::RealVector;
     use crate::genome::traits::RealValuedGenome;
     use crate::operators::crossover::{SbxCrossover, UniformCrossover};
     use crate::operators::mutation::{BitFlipMutation, PolynomialMutation};
     use crate::operators::selection::TournamentSelection;
     use crate::termination::MaxEvaluations;
+    use rand::SeedableRng;
 
     #[test]
     fn test_steady_state_builder() {
@@ -832,5 +935,114 @@ mod tests {
         for gene in result.best_genome.genes() {
             assert!(*gene >= -5.12 && *gene <= 5.12);
         }
+    }
+
+    // regression: EV-43 — with offspring_count = 1, exactly one child is evaluated
+    // per step. Starting from a pop of 10 (10 initial evals) under a budget of 15,
+    // the fixed code stops at exactly 15; the pre-fix code evaluated 2 per step and
+    // overshot to 16.
+    #[test]
+    fn test_offspring_count_one_evaluates_one_per_step() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let bounds = MultiBounds::symmetric(5.12, 5);
+        let ga = SteadyStateBuilder::new()
+            .population_size(10)
+            .offspring_count(1)
+            .steps_per_generation(1)
+            .bounds(bounds)
+            .selection(TournamentSelection::new(2))
+            .crossover(SbxCrossover::new(20.0))
+            .mutation(PolynomialMutation::new(20.0))
+            .fitness(Sphere::new(5))
+            .termination(MaxEvaluations::new(15))
+            .build()
+            .unwrap();
+
+        let result = ga.run(&mut rng).unwrap();
+        assert_eq!(result.evaluations, 15);
+    }
+
+    // regression: EV-42 — ReplaceRandom replaces unconditionally, so a worse
+    // offspring can enter and the population's WORST fitness can degrade across
+    // steps. The pre-fix accept-if-better guard kept the worst monotone, so no
+    // degradation could ever appear.
+    #[test]
+    fn test_replace_random_accepts_worse_offspring() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(20);
+        let bounds = MultiBounds::symmetric(5.12, 5);
+        let ga = SteadyStateBuilder::new()
+            .population_size(20)
+            .offspring_count(1)
+            .steps_per_generation(1)
+            .replacement(ReplacementStrategy::ReplaceRandom)
+            .bounds(bounds)
+            .selection(TournamentSelection::new(2))
+            .crossover(SbxCrossover::new(2.0))
+            .mutation(PolynomialMutation::new(2.0))
+            .fitness(Sphere::new(5))
+            .termination(MaxEvaluations::new(400))
+            .build()
+            .unwrap();
+
+        let result = ga.run(&mut rng).unwrap();
+        let worst: Vec<f64> = result
+            .stats
+            .generations
+            .iter()
+            .map(|g| g.worst_fitness)
+            .collect();
+        let degraded = worst.windows(2).any(|w| w[1] < w[0] - 1e-12);
+        assert!(
+            degraded,
+            "ReplaceRandom must let the population worst degrade at least once"
+        );
+    }
+
+    // regression: EV-44 — with prevent_duplicates, an offspring whose genome equals
+    // an existing member is rejected instead of inserted, even if it is fitter.
+    #[test]
+    fn test_prevent_duplicates_rejects_existing_genome() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let bounds = MultiBounds::symmetric(5.0, 3);
+        let ga = SteadyStateBuilder::new()
+            .population_size(5)
+            .offspring_count(1)
+            .replacement(ReplacementStrategy::ReplaceRandom)
+            .prevent_duplicates(true)
+            .bounds(bounds)
+            .selection(TournamentSelection::new(2))
+            .crossover(SbxCrossover::new(20.0))
+            .mutation(PolynomialMutation::new(20.0))
+            .fitness(Sphere::new(3))
+            .max_generations(1)
+            .build()
+            .unwrap();
+
+        // A population of distinct genomes.
+        let mut pop: Population<RealVector, f64> = Population::new();
+        for i in 0..5 {
+            let mut ind = Individual::new(RealVector::new(vec![i as f64, 0.0, 0.0]));
+            ind.set_fitness(-(i as f64));
+            pop.push(ind);
+        }
+
+        // A child equal to an existing member is rejected (population unchanged),
+        // even though its fitness is better.
+        let mut dup = Individual::new(RealVector::new(vec![2.0, 0.0, 0.0]));
+        dup.set_fitness(100.0);
+        let before: Vec<RealVector> = pop.iter().map(|i| i.genome().clone()).collect();
+        ga.place_offspring(&mut pop, dup, (0, 0.0), (0, 0.0), &mut rng);
+        let after: Vec<RealVector> = pop.iter().map(|i| i.genome().clone()).collect();
+        assert_eq!(before, after, "duplicate offspring must be rejected");
+
+        // A novel genome is accepted (ReplaceRandom, unconditional).
+        let mut novel = Individual::new(RealVector::new(vec![42.0, 0.0, 0.0]));
+        novel.set_fitness(-999.0);
+        let novel_genome = novel.genome().clone();
+        ga.place_offspring(&mut pop, novel, (0, 0.0), (0, 0.0), &mut rng);
+        assert!(
+            pop.iter().any(|i| *i.genome() == novel_genome),
+            "a novel genome should be inserted"
+        );
     }
 }

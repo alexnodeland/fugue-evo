@@ -288,4 +288,4 @@ The package uses `wasm-opt` for optimization, resulting in ~20-30% smaller bundl
 
 ## License
 
-MIT OR Apache-2.0
+MIT (see the [workspace LICENSE](../../LICENSE))

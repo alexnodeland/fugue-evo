@@ -97,10 +97,40 @@ where
         self
     }
 
-    /// Set RNG state
+    /// Set RNG state from raw serialized bytes.
+    ///
+    /// Prefer [`Checkpoint::with_rng`] for a type-checked capture of a
+    /// [`SnapshotRng`](crate::checkpoint::rng::SnapshotRng).
     pub fn with_rng_state(mut self, state: Vec<u8>) -> Self {
         self.rng_state = Some(state);
         self
+    }
+
+    /// Capture a [`SnapshotRng`](crate::checkpoint::rng::SnapshotRng)'s full state into this checkpoint (EV-02).
+    ///
+    /// Restoring the checkpoint's RNG via [`Checkpoint::restore_rng`] and
+    /// continuing evolution then reproduces the exact stochastic trajectory a
+    /// continuous (never-interrupted) run would have taken. Reproducible resume
+    /// requires a ChaCha RNG (`ChaCha8Rng`/`ChaCha12Rng`/`ChaCha20Rng`); generic
+    /// generators such as `StdRng`/`ThreadRng` cannot be snapshotted.
+    pub fn with_rng<R: crate::checkpoint::rng::SnapshotRng>(
+        mut self,
+        rng: &R,
+    ) -> Result<Self, crate::error::CheckpointError> {
+        self.rng_state = Some(rng.capture()?);
+        Ok(self)
+    }
+
+    /// Restore a [`SnapshotRng`](crate::checkpoint::rng::SnapshotRng) previously captured via [`Checkpoint::with_rng`].
+    ///
+    /// Returns `Ok(None)` if no RNG state was stored in this checkpoint.
+    pub fn restore_rng<R: crate::checkpoint::rng::SnapshotRng>(
+        &self,
+    ) -> Result<Option<R>, crate::error::CheckpointError> {
+        match &self.rng_state {
+            Some(bytes) => Ok(Some(R::restore(bytes)?)),
+            None => Ok(None),
+        }
     }
 
     /// Check if checkpoint is compatible with current version
@@ -484,6 +514,40 @@ mod tests {
         assert!(matches!(island, AlgorithmState::Island { .. }));
         assert!(matches!(interactive, AlgorithmState::Interactive { .. }));
         assert!(matches!(custom, AlgorithmState::Custom(_)));
+    }
+
+    #[test]
+    fn test_checkpoint_rng_capture_restore_round_trip() {
+        // regression: EV-02 - with_rng must capture a ChaCha RNG's state such
+        // that restore_rng reproduces an identical draw sequence.
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(1234);
+        for _ in 0..11 {
+            let _: u64 = rng.gen();
+        }
+
+        let population: Vec<Individual<RealVector>> = vec![];
+        let checkpoint = Checkpoint::new(0, population).with_rng(&rng).unwrap();
+
+        let mut restored: ChaCha8Rng = checkpoint
+            .restore_rng()
+            .unwrap()
+            .expect("rng state must be present");
+
+        for _ in 0..500 {
+            assert_eq!(rng.gen::<u64>(), restored.gen::<u64>());
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_restore_rng_absent() {
+        use rand_chacha::ChaCha8Rng;
+        let population: Vec<Individual<RealVector>> = vec![];
+        let checkpoint = Checkpoint::new(0, population);
+        let restored: Option<ChaCha8Rng> = checkpoint.restore_rng().unwrap();
+        assert!(restored.is_none());
     }
 
     #[test]

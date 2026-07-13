@@ -170,7 +170,11 @@ pub struct ConvergenceDetector {
     config: ConvergenceConfig,
     /// History of best fitness values
     best_fitness_history: Vec<f64>,
-    /// History of mean fitness values (for R-hat)
+    /// History of mean fitness values (for R-hat). Retained in full so
+    /// `compute_rhat` can take a numerically stable **two-pass** variance over
+    /// each half-chain (see `compute_rhat`); an earlier revision kept running
+    /// sum / sum-of-squares prefix arrays instead, but the one-pass variance
+    /// they enabled was catastrophically unstable for large-offset fitness.
     mean_fitness_history: Vec<f64>,
     /// History of diversity values
     diversity_history: Vec<f64>,
@@ -178,10 +182,39 @@ pub struct ConvergenceDetector {
     current_generation: usize,
     /// Current evaluations
     current_evaluations: usize,
-    /// Best fitness seen so far
+    /// Best fitness seen so far, *thresholded* for stagnation tracking: only
+    /// advanced when an update improves on it by more than `stagnation_threshold`
+    /// (see `update`). Because of that throttle it can lag the true running max by
+    /// up to `stagnation_threshold`, so it must NOT be used for target detection.
     best_fitness_overall: f64,
+    /// Pure running maximum of every `best_fitness` ever passed to `update`, with
+    /// no threshold throttle (REG-1). This is the authoritative "best seen so far"
+    /// used by `best_fitness()` and the target-fitness check; keeping it separate
+    /// from `best_fitness_overall` lets stagnation stay throttled while target
+    /// detection sees the true best.
+    running_best_fitness: f64,
     /// Generation when best fitness was last improved
     last_improvement_generation: usize,
+}
+
+/// Numerically stable **two-pass** sample mean and (Bessel-corrected) variance
+/// of `xs`, returned as `(mean, variance)`.
+///
+/// The first pass computes the mean; the second sums squared deviations from
+/// that mean. This avoids the catastrophic cancellation of the one-pass
+/// `(Σx² − (Σx)²/n)/(n−1)` form, which loses precision when the values share a
+/// large offset relative to their spread (the exact failure that motivated
+/// this helper — see `compute_rhat`). `xs` must be non-empty; the variance is
+/// `0.0` for a single element. The operations mirror those in
+/// [`evolutionary_rhat`], so the two agree to within rounding.
+fn two_pass_mean_var(xs: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    if xs.len() < 2 {
+        return (mean, 0.0);
+    }
+    let ss: f64 = xs.iter().map(|x| (x - mean).powi(2)).sum();
+    (mean, ss / (n - 1.0))
 }
 
 impl ConvergenceDetector {
@@ -195,6 +228,7 @@ impl ConvergenceDetector {
             current_generation: 0,
             current_evaluations: 0,
             best_fitness_overall: f64::NEG_INFINITY,
+            running_best_fitness: f64::NEG_INFINITY,
             last_improvement_generation: 0,
         }
     }
@@ -219,7 +253,15 @@ impl ConvergenceDetector {
         self.mean_fitness_history.push(mean_fitness);
         self.diversity_history.push(diversity);
 
-        // Track improvement
+        // Pure running max (REG-1): tracks the true best regardless of the
+        // stagnation throttle below, so target detection never lags.
+        if best_fitness > self.running_best_fitness {
+            self.running_best_fitness = best_fitness;
+        }
+
+        // Track improvement (stagnation): intentionally throttled — only counts as
+        // an improvement when it beats the previous best by more than
+        // `stagnation_threshold`, so tiny gains don't reset the stagnation clock.
         if best_fitness > self.best_fitness_overall + self.config.stagnation_threshold {
             self.best_fitness_overall = best_fitness;
             self.last_improvement_generation = generation;
@@ -248,9 +290,19 @@ impl ConvergenceDetector {
             }
         }
 
-        // Check target fitness
+        // Check target fitness.
+        // EV-49 / REG-1: read the true running best (`running_best_fitness`, the
+        // same value returned by `best_fitness()`), not the last per-generation
+        // value and NOT the stagnation-throttled `best_fitness_overall`. A caller
+        // may legitimately pass a non-monotonic per-generation best, so
+        // `best_fitness_history.last()` can dip below a target already reached in
+        // an earlier generation; and `best_fitness_overall` lags the true best by
+        // up to `stagnation_threshold`, which would miss a reached target whenever
+        // `stagnation_threshold > target_tolerance`. The pure running max keeps
+        // target detection consistent with the struct's own `best_fitness()`.
         if let Some(target) = self.config.target_fitness {
-            if let Some(&best) = self.best_fitness_history.last() {
+            if !self.best_fitness_history.is_empty() {
+                let best = self.running_best_fitness;
                 if (best - target).abs() <= self.config.target_tolerance || best >= target {
                     reasons.push(ConvergenceReason::target_reached(best));
                 }
@@ -290,25 +342,58 @@ impl ConvergenceDetector {
         }
     }
 
-    /// Compute R-hat statistic from fitness history
+    /// Compute the split-R-hat statistic (Gelman & Rubin) from the mean-fitness
+    /// history.
+    ///
+    /// The history is split into two equal-length half-chains — indices
+    /// `[0, l)` and `[l, 2l)` where `l = len / 2` — matching the common-length
+    /// truncation performed by [`evolutionary_rhat`]; the returned value equals
+    /// `evolutionary_rhat(&[history[0..l], history[l..2l]])`.
+    ///
+    /// Each half-chain's mean and (Bessel-corrected) within-chain variance are
+    /// computed with a numerically stable **two-pass** formula (subtract the
+    /// chain mean, then sum squared deviations) directly over the raw history.
+    /// This replaces an earlier one-pass `(Σx² − (Σx)²/l)/(l−1)` form evaluated
+    /// over running sum / sum-of-squares prefix arrays. That form suffered
+    /// catastrophic cancellation for large-offset fitness (e.g. mean-fitness
+    /// ~1e6 with a true within-chain variance ~1 lost ~12 significant digits):
+    /// it could drive `w <= 0` and report a spurious R-hat of exactly `1.0`
+    /// ("converged"), and the running Σx² could overflow to `+inf` over very
+    /// long runs, yielding `NaN`. The two-pass form has no such cancellation.
+    ///
+    /// Returns `f64::INFINITY` when there are fewer than 5 draws per half-chain.
     fn compute_rhat(&self) -> f64 {
-        // Split history into two "chains"
         let n = self.mean_fitness_history.len();
-        let half = n / 2;
+        let l = n / 2;
 
-        if half < 5 {
+        if l < 5 {
             return f64::INFINITY; // Not enough data
         }
 
-        let chain1: Vec<f64> = self.mean_fitness_history[..half].to_vec();
-        let chain2: Vec<f64> = self.mean_fitness_history[half..].to_vec();
+        let l_f = l as f64;
 
-        evolutionary_rhat(&[chain1, chain2])
+        // chain1 = indices [0, l), chain2 = indices [l, 2l) — matching the
+        // common-length truncation performed by `evolutionary_rhat`.
+        let (mean1, var1) = two_pass_mean_var(&self.mean_fitness_history[0..l]);
+        let (mean2, var2) = two_pass_mean_var(&self.mean_fitness_history[l..2 * l]);
+
+        let m = 2.0;
+        let grand_mean = (mean1 + mean2) / m;
+        let b = l_f / (m - 1.0) * ((mean1 - grand_mean).powi(2) + (mean2 - grand_mean).powi(2));
+        let w = (var1 + var2) / m;
+
+        if w <= 0.0 {
+            return 1.0; // Perfect convergence (identical chains)
+        }
+
+        let var_plus = ((l_f - 1.0) / l_f) * w + b / l_f;
+        (var_plus / w).sqrt()
     }
 
-    /// Get the best fitness seen
+    /// Get the best fitness seen (true running maximum, not the
+    /// stagnation-throttled bookkeeping value).
     pub fn best_fitness(&self) -> f64 {
-        self.best_fitness_overall
+        self.running_best_fitness
     }
 
     /// Get generations since last improvement
@@ -339,6 +424,7 @@ impl ConvergenceDetector {
         self.current_generation = 0;
         self.current_evaluations = 0;
         self.best_fitness_overall = f64::NEG_INFINITY;
+        self.running_best_fitness = f64::NEG_INFINITY;
         self.last_improvement_generation = 0;
     }
 }
@@ -353,14 +439,24 @@ pub fn evolutionary_rhat(runs: &[Vec<f64>]) -> f64 {
     }
 
     let m = runs.len() as f64;
-    let n = runs.iter().map(|r| r.len()).min().unwrap_or(0) as f64;
+    // EV-14: the split-R-hat statistic (Gelman & Rubin, 1992) is defined for
+    // equal-length chains. When chains differ in length we truncate every chain
+    // to the common minimum `n` (standard practice) and use ONLY the first `n`
+    // draws of each chain for both the mean and the sum-of-squares. The previous
+    // code summed over the full (possibly longer) chain while dividing by the
+    // shorter `n`, corrupting R-hat whenever chain lengths differed.
+    let n_len = runs.iter().map(|r| r.len()).min().unwrap_or(0);
+    let n = n_len as f64;
 
     if n < 2.0 || m < 2.0 {
         return f64::INFINITY;
     }
 
-    // Between-chain variance
-    let chain_means: Vec<f64> = runs.iter().map(|r| r.iter().sum::<f64>() / n).collect();
+    // Between-chain variance (each chain truncated to its first `n` draws)
+    let chain_means: Vec<f64> = runs
+        .iter()
+        .map(|r| r[..n_len].iter().sum::<f64>() / n)
+        .collect();
     let grand_mean = chain_means.iter().sum::<f64>() / m;
     let b = n / (m - 1.0)
         * chain_means
@@ -368,12 +464,13 @@ pub fn evolutionary_rhat(runs: &[Vec<f64>]) -> f64 {
             .map(|cm| (cm - grand_mean).powi(2))
             .sum::<f64>();
 
-    // Within-chain variance
+    // Within-chain variance (each chain truncated to its first `n` draws)
     let w: f64 = runs
         .iter()
         .map(|r| {
-            let mean = r.iter().sum::<f64>() / n;
-            r.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
+            let chain = &r[..n_len];
+            let mean = chain.iter().sum::<f64>() / n;
+            chain.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
         })
         .sum::<f64>()
         / m;
@@ -567,14 +664,20 @@ impl TerminationCriteria {
         self.add(TerminationCriterion::TimeLimit(seconds))
     }
 
-    /// Check if termination criteria are met
+    /// Check if termination criteria are met.
+    ///
+    /// EV-50: the `Stagnation(generations, threshold)` criterion now computes its
+    /// own stagnation count from `fitness_history` using its configured
+    /// `threshold` (via [`detect_stagnation`]), instead of ignoring the threshold
+    /// and trusting a pre-computed count. Pass the running best-fitness history so
+    /// the threshold configured through the builder is actually honored.
     pub fn should_terminate(
         &self,
         generation: usize,
         evaluations: usize,
         best_fitness: f64,
         diversity: f64,
-        stagnation_generations: usize,
+        fitness_history: &[f64],
         elapsed_seconds: f64,
     ) -> Option<ConvergenceReason> {
         let mut satisfied = Vec::new();
@@ -586,8 +689,8 @@ impl TerminationCriteria {
                 TerminationCriterion::TargetFitness(target, tolerance) => {
                     (best_fitness - target).abs() <= *tolerance || best_fitness >= *target
                 }
-                TerminationCriterion::Stagnation(gens, _threshold) => {
-                    stagnation_generations >= *gens
+                TerminationCriterion::Stagnation(gens, threshold) => {
+                    detect_stagnation(fitness_history, *threshold) >= *gens
                 }
                 TerminationCriterion::DiversityThreshold(thresh) => diversity < *thresh,
                 TerminationCriterion::TimeLimit(limit) => elapsed_seconds >= *limit,
@@ -817,10 +920,10 @@ mod tests {
     fn test_termination_criteria_max_gen() {
         let criteria = TerminationCriteria::new().max_generations(100);
 
-        let result = criteria.should_terminate(50, 500, 10.0, 0.5, 0, 10.0);
+        let result = criteria.should_terminate(50, 500, 10.0, 0.5, &[], 10.0);
         assert!(result.is_none());
 
-        let result = criteria.should_terminate(100, 1000, 10.0, 0.5, 0, 20.0);
+        let result = criteria.should_terminate(100, 1000, 10.0, 0.5, &[], 20.0);
         assert!(result.is_some());
     }
 
@@ -828,10 +931,10 @@ mod tests {
     fn test_termination_criteria_target() {
         let criteria = TerminationCriteria::new().target_fitness(100.0, 1.0);
 
-        let result = criteria.should_terminate(10, 100, 50.0, 0.5, 0, 5.0);
+        let result = criteria.should_terminate(10, 100, 50.0, 0.5, &[], 5.0);
         assert!(result.is_none());
 
-        let result = criteria.should_terminate(10, 100, 99.5, 0.5, 0, 5.0);
+        let result = criteria.should_terminate(10, 100, 99.5, 0.5, &[], 5.0);
         assert!(result.is_some());
     }
 
@@ -842,15 +945,15 @@ mod tests {
             .target_fitness(100.0, 1.0);
 
         // Neither met
-        let result = criteria.should_terminate(10, 100, 50.0, 0.5, 0, 5.0);
+        let result = criteria.should_terminate(10, 100, 50.0, 0.5, &[], 5.0);
         assert!(result.is_none());
 
         // Target met
-        let result = criteria.should_terminate(10, 100, 100.0, 0.5, 0, 5.0);
+        let result = criteria.should_terminate(10, 100, 100.0, 0.5, &[], 5.0);
         assert!(result.is_some());
 
         // Max gen met
-        let result = criteria.should_terminate(100, 1000, 50.0, 0.5, 0, 50.0);
+        let result = criteria.should_terminate(100, 1000, 50.0, 0.5, &[], 50.0);
         assert!(result.is_some());
     }
 
@@ -860,12 +963,15 @@ mod tests {
             .max_generations(100)
             .stagnation(10, 1e-9);
 
-        // Only max gen met
-        let result = criteria.should_terminate(100, 1000, 50.0, 0.5, 5, 50.0);
+        // Only max gen met: a 6-long flat history yields a stagnation count of 5
+        // (< 10), so the stagnation criterion is not satisfied.
+        let short_flat = [50.0; 6];
+        let result = criteria.should_terminate(100, 1000, 50.0, 0.5, &short_flat, 50.0);
         assert!(result.is_none());
 
-        // Both met
-        let result = criteria.should_terminate(100, 1000, 50.0, 0.5, 10, 50.0);
+        // Both met: an 11-long flat history yields a stagnation count of 10 (>= 10).
+        let long_flat = [50.0; 11];
+        let result = criteria.should_terminate(100, 1000, 50.0, 0.5, &long_flat, 50.0);
         assert!(result.is_some());
     }
 
@@ -915,5 +1021,236 @@ mod tests {
         let converged =
             ConvergenceStatus::Converged(ConvergenceReason::MaxGenerations { generations: 100 });
         assert!(converged.is_converged());
+    }
+
+    // regression: EV-14 — unequal-length chains are truncated to the common
+    // minimum before computing means/variances. chain1=[1,2,3,4] and a chain2
+    // with an extra 5th draw truncate to identical [1,2,3,4], giving the exact
+    // R-hat = sqrt(0.75). The pre-fix code summed the full chain2 while dividing
+    // by the shorter n, yielding ~1.0066 instead.
+    #[test]
+    fn test_evolutionary_rhat_truncates_unequal_chains() {
+        let chain1 = vec![1.0, 2.0, 3.0, 4.0];
+        let chain2 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let rhat = evolutionary_rhat(&[chain1, chain2]);
+        let expected = 0.75_f64.sqrt();
+        assert!(
+            (rhat - expected).abs() < 1e-9,
+            "R-hat was {rhat}, expected {expected}"
+        );
+        assert!(
+            rhat < 0.9,
+            "R-hat {rhat} still shows the unequal-length bug"
+        );
+    }
+
+    // regression: EV-49 — once the running best reaches the target, a later
+    // per-generation dip below the target must not un-converge the detector. The
+    // pre-fix code read best_fitness_history.last() (the dipped value) and failed
+    // to report TargetReached.
+    #[test]
+    fn test_target_fitness_uses_running_best() {
+        let config = ConvergenceConfig::default()
+            .target_fitness(100.0)
+            .target_tolerance(1e-6)
+            .stagnation(10_000, 1e-9); // keep stagnation from firing
+        let mut detector = ConvergenceDetector::new(config);
+
+        detector.update(0, 10, 100.0, 50.0, 1.0); // running best hits target
+        detector.update(1, 20, 50.0, 50.0, 1.0); // per-generation best dips below
+
+        assert_eq!(detector.best_fitness(), 100.0);
+        let status = detector.check();
+        assert!(
+            status.is_converged(),
+            "a target reached earlier must remain converged"
+        );
+        if let ConvergenceStatus::Converged(reason) = status {
+            assert!(matches!(reason, ConvergenceReason::TargetReached { .. }));
+        }
+    }
+
+    // regression: REG-1 — the EV-49 fix must read a *pure* running max, not the
+    // stagnation-throttled `best_fitness_overall`, which lags the true best by up
+    // to `stagnation_threshold`. With `stagnation_threshold > target_tolerance`,
+    // a target that is reached-and-held is otherwise never reported.
+    #[test]
+    fn test_target_fitness_survives_stagnation_throttle() {
+        let config = ConvergenceConfig::default()
+            .target_fitness(100.0)
+            .target_tolerance(1e-6)
+            // threshold (0.01) deliberately larger than the tolerance (1e-6)
+            .stagnation(50, 0.01);
+        let mut detector = ConvergenceDetector::new(config);
+
+        // gen0 seeds the throttled `best_fitness_overall` just below target.
+        detector.update(0, 10, 99.995, 50.0, 1.0);
+        // gen1 hits the target exactly, but 100.0 <= 99.995 + 0.01 = 100.005, so
+        // the throttled value stays at 99.995. The pure running max must be 100.0.
+        detector.update(1, 20, 100.0, 50.0, 1.0);
+
+        assert_eq!(
+            detector.best_fitness(),
+            100.0,
+            "the running best must reflect the true max, not the throttled value"
+        );
+
+        let status = detector.check();
+        assert!(
+            status.is_converged(),
+            "target reached-and-held must be reported even when \
+             stagnation_threshold > target_tolerance"
+        );
+        assert!(
+            matches!(
+                status,
+                ConvergenceStatus::Converged(ConvergenceReason::TargetReached { .. })
+                    | ConvergenceStatus::Converged(ConvergenceReason::MultipleReasons(_))
+            ),
+            "convergence reason must include TargetReached, got {status:?}"
+        );
+
+        // Hold at target for many generations: TargetReached must persist and the
+        // pre-fix wrong-reason (stagnation ~49 gens later) must not be the sole
+        // reason reported at the moment the target is first reached.
+        for g in 2..10 {
+            detector.update(g, 10 * (g + 1), 100.0, 50.0, 1.0);
+            let s = detector.check();
+            let has_target = match &s {
+                ConvergenceStatus::Converged(ConvergenceReason::TargetReached { .. }) => true,
+                ConvergenceStatus::Converged(ConvergenceReason::MultipleReasons(rs)) => rs
+                    .iter()
+                    .any(|r| matches!(r, ConvergenceReason::TargetReached { .. })),
+                _ => false,
+            };
+            assert!(
+                has_target,
+                "target must stay reported while held, gen {g}: {s:?}"
+            );
+        }
+    }
+
+    // regression: EV-50 — the configured stagnation threshold is actually honored.
+    // The same history is stagnant under a loose threshold but not a tight one.
+    // Pre-fix, the threshold was discarded (bound to `_threshold`) and an external
+    // pre-computed count was used, so both thresholds behaved identically.
+    #[test]
+    fn test_stagnation_threshold_is_wired() {
+        let history = [10.0, 9.5, 9.5, 9.5, 9.5];
+
+        let loose = TerminationCriteria::new().stagnation(3, 1.0);
+        let tight = TerminationCriteria::new().stagnation(3, 0.1);
+
+        assert!(
+            loose
+                .should_terminate(0, 0, 9.5, 1.0, &history, 0.0)
+                .is_some(),
+            "loose threshold should read the flat tail as stagnant"
+        );
+        assert!(
+            tight
+                .should_terminate(0, 0, 9.5, 1.0, &history, 0.0)
+                .is_none(),
+            "tight threshold should not read a 0.5 drop as stagnant"
+        );
+    }
+
+    // regression: EV-88 — `compute_rhat` must equal the from-scratch
+    // `evolutionary_rhat` recompute over the full mean-fitness history at every
+    // length, proving the half-chain split and two-pass statistics stay
+    // behavior-identical to the reference implementation.
+    #[test]
+    fn test_compute_rhat_matches_naive_recompute() {
+        let mut detector = ConvergenceDetector::with_defaults();
+        let values: Vec<f64> = (0..40)
+            .map(|i| {
+                let x = i as f64;
+                (x * 0.37).sin() * 3.0 + (x * 0.11).cos() * 1.5 + x * 0.05
+            })
+            .collect();
+
+        for (i, &v) in values.iter().enumerate() {
+            detector.update(i, i * 10, v, v, 0.5);
+            if detector.mean_fitness_history.len() >= 10 {
+                let n = detector.mean_fitness_history.len();
+                let half = n / 2;
+                let chain1 = detector.mean_fitness_history[..half].to_vec();
+                let chain2 = detector.mean_fitness_history[half..].to_vec();
+                let naive = evolutionary_rhat(&[chain1, chain2]);
+                let incremental = detector.compute_rhat();
+                assert!(
+                    (naive - incremental).abs() < 1e-9,
+                    "at n={n}: incremental R-hat {incremental} != naive {naive}"
+                );
+            }
+        }
+    }
+
+    // regression (re-verification low): `compute_rhat` previously derived each
+    // half-chain's within-chain variance from running sum / sum-of-squares
+    // prefix arrays via `(sq - sum*sum/l)/(l-1)`. With mean-fitness values
+    // offset by ~1e6 and a true within-chain variance of ~1, that one-pass form
+    // subtracts two ~2e13 quantities to recover ~19, losing ~12 significant
+    // digits: it can drive `w <= 0` and report a spurious R-hat of exactly 1.0
+    // (false "converged"), and the running Σx² can overflow to +inf (→ NaN)
+    // over long runs. The stable two-pass formulation must (a) match a directly
+    // computed two-pass R-hat to 1e-9 and (b) NOT collapse to the spurious 1.0.
+    #[test]
+    fn test_compute_rhat_stable_under_large_offset() {
+        // Two chains sharing a ~1e6 offset, each with small, distinct
+        // deviations (true within-chain variance ~1) plus a real between-chain
+        // mean shift of ~4 — so the correct R-hat is clearly > 1.
+        let offset = 1e6;
+        let chain1: Vec<f64> = (0..20)
+            .map(|i| offset + (i as f64 * 0.7).sin() * 1.3)
+            .collect();
+        let chain2: Vec<f64> = (0..20)
+            .map(|i| offset + 4.0 + (i as f64 * 0.9 + 0.5).cos() * 1.1)
+            .collect();
+
+        // History = chain1 then chain2, so with len = 40 the half-chain split
+        // (`l = 20`) reproduces exactly [chain1, chain2].
+        let mut detector = ConvergenceDetector::with_defaults();
+        for (i, &v) in chain1.iter().chain(chain2.iter()).enumerate() {
+            detector.update(i, i, v, v, 0.5);
+        }
+        let got = detector.compute_rhat();
+
+        // Directly compute the reference two-pass R-hat, independently of the
+        // module helper (subtract mean, then sum squared deviations).
+        let tp = |xs: &[f64]| -> (f64, f64) {
+            let n = xs.len() as f64;
+            let mean = xs.iter().sum::<f64>() / n;
+            let ss: f64 = xs.iter().map(|x| (x - mean).powi(2)).sum();
+            (mean, ss / (n - 1.0))
+        };
+        let (mean1, var1) = tp(&chain1);
+        let (mean2, var2) = tp(&chain2);
+        let l = chain1.len() as f64;
+        let m = 2.0;
+        let grand = (mean1 + mean2) / m;
+        let b = l / (m - 1.0) * ((mean1 - grand).powi(2) + (mean2 - grand).powi(2));
+        let w = (var1 + var2) / m;
+        assert!(w > 0.0, "true within-chain variance must be positive");
+        let var_plus = ((l - 1.0) / l) * w + b / l;
+        let reference = (var_plus / w).sqrt();
+
+        // (a) stable formulation matches the directly computed two-pass R-hat.
+        assert!(
+            (got - reference).abs() < 1e-9,
+            "compute_rhat {got} != directly computed two-pass R-hat {reference}"
+        );
+        // (b) must NOT report the spurious `w <= 0` convergence value of 1.0.
+        assert!(
+            (got - 1.0).abs() > 1e-6,
+            "compute_rhat collapsed to the spurious 1.0 (got {got})"
+        );
+        assert!(got.is_finite(), "compute_rhat must be finite, got {got}");
+        // And it agrees with the public reference over the same two chains.
+        let via_public = evolutionary_rhat(&[chain1, chain2]);
+        assert!(
+            (got - via_public).abs() < 1e-9,
+            "compute_rhat {got} != evolutionary_rhat {via_public}"
+        );
     }
 }

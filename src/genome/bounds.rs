@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::GenomeError;
+
 /// Bounds for a single dimension
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
@@ -14,18 +16,37 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    /// Create new bounds
+    /// Create new bounds.
+    ///
+    /// A degenerate (`min == max`) bound is allowed and represents a dimension
+    /// pinned to a single constant value; see [`normalize`](Self::normalize) and
+    /// [`denormalize`](Self::denormalize) for how such bounds behave.
     ///
     /// # Panics
-    /// Panics if min > max
+    /// Panics if `min > max`. Use [`try_new`](Self::try_new) for a fallible
+    /// constructor that returns a [`GenomeError`] instead of panicking.
     pub fn new(min: f64, max: f64) -> Self {
-        assert!(
-            min <= max,
-            "Invalid bounds: min ({}) must be <= max ({})",
-            min,
-            max
-        );
-        Self { min, max }
+        Self::try_new(min, max).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallibly create new bounds, rejecting `min > max`.
+    ///
+    /// Returns `Err(GenomeError::InvalidStructure)` when `min > max`. A
+    /// degenerate (`min == max`) bound is permitted.
+    pub fn try_new(min: f64, max: f64) -> Result<Self, GenomeError> {
+        // Reject `min > max` and any NaN operand. `partial_cmp` returns `None`
+        // when either side is NaN, so NaN bounds are rejected exactly as the
+        // prior `!(min <= max)` guard did (a NaN comparison is always false),
+        // matching the invariant the original `assert!(min <= max)` held.
+        if matches!(
+            min.partial_cmp(&max),
+            None | Some(std::cmp::Ordering::Greater)
+        ) {
+            return Err(GenomeError::InvalidStructure(format!(
+                "Invalid bounds: min ({min}) must be <= max ({max})"
+            )));
+        }
+        Ok(Self { min, max })
     }
 
     /// Create symmetric bounds centered at 0
@@ -58,14 +79,29 @@ impl Bounds {
         value.clamp(self.min, self.max)
     }
 
-    /// Normalize a value from bounds to [0, 1]
+    /// Normalize a value from bounds to `[0, 1]`.
+    ///
+    /// For a degenerate (`min == max`) bound the range is zero, so there is no
+    /// meaningful position within `[0, 1]`; this returns `0.5` (the midpoint)
+    /// rather than dividing by zero and producing `NaN`/`±inf`.
     pub fn normalize(&self, value: f64) -> f64 {
-        (value - self.min) / self.range()
+        let range = self.range();
+        if range <= 0.0 {
+            return 0.5;
+        }
+        (value - self.min) / range
     }
 
-    /// Denormalize a value from [0, 1] to bounds
+    /// Denormalize a value from `[0, 1]` to bounds.
+    ///
+    /// For a degenerate (`min == max`) bound the range is zero, so every input
+    /// maps to the single legal value `min`.
     pub fn denormalize(&self, value: f64) -> f64 {
-        self.min + value * self.range()
+        let range = self.range();
+        if range <= 0.0 {
+            return self.min;
+        }
+        self.min + value * range
     }
 }
 
@@ -225,6 +261,45 @@ mod tests {
         assert_eq!(b.denormalize(0.0), 0.0);
         assert_eq!(b.denormalize(0.5), 5.0);
         assert_eq!(b.denormalize(1.0), 10.0);
+    }
+
+    #[test]
+    fn test_bounds_try_new_rejects_min_gt_max() {
+        // regression: EV-56 — the fallible constructor rejects min > max.
+        let result = Bounds::try_new(5.0, -5.0);
+        assert!(result.is_err());
+        assert!(Bounds::try_new(-5.0, 5.0).is_ok());
+        // Degenerate min == max is allowed.
+        assert!(Bounds::try_new(3.0, 3.0).is_ok());
+    }
+
+    #[test]
+    fn test_bounds_try_new_rejects_nan() {
+        // regression: NaN bounds must be rejected. `partial_cmp` yields `None`
+        // for a NaN operand, preserving the previous `!(min <= max)` behavior.
+        assert!(Bounds::try_new(f64::NAN, 5.0).is_err());
+        assert!(Bounds::try_new(-5.0, f64::NAN).is_err());
+        assert!(Bounds::try_new(f64::NAN, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn test_bounds_degenerate_normalize_denormalize() {
+        // regression: EV-56 — degenerate (min == max) bounds must not divide by
+        // zero. normalize() previously returned NaN (0.0/0.0) for value == min.
+        let b = Bounds::new(3.0, 3.0);
+        assert_eq!(b.range(), 0.0);
+
+        // normalize returns the midpoint 0.5 for any input (documented behavior),
+        // and crucially is finite (never NaN / inf).
+        assert_eq!(b.normalize(3.0), 0.5);
+        assert!(b.normalize(3.0).is_finite());
+        assert_eq!(b.normalize(100.0), 0.5);
+        assert!(b.normalize(100.0).is_finite());
+
+        // denormalize returns the single legal value min for any input.
+        assert_eq!(b.denormalize(0.0), 3.0);
+        assert_eq!(b.denormalize(0.5), 3.0);
+        assert_eq!(b.denormalize(1.0), 3.0);
     }
 
     #[test]

@@ -1,6 +1,15 @@
 //! Parameter schedules for deterministic control
 //!
 //! Schedules provide predetermined parameter values based on generation number.
+//!
+//! **Integration status (EV-21):** these schedules are *unintegrated building
+//! blocks*. No default algorithm's run loop consumes them — grep confirms the
+//! types here are referenced only within this module and its unit tests. To use
+//! a schedule, query [`ParameterSchedule::value_at`] yourself each generation and
+//! apply the value to your operator (e.g. via a driven incremental run with
+//! [`SimpleGA::step_generation`](crate::algorithms::simple_ga::SimpleGA::step_generation)).
+//! For an adaptation mechanism that *is* wired into a built-in algorithm, see the
+//! Thompson-sampling tuner ([`SimpleGA::run_adaptive`](crate::algorithms::simple_ga::SimpleGA::run_adaptive)).
 
 use std::f64::consts::PI;
 
@@ -189,7 +198,9 @@ impl ParameterSchedule for StepSchedule {
     }
 }
 
-/// Polynomial decay: p(t) = p₀ * (1 - t/T)^power + p_min
+/// Polynomial decay: p(t) = p_min + (p₀ − p_min) · (1 − t/T)^power
+///
+/// This gives p(0) = p₀ and p(T) = p_min, matching the implementation below.
 #[derive(Clone, Debug)]
 pub struct PolynomialDecay {
     /// Initial value
@@ -460,6 +471,21 @@ mod tests {
         assert_relative_eq!(schedule.value_at(100, 100), 0.0);
         // Quadratic decay: at t=0.5, value = (1-0.5)^2 = 0.25
         assert_relative_eq!(schedule.value_at(50, 100), 0.25);
+    }
+
+    /// regression: EV-96 — the documented formula is
+    /// p(t) = p_min + (p₀ − p_min)·(1 − t/T)^power, so p(0) = p₀ (NOT p₀ + p_min).
+    /// With a nonzero minimum this pins that there is no spurious `+ p_min` offset
+    /// at t = 0, i.e. the docstring matches the implementation.
+    #[test]
+    fn test_polynomial_decay_no_offset_at_start() {
+        let schedule = PolynomialDecay::new(1.0, 2.0).with_minimum(0.2);
+        // p(0) = initial = 1.0, NOT initial + minimum = 1.2.
+        assert_relative_eq!(schedule.value_at(0, 100), 1.0);
+        // p(T) = minimum = 0.2.
+        assert_relative_eq!(schedule.value_at(100, 100), 0.2);
+        // p(T/2) = 0.2 + (1.0 - 0.2) * (0.5)^2 = 0.2 + 0.2 = 0.4.
+        assert_relative_eq!(schedule.value_at(50, 100), 0.4);
     }
 
     #[test]

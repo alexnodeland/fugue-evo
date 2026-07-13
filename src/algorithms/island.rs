@@ -5,6 +5,7 @@
 //!
 //! Note: This module requires the `parallel` feature to be enabled.
 
+use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -167,9 +168,12 @@ where
         Mut: MutationOperator<G>,
         R: rand::Rng,
     {
-        // Evaluate population
+        // Evaluate population. EV-82: count only individuals that actually needed
+        // evaluating — carried-over elites are already scored and are skipped by
+        // Population::evaluate, so adding the full population length over-counts.
+        let newly_evaluated = self.population.len() - self.population.count_evaluated();
         self.population.evaluate(fitness);
-        self.evaluations += self.population.len();
+        self.evaluations += newly_evaluated;
 
         // Update best
         if let Some(current_best) = self.population.best() {
@@ -182,9 +186,13 @@ where
             }
         }
 
-        // Preserve elites
+        // Preserve elites. EV-83: cap the elite count at the population size so an
+        // over-large `elitism` cannot cause a usize underflow below.
         self.population.sort_by_fitness();
-        let elites: Vec<_> = self.population.iter().take(elitism).cloned().collect();
+        let pop_len = self.population.len();
+        let elite_count = elitism.min(pop_len);
+        let target_offspring = pop_len - elite_count;
+        let elites: Vec<_> = self.population.iter().take(elite_count).cloned().collect();
 
         // Prepare selection pool: (genome, fitness) pairs
         let selection_pool: Vec<(G, f64)> = self
@@ -202,9 +210,9 @@ where
         }
 
         // Selection and reproduction
-        let mut offspring = Vec::with_capacity(self.population.len());
+        let mut offspring = Vec::with_capacity(target_offspring);
 
-        while offspring.len() < self.population.len() - elitism {
+        while offspring.len() < target_offspring {
             // Select parents
             let idx1 = selection.select(&selection_pool, rng);
             let idx2 = selection.select(&selection_pool, rng);
@@ -224,7 +232,7 @@ where
             mutation.mutate(&mut child2, rng);
 
             offspring.push(Individual::new(child1));
-            if offspring.len() < self.population.len() - elitism {
+            if offspring.len() < target_offspring {
                 offspring.push(Individual::new(child2));
             }
         }
@@ -279,31 +287,24 @@ where
         }
     }
 
-    /// Accept immigrants (individuals coming to this island)
-    pub fn accept_immigrants<R: rand::Rng>(
-        &mut self,
-        immigrants: Vec<Individual<G, F>>,
-        policy: &MigrationPolicy,
-        rng: &mut R,
-    ) {
-        match policy {
-            MigrationPolicy::Best(_) | MigrationPolicy::Random(_) => {
-                // Replace random individuals
-                for immigrant in immigrants {
-                    let idx = rng.gen_range(0..self.population.len());
-                    self.population[idx] = immigrant;
-                }
+    /// Accept immigrants (individuals coming to this island).
+    ///
+    /// EV-41: immigrants always replace the island's WORST members, regardless of
+    /// the migration policy, so an island's best individual is never overwritten
+    /// by an arriving (possibly worse) migrant. `sort_by_fitness` orders the
+    /// population best-first, so the worst members occupy the tail.
+    pub fn accept_immigrants(&mut self, immigrants: Vec<Individual<G, F>>) {
+        if immigrants.is_empty() || self.population.is_empty() {
+            return;
+        }
+
+        self.population.sort_by_fitness();
+        let pop_len = self.population.len();
+        for (i, immigrant) in immigrants.into_iter().enumerate() {
+            if i >= pop_len {
+                break;
             }
-            MigrationPolicy::BestReplaceWorst(k) => {
-                // Replace worst individuals
-                self.population.sort_by_fitness();
-                let pop_len = self.population.len();
-                for (i, immigrant) in immigrants.into_iter().enumerate() {
-                    if i < *k && pop_len > i {
-                        self.population[pop_len - 1 - i] = immigrant;
-                    }
-                }
-            }
+            self.population[pop_len - 1 - i] = immigrant;
         }
     }
 }
@@ -318,6 +319,10 @@ where
     pub config: IslandModelConfig,
     /// Islands
     pub islands: Vec<Island<G, F>>,
+    /// One persistent RNG per island, derived once from the caller's master RNG
+    /// (EV-12). Reusing these across generations makes seeded runs bit-reproducible
+    /// even though islands are evolved in parallel.
+    island_rngs: Vec<StdRng>,
     /// Fitness function (shared)
     pub fitness: Arc<Fit>,
     /// Selection operator
@@ -354,7 +359,7 @@ where
     ) -> Self {
         let islands: Vec<_> = (0..config.num_islands)
             .map(|i| {
-                let mut island_rng = rand::rngs::StdRng::from_seed(rng.gen());
+                let mut island_rng = StdRng::from_seed(rng.gen());
                 Island::new(
                     i,
                     config.island_population_size,
@@ -364,9 +369,16 @@ where
             })
             .collect();
 
+        // EV-12: draw one persistent working RNG per island from the master RNG
+        // once, up front, so per-island search is deterministic under a fixed seed.
+        let island_rngs: Vec<StdRng> = (0..config.num_islands)
+            .map(|_| StdRng::seed_from_u64(rng.gen()))
+            .collect();
+
         Self {
             config,
             islands,
+            island_rngs,
             fitness: Arc::new(fitness),
             selection,
             crossover,
@@ -401,18 +413,22 @@ where
         let crossover = self.crossover.clone();
         let mutation = self.mutation.clone();
 
-        // Parallel evolution of islands
-        self.islands.par_iter_mut().for_each(|island| {
-            let mut island_rng = rand::rngs::StdRng::from_entropy();
-            let _ = island.evolve_one_generation(
-                fitness.as_ref(),
-                &selection,
-                &crossover,
-                &mutation,
-                elitism,
-                &mut island_rng,
-            );
-        });
+        // Parallel evolution of islands. EV-12: each island uses its own
+        // persistent, master-seeded RNG (not OS entropy), so a seeded run is
+        // reproducible even though evaluation happens in parallel.
+        self.islands
+            .par_iter_mut()
+            .zip(self.island_rngs.par_iter_mut())
+            .for_each(|(island, island_rng)| {
+                let _ = island.evolve_one_generation(
+                    fitness.as_ref(),
+                    &selection,
+                    &crossover,
+                    &mutation,
+                    elitism,
+                    island_rng,
+                );
+            });
 
         // Update global best
         for island in &self.islands {
@@ -444,14 +460,16 @@ where
     /// Perform migration between islands
     fn migrate<R: rand::Rng>(&mut self, rng: &mut R) {
         let num_islands = self.islands.len();
-        let policy = &self.config.policy;
-        let topology = &self.config.topology;
+        let policy = self.config.policy.clone();
+        let topology = self.config.topology.clone();
 
-        // Collect emigrants from each island
+        // Collect emigrants from each island using that island's persistent RNG
+        // (EV-12), so random-emigrant selection is reproducible under a seed.
         let emigrants: Vec<Vec<Individual<G, F>>> = self
             .islands
             .iter()
-            .map(|island| island.get_emigrants(policy, &mut rand::rngs::StdRng::from_entropy()))
+            .zip(self.island_rngs.iter_mut())
+            .map(|(island, island_rng)| island.get_emigrants(&policy, island_rng))
             .collect();
 
         // Route emigrants to target islands
@@ -466,16 +484,14 @@ where
                 MigrationTopology::Random => {
                     // Pick one random target
                     let target = targets[rng.gen_range(0..targets.len())];
-                    self.islands[target].accept_immigrants(source_emigrants, policy, rng);
+                    self.islands[target].accept_immigrants(source_emigrants);
                 }
                 _ => {
-                    // Send to first target
-                    if let Some(&target) = targets.first() {
-                        self.islands[target].accept_immigrants(
-                            source_emigrants.clone(),
-                            policy,
-                            rng,
-                        );
+                    // EV-11: broadcast to EVERY target the topology defines
+                    // (FullyConnected reaches all peers; a Star hub reaches all
+                    // spokes), not just the first one.
+                    for &target in &targets {
+                        self.islands[target].accept_immigrants(source_emigrants.clone());
                     }
                 }
             }
@@ -815,6 +831,237 @@ mod tests {
         for stat in &stats {
             assert_eq!(stat.generation, 5);
             assert_eq!(stat.population_size, 10);
+        }
+    }
+
+    // regression: EV-12 — two runs with the same master seed must produce
+    // identical best-fitness trajectories, even with parallel island evaluation.
+    #[test]
+    fn test_island_model_reproducible_under_seed() {
+        fn trajectory(seed: u64) -> Vec<f64> {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let bounds = MultiBounds::symmetric(5.0, 5);
+            let mut model = IslandModelBuilder::<RealVector, _, _, _, _>::new()
+                .num_islands(3)
+                .island_population_size(20)
+                .migration_interval(3)
+                .topology(MigrationTopology::Ring)
+                .migration_policy(MigrationPolicy::Best(1))
+                .bounds(bounds)
+                .elitism(1)
+                .fitness(Sphere::new(5))
+                .selection(TournamentSelection::new(2))
+                .crossover(BlxAlphaCrossover::new(0.5))
+                .mutation(GaussianMutation::new(0.1))
+                .build(&mut rng)
+                .unwrap();
+
+            let mut traj = Vec::new();
+            for _ in 0..15 {
+                model.step(&mut rng).unwrap();
+                traj.push(*model.global_best.as_ref().unwrap().fitness_value());
+            }
+            traj
+        }
+
+        let a = trajectory(12345);
+        let b = trajectory(12345);
+        assert_eq!(a, b, "seeded island runs must be bit-reproducible");
+
+        let c = trajectory(99999);
+        assert_ne!(
+            a, c,
+            "different seeds should produce different trajectories"
+        );
+    }
+
+    // regression: EV-11 — FullyConnected migration must broadcast each island's
+    // emigrant to EVERY other island. With N islands and Best(1) that yields
+    // N + N*(N-1) champions in total (N home + N*(N-1) arrivals); the pre-fix code
+    // only sent to the first target, giving N + N.
+    #[test]
+    fn test_fully_connected_broadcasts_to_all_targets() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let bounds = MultiBounds::symmetric(100.0, 1);
+
+        let num_islands = 4;
+        let pop = 8;
+        let mut model = IslandModelBuilder::<RealVector, _, _, _, _>::new()
+            .num_islands(num_islands)
+            .island_population_size(pop)
+            .topology(MigrationTopology::FullyConnected)
+            .migration_policy(MigrationPolicy::Best(1))
+            .bounds(bounds)
+            .fitness(Sphere::new(1))
+            .selection(TournamentSelection::new(2))
+            .crossover(BlxAlphaCrossover::new(0.5))
+            .mutation(GaussianMutation::new(0.1))
+            .build(&mut rng)
+            .unwrap();
+
+        // One clearly-best "champion" per island plus clearly-worst filler.
+        for (i, island) in model.islands.iter_mut().enumerate() {
+            let mut new_pop: Population<RealVector> = Population::new();
+            new_pop.push(Individual::with_fitness(
+                RealVector::new(vec![i as f64]),
+                1000.0,
+            ));
+            for _ in 1..pop {
+                new_pop.push(Individual::with_fitness(
+                    RealVector::new(vec![-1.0]),
+                    -1000.0,
+                ));
+            }
+            island.population = new_pop;
+        }
+
+        model.migrate(&mut rng);
+
+        let champions: usize = model
+            .islands
+            .iter()
+            .flat_map(|isl| isl.population.iter())
+            .filter(|ind| (*ind.fitness_value() - 1000.0).abs() < 1e-9)
+            .count();
+
+        assert_eq!(champions, num_islands + num_islands * (num_islands - 1));
+    }
+
+    // regression: EV-41 — an arriving (worse) migrant must replace a WORST member,
+    // never the island best. Pre-fix code replaced a uniformly random member.
+    #[test]
+    fn test_immigrants_replace_worst_not_best() {
+        let mut island_pop: Population<RealVector> = Population::new();
+        island_pop.push(Individual::with_fitness(RealVector::new(vec![0.0]), 500.0)); // best
+        for _ in 0..9 {
+            island_pop.push(Individual::with_fitness(RealVector::new(vec![9.0]), 1.0));
+            // worst
+        }
+        let mut island: Island<RealVector> = Island::with_population(3, island_pop);
+
+        // A migrant worse than the best but better than the worst.
+        let migrant = Individual::with_fitness(RealVector::new(vec![7.0]), 50.0);
+        island.accept_immigrants(vec![migrant]);
+
+        let best = island
+            .population
+            .iter()
+            .map(|ind| *ind.fitness_value())
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(best, 500.0, "the island best must survive migration");
+
+        let migrant_present = island
+            .population
+            .iter()
+            .any(|ind| (*ind.fitness_value() - 50.0).abs() < 1e-9);
+        assert!(migrant_present, "migrant should have been accepted");
+
+        let worst_count = island
+            .population
+            .iter()
+            .filter(|ind| (*ind.fitness_value() - 1.0).abs() < 1e-9)
+            .count();
+        assert_eq!(
+            worst_count, 8,
+            "exactly one worst member should be replaced"
+        );
+    }
+
+    // regression: EV-82 — the evaluation counter must count only genuine fitness
+    // calls. From generation 2 on, carried-over elites are already scored, so only
+    // (pop - elites) individuals are evaluated, not the whole population.
+    #[test]
+    fn test_island_evaluation_counter_counts_actual_evaluations() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let bounds = MultiBounds::symmetric(5.0, 5);
+        let mut island: Island<RealVector> = Island::new(0, 20, &bounds, &mut rng);
+
+        let fitness = Sphere::new(5);
+        let selection = TournamentSelection::new(2);
+        let crossover = BlxAlphaCrossover::new(0.5);
+        let mutation = GaussianMutation::new(0.1);
+        let elitism = 2;
+        let pop = 20;
+        let generations = 5;
+
+        for _ in 0..generations {
+            island
+                .evolve_one_generation(
+                    &fitness, &selection, &crossover, &mutation, elitism, &mut rng,
+                )
+                .unwrap();
+        }
+
+        // gen 1 evaluates all `pop`; gens 2..=G evaluate only (pop - elitism).
+        let expected = pop + (generations - 1) * (pop - elitism);
+        assert_eq!(island.evaluations, expected);
+    }
+
+    // regression: EV-83 — `evolve_one_generation` with `elitism` greater than the
+    // population size must not panic. The pre-fix `population.len() - elitism` was
+    // an unguarded usize subtraction that underflowed and panicked; the clamp
+    // (`elite_count = elitism.min(pop_len)`, `target_offspring = pop_len -
+    // elite_count`) makes it carry all members as elites and produce zero
+    // offspring, returning a valid same-size population.
+    #[test]
+    fn test_island_elitism_exceeding_population_does_not_underflow() {
+        let mut rng = StdRng::seed_from_u64(99);
+        let pop = 20;
+        let bounds = MultiBounds::symmetric(5.0, 5);
+        let mut island: Island<RealVector> = Island::new(0, pop, &bounds, &mut rng);
+
+        let fitness = Sphere::new(5);
+        let selection = TournamentSelection::new(2);
+        let crossover = BlxAlphaCrossover::new(0.5);
+        let mutation = GaussianMutation::new(0.1);
+
+        // Snapshot the whole population's genomes so we can prove every member is
+        // carried over unchanged when everyone is an elite.
+        island.population.evaluate(&fitness);
+        island.population.sort_by_fitness();
+        let before: Vec<RealVector> = island
+            .population
+            .iter()
+            .map(|ind| ind.genome.clone())
+            .collect();
+
+        // elitism (25) deliberately exceeds pop (20); this panicked pre-fix.
+        let elitism = 25;
+        let result = island.evolve_one_generation(
+            &fitness, &selection, &crossover, &mutation, elitism, &mut rng,
+        );
+        assert!(
+            result.is_ok(),
+            "over-large elitism must return Ok, got {result:?}"
+        );
+
+        // Population size is preserved: all members carried as elites, zero
+        // offspring produced.
+        assert_eq!(
+            island.population.len(),
+            pop,
+            "population size must be preserved when everyone is an elite"
+        );
+
+        // Every original genome survives (elitism == whole population => no
+        // reproduction). Order is preserved because elites are pushed in sorted
+        // order and no offspring follow.
+        let after: Vec<RealVector> = island
+            .population
+            .iter()
+            .map(|ind| ind.genome.clone())
+            .collect();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "no offspring should be created when elite_count == pop_len"
+        );
+        for (a, b) in after.iter().zip(before.iter()) {
+            assert_eq!(
+                a.as_vec(),
+                b.as_vec(),
+                "all elites must be carried unchanged"
+            );
         }
     }
 }

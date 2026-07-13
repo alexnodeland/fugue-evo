@@ -129,13 +129,33 @@ impl EvolutionaryGenome for RealVector {
 
     /// Reconstruct RealVector from Fugue trace.
     ///
-    /// Reads genes from addresses "gene#0", "gene#1", ... until no more are found.
+    /// Reads genes from addresses "gene#0", "gene#1", ... until no more are
+    /// found. A *missing* address terminates the scan (normal end of the
+    /// sequence), but an address that is *present with the wrong value type*
+    /// is a corrupt trace and yields [`GenomeError::TypeMismatch`] rather than
+    /// silently truncating the genome.
     fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
         let mut genes = Vec::new();
         let mut i = 0;
-        while let Some(val) = trace.get_f64(&addr!("gene", i)) {
-            genes.push(val);
-            i += 1;
+        loop {
+            match trace.choices.get(&addr!("gene", i)) {
+                // Address absent: end of the gene sequence.
+                None => break,
+                Some(choice) => match choice.value.as_f64() {
+                    Some(val) => {
+                        genes.push(val);
+                        i += 1;
+                    }
+                    // Address present but not an f64: corrupt trace.
+                    None => {
+                        return Err(GenomeError::TypeMismatch {
+                            address: format!("gene#{i}"),
+                            expected: "f64".to_string(),
+                            actual: choice.value.type_name().to_string(),
+                        });
+                    }
+                },
+            }
         }
         if genes.is_empty() {
             return Err(GenomeError::InvalidStructure(
@@ -171,12 +191,25 @@ impl EvolutionaryGenome for RealVector {
     }
 
     fn distance(&self, other: &Self) -> f64 {
-        self.genes
+        self.try_distance(other).unwrap_or_else(|e| {
+            panic!("RealVector::distance: {e}; use try_distance for a fallible comparison")
+        })
+    }
+
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        if self.genes.len() != other.genes.len() {
+            return Err(GenomeError::DimensionMismatch {
+                expected: self.genes.len(),
+                actual: other.genes.len(),
+            });
+        }
+        Ok(self
+            .genes
             .iter()
             .zip(other.genes.iter())
             .map(|(a, b)| (a - b).powi(2))
             .sum::<f64>()
-            .sqrt()
+            .sqrt())
     }
 }
 
@@ -425,5 +458,65 @@ mod tests {
         let trace = Trace::default();
         let result = RealVector::from_trace(&trace);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_real_vector_try_distance_dimension_mismatch() {
+        // regression: EV-20 — distance previously truncated via zip and reported
+        // 0.0 for vectors of different length, hiding an enormous extra component.
+        let v1 = RealVector::new(vec![0.0, 0.0]);
+        let v2 = RealVector::new(vec![0.0, 0.0, 1_000_000.0]);
+        let result = v1.try_distance(&v2);
+        assert!(matches!(
+            result,
+            Err(GenomeError::DimensionMismatch {
+                expected: 2,
+                actual: 3
+            })
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "Dimension mismatch")]
+    fn test_real_vector_distance_dimension_mismatch_panics() {
+        // regression: EV-20 — the infallible distance() must loudly reject a
+        // length mismatch instead of silently returning 0.0.
+        let v1 = RealVector::new(vec![0.0, 0.0]);
+        let v2 = RealVector::new(vec![0.0, 0.0, 1_000_000.0]);
+        let _ = v1.distance(&v2);
+    }
+
+    #[test]
+    fn test_real_vector_from_trace_type_mismatch() {
+        // regression: EV-59 — a present-but-wrong-typed choice mid-sequence must
+        // raise TypeMismatch, not be treated as "end of genes" and truncate.
+        let mut trace = Trace::default();
+        trace.insert_choice(addr!("gene", 0), ChoiceValue::F64(1.0), 0.0);
+        trace.insert_choice(addr!("gene", 1), ChoiceValue::Bool(true), 0.0); // wrong type
+        trace.insert_choice(addr!("gene", 2), ChoiceValue::F64(3.0), 0.0);
+
+        let result = RealVector::from_trace(&trace);
+        match result {
+            Err(GenomeError::TypeMismatch {
+                address,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(address, "gene#1");
+                assert_eq!(expected, "f64");
+                assert_eq!(actual, "bool");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_real_vector_from_trace_missing_stops_cleanly() {
+        // A genuinely absent address terminates the scan (not an error).
+        let mut trace = Trace::default();
+        trace.insert_choice(addr!("gene", 0), ChoiceValue::F64(1.0), 0.0);
+        trace.insert_choice(addr!("gene", 1), ChoiceValue::F64(2.0), 0.0);
+        let v = RealVector::from_trace(&trace).unwrap();
+        assert_eq!(v.genes(), &[1.0, 2.0]);
     }
 }

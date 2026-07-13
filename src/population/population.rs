@@ -141,59 +141,64 @@ where
     }
 
     /// Get the best individual (by fitness)
+    ///
+    /// Ranks by [`FitnessValue::cmp_by_quality`] (which delegates to
+    /// `is_better_than` and treats any `NaN` fitness as strictly worst), so it
+    /// returns the true best even for fitness types whose `to_f64()` ordering
+    /// disagrees with the real ordering (e.g. `ParetoFitness` with infinite
+    /// crowding distances) and never returns a `NaN`-fitness individual unless
+    /// every evaluated individual is `NaN`.
     pub fn best(&self) -> Option<&Individual<G, F>> {
         self.individuals
             .iter()
             .filter(|i| i.is_evaluated())
             .max_by(|a, b| {
-                let fa = a
-                    .fitness
+                a.fitness
                     .as_ref()
-                    .map(|f| f.to_f64())
-                    .unwrap_or(f64::NEG_INFINITY);
-                let fb = b
-                    .fitness
-                    .as_ref()
-                    .map(|f| f.to_f64())
-                    .unwrap_or(f64::NEG_INFINITY);
-                fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                    .expect("filtered to evaluated individuals")
+                    .cmp_by_quality(
+                        b.fitness
+                            .as_ref()
+                            .expect("filtered to evaluated individuals"),
+                    )
             })
     }
 
     /// Get the worst individual (by fitness)
+    ///
+    /// Uses the same [`FitnessValue::cmp_by_quality`] total order as
+    /// [`best`](Self::best); a `NaN` fitness is ranked strictly worst.
     pub fn worst(&self) -> Option<&Individual<G, F>> {
         self.individuals
             .iter()
             .filter(|i| i.is_evaluated())
             .min_by(|a, b| {
-                let fa = a
-                    .fitness
+                a.fitness
                     .as_ref()
-                    .map(|f| f.to_f64())
-                    .unwrap_or(f64::INFINITY);
-                let fb = b
-                    .fitness
-                    .as_ref()
-                    .map(|f| f.to_f64())
-                    .unwrap_or(f64::INFINITY);
-                fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                    .expect("filtered to evaluated individuals")
+                    .cmp_by_quality(
+                        b.fitness
+                            .as_ref()
+                            .expect("filtered to evaluated individuals"),
+                    )
             })
     }
 
     /// Sort the population by fitness (best first)
+    ///
+    /// Ranks by [`FitnessValue::cmp_by_quality`] rather than a `to_f64()`
+    /// scalar. Unevaluated individuals (and, defensively, `NaN` fitness) sort
+    /// last.
     pub fn sort_by_fitness(&mut self) {
         self.individuals.sort_by(|a, b| {
-            let fa = a
-                .fitness
-                .as_ref()
-                .map(|f| f.to_f64())
-                .unwrap_or(f64::NEG_INFINITY);
-            let fb = b
-                .fitness
-                .as_ref()
-                .map(|f| f.to_f64())
-                .unwrap_or(f64::NEG_INFINITY);
-            fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
+            match (a.fitness.as_ref(), b.fitness.as_ref()) {
+                // Better first => descending by quality.
+                (Some(fa), Some(fb)) => fb.cmp_by_quality(fa),
+                // Evaluated individuals precede unevaluated ones.
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
         });
     }
 
@@ -403,6 +408,7 @@ where
 mod tests {
     use super::*;
     use crate::fitness::benchmarks::Sphere;
+    use crate::fitness::traits::ParetoFitness;
     use crate::genome::real_vector::RealVector;
 
     fn create_test_population() -> Population<RealVector> {
@@ -442,6 +448,67 @@ mod tests {
 
         let worst = pop.worst().unwrap();
         assert_eq!(worst.fitness_f64(), 10.0);
+    }
+
+    #[test]
+    fn test_best_ignores_nan_fitness() {
+        // regression: EV-07
+        // A NaN fitness must never be reported as the best individual. It is
+        // ranked strictly worst, so best() returns the true maximum even when
+        // the NaN individual is the LAST element -- the position that used to
+        // fool max_by (NaN comparisons returned Equal, treated as "replace").
+        let mut individuals = vec![
+            Individual::with_fitness(RealVector::new(vec![1.0]), 10.0),
+            Individual::with_fitness(RealVector::new(vec![3.0]), 30.0),
+            Individual::with_fitness(RealVector::new(vec![2.0]), 20.0),
+        ];
+        // Inject NaN through the public field to model a value slipping past
+        // set_fitness's guard (defense in depth), placed last.
+        let mut nan_ind = Individual::new(RealVector::new(vec![9.0]));
+        nan_ind.fitness = Some(f64::NAN);
+        individuals.push(nan_ind);
+
+        let pop = Population::from_individuals(individuals);
+        assert_eq!(pop.best().unwrap().fitness_f64(), 30.0);
+        // worst() over finite values (NaN is ranked worst and would be picked,
+        // but here we confirm the true minimum among the reals is reachable by
+        // dropping the NaN): with the NaN present it is the worst.
+        assert!(pop.worst().unwrap().fitness_f64().is_nan());
+    }
+
+    #[test]
+    fn test_best_worst_sort_use_is_better_than_for_pareto() {
+        // regression: EV-08
+        // ParetoFitness ranks by (rank asc, crowding desc). NSGA-II assigns
+        // f64::INFINITY crowding to front-boundary members, so to_f64() =
+        // -(rank) + inf*0.001 collapses to +inf for EVERY rank. A to_f64()-based
+        // best() therefore cannot distinguish a rank-0 optimum from a rank-50
+        // solution; best()/worst()/sort_by_fitness() must delegate to
+        // is_better_than().
+        let mut good = ParetoFitness::new(vec![0.0, 0.0]);
+        good.rank = 0;
+        good.crowding_distance = f64::INFINITY;
+
+        let mut bad = ParetoFitness::new(vec![9.0, 9.0]);
+        bad.rank = 50;
+        bad.crowding_distance = f64::INFINITY;
+
+        assert_eq!(good.to_f64(), bad.to_f64()); // both +inf: to_f64() cannot rank them
+
+        // `bad` placed last so a to_f64()/Equal tie would wrongly "take later".
+        let individuals = vec![
+            Individual::with_fitness(RealVector::new(vec![0.0]), good.clone()),
+            Individual::with_fitness(RealVector::new(vec![1.0]), bad.clone()),
+        ];
+        let mut pop: Population<RealVector, ParetoFitness> =
+            Population::from_individuals(individuals);
+
+        assert_eq!(pop.best().unwrap().fitness.as_ref().unwrap().rank, 0);
+        assert_eq!(pop.worst().unwrap().fitness.as_ref().unwrap().rank, 50);
+
+        pop.sort_by_fitness();
+        assert_eq!(pop[0].fitness.as_ref().unwrap().rank, 0); // best first
+        assert_eq!(pop[1].fitness.as_ref().unwrap().rank, 50);
     }
 
     #[test]

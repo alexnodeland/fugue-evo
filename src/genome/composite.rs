@@ -3,7 +3,7 @@
 //! This module provides a genome type that combines two different genome types,
 //! enabling optimization over heterogeneous solution spaces.
 
-use fugue::{addr, ChoiceValue, Trace};
+use fugue::{Address, Trace};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -107,84 +107,33 @@ where
 
     /// Convert composite genome to Fugue trace.
     ///
-    /// Stores dimensions and serialized data for each component.
+    /// Each component is delegated to its own [`to_trace`](EvolutionaryGenome::to_trace),
+    /// and every entry of the resulting nested trace is copied verbatim under a
+    /// namespace prefix (`"first/"` / `"second/"`). This preserves full fidelity
+    /// for *any* component genome type — including `Permutation`, `TreeGenome`
+    /// and future encodings — rather than special-casing a fixed set of address
+    /// name literals.
     fn to_trace(&self) -> Trace {
         let mut trace = Trace::default();
-
-        // Store dimensions
-        trace.insert_choice(
-            addr!("composite", "first_dim"),
-            ChoiceValue::Usize(self.first.dimension()),
-            0.0,
-        );
-        trace.insert_choice(
-            addr!("composite", "second_dim"),
-            ChoiceValue::Usize(self.second.dimension()),
-            0.0,
-        );
-
-        // Store first component's trace entries with prefix
-        let first_trace = self.first.to_trace();
-        for i in 0..self.first.dimension() {
-            if let Some(val) = first_trace.get_f64(&addr!("gene", i)) {
-                trace.insert_choice(addr!("first_gene", i), ChoiceValue::F64(val), 0.0);
-            } else if let Some(val) = first_trace.get_bool(&addr!("bit", i)) {
-                trace.insert_choice(addr!("first_bit", i), ChoiceValue::Bool(val), 0.0);
-            } else if let Some(val) = first_trace.get_usize(&addr!("element", i)) {
-                trace.insert_choice(addr!("first_element", i), ChoiceValue::Usize(val), 0.0);
-            }
-        }
-
-        // Store second component's trace entries with prefix
-        let second_trace = self.second.to_trace();
-        for i in 0..self.second.dimension() {
-            if let Some(val) = second_trace.get_f64(&addr!("gene", i)) {
-                trace.insert_choice(addr!("second_gene", i), ChoiceValue::F64(val), 0.0);
-            } else if let Some(val) = second_trace.get_bool(&addr!("bit", i)) {
-                trace.insert_choice(addr!("second_bit", i), ChoiceValue::Bool(val), 0.0);
-            } else if let Some(val) = second_trace.get_usize(&addr!("element", i)) {
-                trace.insert_choice(addr!("second_element", i), ChoiceValue::Usize(val), 0.0);
-            }
-        }
-
+        namespace_into(&self.first.to_trace(), "first", &mut trace);
+        namespace_into(&self.second.to_trace(), "second", &mut trace);
         trace
     }
 
     /// Reconstruct composite genome from Fugue trace.
     ///
-    /// Note: This is a simplified implementation that may lose some type information.
-    /// For full fidelity, use serde serialization directly.
+    /// Strips the `"first/"` / `"second/"` namespace back off each entry to
+    /// rebuild the two component sub-traces, then delegates to each component's
+    /// own [`from_trace`](EvolutionaryGenome::from_trace).
     fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
-        // Get dimensions
-        let first_dim = trace
-            .get_usize(&addr!("composite", "first_dim"))
-            .ok_or_else(|| GenomeError::MissingAddress("composite#first_dim".to_string()))?;
-        let second_dim = trace
-            .get_usize(&addr!("composite", "second_dim"))
-            .ok_or_else(|| GenomeError::MissingAddress("composite#second_dim".to_string()))?;
+        let (first_trace, saw_first) = extract_namespace(trace, "first");
+        let (second_trace, saw_second) = extract_namespace(trace, "second");
 
-        // Reconstruct first component's trace
-        let mut first_trace = Trace::default();
-        for i in 0..first_dim {
-            if let Some(val) = trace.get_f64(&addr!("first_gene", i)) {
-                first_trace.insert_choice(addr!("gene", i), ChoiceValue::F64(val), 0.0);
-            } else if let Some(val) = trace.get_bool(&addr!("first_bit", i)) {
-                first_trace.insert_choice(addr!("bit", i), ChoiceValue::Bool(val), 0.0);
-            } else if let Some(val) = trace.get_usize(&addr!("first_element", i)) {
-                first_trace.insert_choice(addr!("element", i), ChoiceValue::Usize(val), 0.0);
-            }
+        if !saw_first {
+            return Err(GenomeError::MissingAddress("first/*".to_string()));
         }
-
-        // Reconstruct second component's trace
-        let mut second_trace = Trace::default();
-        for i in 0..second_dim {
-            if let Some(val) = trace.get_f64(&addr!("second_gene", i)) {
-                second_trace.insert_choice(addr!("gene", i), ChoiceValue::F64(val), 0.0);
-            } else if let Some(val) = trace.get_bool(&addr!("second_bit", i)) {
-                second_trace.insert_choice(addr!("bit", i), ChoiceValue::Bool(val), 0.0);
-            } else if let Some(val) = trace.get_usize(&addr!("second_element", i)) {
-                second_trace.insert_choice(addr!("element", i), ChoiceValue::Usize(val), 0.0);
-            }
+        if !saw_second {
+            return Err(GenomeError::MissingAddress("second/*".to_string()));
         }
 
         let first = A::from_trace(&first_trace)?;
@@ -230,9 +179,46 @@ where
         self.first.distance(&other.first) + self.second.distance(&other.second)
     }
 
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        Ok(self.first.try_distance(&other.first)? + self.second.try_distance(&other.second)?)
+    }
+
     fn trace_prefix() -> &'static str {
         "composite"
     }
+}
+
+/// Copy every entry of `src` into `dst`, prefixing each address with
+/// `"<namespace>/"`. Used to merge a component's own trace into the composite
+/// trace without interpreting the component's address scheme.
+fn namespace_into(src: &Trace, namespace: &str, dst: &mut Trace) {
+    for (addr, choice) in &src.choices {
+        dst.insert_choice(
+            Address::new(format!("{}/{}", namespace, addr.as_str())),
+            choice.value.clone(),
+            choice.logp,
+        );
+    }
+}
+
+/// Inverse of [`namespace_into`]: collect every entry whose address begins with
+/// `"<namespace>/"` into a fresh trace with the prefix stripped back off.
+/// Returns the reconstructed sub-trace and whether any entry was found.
+fn extract_namespace(trace: &Trace, namespace: &str) -> (Trace, bool) {
+    let prefix = format!("{namespace}/");
+    let mut sub = Trace::default();
+    let mut found = false;
+    for (addr, choice) in &trace.choices {
+        if let Some(rest) = addr.as_str().strip_prefix(&prefix) {
+            sub.insert_choice(
+                Address::new(rest.to_string()),
+                choice.value.clone(),
+                choice.logp,
+            );
+            found = true;
+        }
+    }
+    (sub, found)
 }
 
 /// Builder for composite bounds that tracks bounds for each component
@@ -265,8 +251,9 @@ impl CompositeBounds {
 mod tests {
     use super::*;
     use crate::genome::bit_string::BitString;
+    use crate::genome::permutation::Permutation;
     use crate::genome::real_vector::RealVector;
-    use crate::genome::traits::{BinaryGenome, RealValuedGenome};
+    use crate::genome::traits::{BinaryGenome, PermutationGenome, RealValuedGenome};
 
     #[test]
     fn test_composite_creation() {
@@ -424,16 +411,53 @@ mod tests {
 
     #[test]
     fn test_composite_trace_roundtrip_mixed() {
+        // regression: EV-03 — full round-trip fidelity for a mixed composite.
         let real = RealVector::new(vec![1.0, 2.0]);
         let binary = BitString::new(vec![true, false, true]);
 
         let composite = CompositeGenome::new(real.clone(), binary.clone());
         let trace = composite.to_trace();
+        let recovered: CompositeGenome<RealVector, BitString> =
+            CompositeGenome::from_trace(&trace).expect("mixed composite should round-trip");
 
-        // Note: The trace stores data using type-specific prefixes
-        // This test verifies the trace contains the expected structure
-        assert!(trace.get_usize(&addr!("composite", "first_dim")).is_some());
-        assert!(trace.get_usize(&addr!("composite", "second_dim")).is_some());
+        assert_eq!(recovered.first().genes(), real.genes());
+        assert_eq!(recovered.second().bits(), binary.bits());
+    }
+
+    #[test]
+    fn test_composite_trace_roundtrip_permutation_realvector() {
+        // regression: EV-03 — previously to_trace dropped every permutation value
+        // (no "perm" prefix was recognized) and from_trace always failed. The
+        // module doc explicitly showcases "topology (permutation) + parameters".
+        let perm = Permutation::new(vec![2, 0, 3, 1]);
+        let real = RealVector::new(vec![1.5, -2.5, 3.5]);
+
+        let composite = CompositeGenome::new(perm.clone(), real.clone());
+        let trace = composite.to_trace();
+        let recovered: CompositeGenome<Permutation, RealVector> =
+            CompositeGenome::from_trace(&trace)
+                .expect("permutation+real composite should round-trip");
+
+        assert_eq!(recovered.first().permutation(), perm.permutation());
+        assert_eq!(recovered.second().genes(), real.genes());
+        assert_eq!(recovered, composite);
+    }
+
+    #[test]
+    fn test_composite_trace_roundtrip_bitstring_permutation() {
+        // regression: EV-03 — round-trip for BitString + Permutation.
+        let bits = BitString::new(vec![true, false, true, true]);
+        let perm = Permutation::new(vec![1, 3, 0, 2]);
+
+        let composite = CompositeGenome::new(bits.clone(), perm.clone());
+        let trace = composite.to_trace();
+        let recovered: CompositeGenome<BitString, Permutation> =
+            CompositeGenome::from_trace(&trace)
+                .expect("bitstring+permutation composite should round-trip");
+
+        assert_eq!(recovered.first().bits(), bits.bits());
+        assert_eq!(recovered.second().permutation(), perm.permutation());
+        assert_eq!(recovered, composite);
     }
 
     #[test]

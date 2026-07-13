@@ -41,6 +41,18 @@ impl BitString {
         }
     }
 
+    /// Generate a random bit string of an explicit length.
+    ///
+    /// This is the honest constructor for random generation: unlike
+    /// [`EvolutionaryGenome::generate`],
+    /// which overloads `MultiBounds` and only reads its dimension count, this
+    /// takes the number of bits directly.
+    pub fn generate_with_len<R: Rng>(rng: &mut R, len: usize) -> Self {
+        Self {
+            bits: (0..len).map(|_| rng.gen()).collect(),
+        }
+    }
+
     /// Create a bit string from a u64 with the given length
     pub fn from_u64(value: u64, length: usize) -> Self {
         assert!(length <= 64, "Length must be <= 64 for u64 conversion");
@@ -105,13 +117,33 @@ impl BitString {
         }
     }
 
-    /// Hamming distance to another bit string
+    /// Hamming distance to another bit string.
+    ///
+    /// # Panics
+    /// Panics if the two bit strings have different lengths (an invariant
+    /// violation). Use [`try_hamming_distance`](Self::try_hamming_distance) for
+    /// a fallible variant.
     pub fn hamming_distance(&self, other: &Self) -> usize {
-        self.bits
+        self.try_hamming_distance(other)
+            .unwrap_or_else(|e| panic!("BitString::hamming_distance: {e}"))
+    }
+
+    /// Fallible Hamming distance: returns `Err(GenomeError::DimensionMismatch)`
+    /// when the two bit strings differ in length instead of silently truncating
+    /// to the shorter one.
+    pub fn try_hamming_distance(&self, other: &Self) -> Result<usize, GenomeError> {
+        if self.bits.len() != other.bits.len() {
+            return Err(GenomeError::DimensionMismatch {
+                expected: self.bits.len(),
+                actual: other.bits.len(),
+            });
+        }
+        Ok(self
+            .bits
             .iter()
             .zip(other.bits.iter())
             .filter(|(a, b)| a != b)
-            .count()
+            .count())
     }
 
     /// Bitwise AND with another bit string
@@ -187,12 +219,30 @@ impl EvolutionaryGenome for BitString {
     /// Reconstruct BitString from Fugue trace.
     ///
     /// Reads bits from addresses "bit#0", "bit#1", ... until no more are found.
+    /// A *missing* address terminates the scan (normal end of the sequence),
+    /// but an address that is *present with the wrong value type* is a corrupt
+    /// trace and yields [`GenomeError::TypeMismatch`] rather than silently
+    /// truncating.
     fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
         let mut bits = Vec::new();
         let mut i = 0;
-        while let Some(val) = trace.get_bool(&addr!("bit", i)) {
-            bits.push(val);
-            i += 1;
+        loop {
+            match trace.choices.get(&addr!("bit", i)) {
+                None => break,
+                Some(choice) => match choice.value.as_bool() {
+                    Some(val) => {
+                        bits.push(val);
+                        i += 1;
+                    }
+                    None => {
+                        return Err(GenomeError::TypeMismatch {
+                            address: format!("bit#{i}"),
+                            expected: "bool".to_string(),
+                            actual: choice.value.type_name().to_string(),
+                        });
+                    }
+                },
+            }
         }
         if bits.is_empty() {
             return Err(GenomeError::InvalidStructure(
@@ -210,9 +260,13 @@ impl EvolutionaryGenome for BitString {
         self.bits.len()
     }
 
+    /// Generate a random bit string.
+    ///
+    /// Only `bounds.dimension()` is consulted — it is the number of bits — and
+    /// the per-dimension `min`/`max` values are ignored. Prefer
+    /// [`BitString::generate_with_len`] to make the length explicit.
     fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
-        let bits = (0..bounds.dimension()).map(|_| rng.gen()).collect();
-        Self { bits }
+        Self::generate_with_len(rng, bounds.dimension())
     }
 
     fn as_slice(&self) -> Option<&[bool]> {
@@ -224,7 +278,13 @@ impl EvolutionaryGenome for BitString {
     }
 
     fn distance(&self, other: &Self) -> f64 {
-        self.hamming_distance(other) as f64
+        self.try_distance(other).unwrap_or_else(|e| {
+            panic!("BitString::distance: {e}; use try_distance for a fallible comparison")
+        })
+    }
+
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        self.try_hamming_distance(other).map(|d| d as f64)
     }
 
     fn trace_prefix() -> &'static str {
@@ -501,5 +561,61 @@ mod tests {
         let trace = Trace::default();
         let result = BitString::from_trace(&trace);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bit_string_try_hamming_distance_mismatch() {
+        // regression: EV-55 — hamming_distance previously truncated to the
+        // shorter length and reported 0 despite 4 extra set bits.
+        let bs1 = BitString::new(vec![true, true]);
+        let bs2 = BitString::new(vec![true, true, true, true, true, true]);
+        assert!(matches!(
+            bs1.try_hamming_distance(&bs2),
+            Err(GenomeError::DimensionMismatch {
+                expected: 2,
+                actual: 6
+            })
+        ));
+        assert!(bs1.try_distance(&bs2).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "Dimension mismatch")]
+    fn test_bit_string_distance_mismatch_panics() {
+        // regression: EV-55 — distance() must loudly reject a length mismatch.
+        let bs1 = BitString::new(vec![true, true]);
+        let bs2 = BitString::new(vec![true, true, true, true, true, true]);
+        let _ = bs1.distance(&bs2);
+    }
+
+    #[test]
+    fn test_bit_string_from_trace_type_mismatch() {
+        // regression: EV-59 — a present-but-wrong-typed choice must raise
+        // TypeMismatch rather than silently truncating the bit string.
+        let mut trace = Trace::default();
+        trace.insert_choice(addr!("bit", 0), ChoiceValue::Bool(true), 0.0);
+        trace.insert_choice(addr!("bit", 1), ChoiceValue::F64(1.0), 0.0); // wrong type
+        trace.insert_choice(addr!("bit", 2), ChoiceValue::Bool(false), 0.0);
+
+        match BitString::from_trace(&trace) {
+            Err(GenomeError::TypeMismatch {
+                address,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(address, "bit#1");
+                assert_eq!(expected, "bool");
+                assert_eq!(actual, "f64");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bit_string_generate_with_len() {
+        // EV-94: honest constructor takes an explicit length.
+        let mut rng = rand::thread_rng();
+        let bs = BitString::generate_with_len(&mut rng, 7);
+        assert_eq!(bs.len(), 7);
     }
 }

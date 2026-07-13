@@ -11,11 +11,30 @@
 
 -----
 
+> **Implementation note (2026-07):** this document is the original design
+> draft and predates several implementation decisions; treat code samples
+> below as illustrative, not as the current API. Notably: the Bayesian
+> operator-parameter learner shipped as [`ThompsonSamplingTuner`] (a Thompson-
+> sampling multi-armed bandit over conjugate `Beta`/`Gamma` posteriors,
+> opt-in via `SimpleGABuilder::adaptive_operators`), not the
+> `BayesianHyperparameterLearner` sketch in §4 below; the SMC-as-evolution
+> idea in `fugue_integration::evolution_model::EvolutionarySMC` is
+> implemented and demonstrated end-to-end in `examples/bayesian_evolution.rs`;
+> and checkpointing (§ Checkpointing) supports bit-identical resume for the
+> ChaCha RNG family via `checkpoint::rng::SnapshotRng`. See README.md and
+> CHANGELOG.md for the current, verified feature set.
+
+-----
+
 ## Executive Summary
 
-**fugue-evo** is a Rust library that implements genetic algorithms through the lens of probabilistic programming, built on top of the [Fugue PPL](https://github.com/alexnodeland/fugue). By treating evolution as Bayesian inference over solution spaces, fugue-evo provides principled approaches to selection, crossover, and mutation while enabling automatic hyperparameter learning through probabilistic inference.
+**fugue-evo** is a broad Rust evolutionary-computation library with an *optional* probabilistic-programming bridge to the [Fugue PPL](https://github.com/alexnodeland/fugue).
 
-The library supports customizable genome representations, hierarchical Bayesian genetic algorithms (HBGA), and learnable genetic operators—bridging the gap between evolutionary computation and modern probabilistic machine learning.
+> **Scope note (EV-17):** the "evolution as Bayesian inference over solution spaces" framing below describes the `fugue_integration` module specifically — `EvolutionarySMC` (tempered SMC over a Boltzmann posterior), `EvolutionStep`, and `BayesianAdaptiveGA`, which are the only paths that construct a Fugue `Model` and drive its `factor`/inference machinery (see `examples/bayesian_evolution.rs`). The default flagship algorithms (SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState) are standalone evolutionary computation that use Fugue's `Trace` only as an address→value data container, not for inference. Read the design goals below with that distinction in mind.
+
+By treating evolution as Bayesian inference over solution spaces, the `fugue_integration` module provides principled, inference-backed approaches to selection/rejuvenation while enabling automatic hyperparameter learning through probabilistic inference; the default algorithms provide the same evolutionary operators as conventional EC.
+
+The library supports customizable genome representations, hierarchical Bayesian genetic algorithms (HBGA), and learnable genetic operators—bridging the gap between evolutionary computation and modern probabilistic machine learning where the `fugue_integration` module is used.
 
 ### Core Insight: Fitness as Likelihood
 

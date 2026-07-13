@@ -39,12 +39,29 @@ impl Permutation {
         result
     }
 
-    /// Create a permutation from a vector without validation
+    /// Create a permutation from a vector **without** validating it.
     ///
-    /// # Safety
-    /// The caller must ensure the input is a valid permutation of 0..n
-    pub fn new_unchecked(perm: Vec<usize>) -> Self {
-        Self { perm }
+    /// # Invariants
+    /// The caller must guarantee that `perm` is a valid permutation of
+    /// `0..perm.len()` — every index in that range appears exactly once.
+    /// Violating this invariant does not fail here, but corrupts downstream
+    /// operations that assume it:
+    /// - [`inverse`](Self::inverse) panics with an out-of-bounds index for an
+    ///   out-of-range value, or silently produces a meaningless result for
+    ///   in-range duplicates.
+    /// - [`compose`](Self::compose) panics on out-of-range indices.
+    ///
+    /// Prefer [`try_new`](Self::try_new) (or [`new`](Self::new)) unless validity
+    /// has already been established elsewhere and you need to skip the O(n)
+    /// re-check. In debug builds this constructor still asserts validity to
+    /// catch contract violations early.
+    pub fn from_vec_unchecked(perm: Vec<usize>) -> Self {
+        let result = Self { perm };
+        debug_assert!(
+            result.is_valid_permutation(),
+            "from_vec_unchecked called with a vector that is not a valid permutation of 0..n"
+        );
+        result
     }
 
     /// Try to create a permutation, returning an error if invalid
@@ -71,6 +88,16 @@ impl Permutation {
         let mut perm: Vec<usize> = (0..n).collect();
         perm.shuffle(rng);
         Self { perm }
+    }
+
+    /// Generate a random permutation of an explicit length.
+    ///
+    /// This is the honest constructor for random generation: unlike
+    /// [`EvolutionaryGenome::generate`],
+    /// which overloads `MultiBounds` and only reads its dimension count, this
+    /// takes the permutation length directly. Equivalent to [`random`](Self::random).
+    pub fn generate_with_len<R: Rng>(rng: &mut R, len: usize) -> Self {
+        Self::random(len, rng)
     }
 
     /// Get the length of the permutation
@@ -220,13 +247,32 @@ impl EvolutionaryGenome for Permutation {
 
     /// Reconstruct Permutation from Fugue trace.
     ///
-    /// Reads values from addresses "perm#0", "perm#1", ... until no more are found.
+    /// Reads values from addresses "perm#0", "perm#1", ... until no more are
+    /// found. A *missing* address terminates the scan (normal end of the
+    /// sequence), but an address that is *present with the wrong value type* is
+    /// a corrupt trace and yields [`GenomeError::TypeMismatch`] rather than
+    /// silently truncating — which for a permutation is especially dangerous,
+    /// since a truncated prefix can itself pass the validity check.
     fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
         let mut perm = Vec::new();
         let mut i = 0;
-        while let Some(val) = trace.get_usize(&addr!("perm", i)) {
-            perm.push(val);
-            i += 1;
+        loop {
+            match trace.choices.get(&addr!("perm", i)) {
+                None => break,
+                Some(choice) => match choice.value.as_usize() {
+                    Some(val) => {
+                        perm.push(val);
+                        i += 1;
+                    }
+                    None => {
+                        return Err(GenomeError::TypeMismatch {
+                            address: format!("perm#{i}"),
+                            expected: "usize".to_string(),
+                            actual: choice.value.type_name().to_string(),
+                        });
+                    }
+                },
+            }
         }
         if perm.is_empty() {
             return Err(GenomeError::InvalidStructure(
@@ -244,13 +290,25 @@ impl EvolutionaryGenome for Permutation {
         self.perm.len()
     }
 
+    /// Generate a random permutation.
+    ///
+    /// Only `bounds.dimension()` is consulted — it is the permutation length —
+    /// and the per-dimension `min`/`max` values are ignored. Prefer
+    /// [`Permutation::generate_with_len`] to make the length explicit.
     fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
-        let n = bounds.dimension();
-        Self::random(n, rng)
+        Self::generate_with_len(rng, bounds.dimension())
     }
 
     fn distance(&self, other: &Self) -> f64 {
-        self.kendall_tau_distance(other).unwrap_or(0) as f64
+        self.try_distance(other).unwrap_or_else(|e| {
+            panic!("Permutation::distance: {e}; use try_distance for a fallible comparison")
+        })
+    }
+
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        // kendall_tau_distance already errors on a length mismatch; propagate it
+        // instead of collapsing it to 0.0 (which meant "identical").
+        self.kendall_tau_distance(other).map(|d| d as f64)
     }
 
     fn trace_prefix() -> &'static str {
@@ -551,5 +609,79 @@ mod tests {
     fn test_permutation_from_vec() {
         let p: Permutation = vec![1, 0, 2].into();
         assert_eq!(p.as_slice(), &[1, 0, 2]);
+    }
+
+    #[test]
+    fn test_permutation_try_distance_length_mismatch() {
+        // regression: EV-19 — distance previously swallowed the length-mismatch
+        // Err via unwrap_or(0) and reported 0.0 ("identical") for different sizes.
+        let p1 = Permutation::identity(3);
+        let p2 = Permutation::identity(5);
+        assert!(matches!(
+            p1.try_distance(&p2),
+            Err(GenomeError::DimensionMismatch {
+                expected: 3,
+                actual: 5
+            })
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "Dimension mismatch")]
+    fn test_permutation_distance_length_mismatch_panics() {
+        // regression: EV-19 — distance() must loudly reject a length mismatch
+        // rather than returning 0.0 as if the permutations were identical.
+        let p1 = Permutation::identity(3);
+        let p2 = Permutation::identity(5);
+        let _ = p1.distance(&p2);
+    }
+
+    #[test]
+    fn test_permutation_from_trace_type_mismatch() {
+        // regression: EV-59 — a present-but-wrong-typed choice must raise
+        // TypeMismatch. This is especially important for permutations, since a
+        // silently truncated prefix can itself be a "valid" shorter permutation.
+        let mut trace = Trace::default();
+        trace.insert_choice(addr!("perm", 0), ChoiceValue::Usize(2), 0.0);
+        trace.insert_choice(addr!("perm", 1), ChoiceValue::Bool(true), 0.0); // wrong type
+        trace.insert_choice(addr!("perm", 2), ChoiceValue::Usize(0), 0.0);
+
+        match Permutation::from_trace(&trace) {
+            Err(GenomeError::TypeMismatch {
+                address,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(address, "perm#1");
+                assert_eq!(expected, "usize");
+                assert_eq!(actual, "bool");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_permutation_from_vec_unchecked_debug_asserts() {
+        // regression: EV-92 — the unchecked constructor now debug-asserts the
+        // invariant. In debug builds an invalid vector triggers the assertion.
+        let p = Permutation::from_vec_unchecked(vec![2, 0, 1]);
+        assert!(p.is_valid_permutation());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "not a valid permutation")]
+    fn test_permutation_from_vec_unchecked_rejects_invalid_in_debug() {
+        // regression: EV-92 — in-range duplicates are a contract violation.
+        let _ = Permutation::from_vec_unchecked(vec![0, 0, 2]);
+    }
+
+    #[test]
+    fn test_permutation_generate_with_len() {
+        // EV-94: honest constructor takes an explicit length.
+        let mut rng = rand::thread_rng();
+        let p = Permutation::generate_with_len(&mut rng, 8);
+        assert_eq!(p.len(), 8);
+        assert!(p.is_valid_permutation());
     }
 }
