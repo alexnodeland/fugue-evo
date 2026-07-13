@@ -18,7 +18,7 @@ authors = ["Alex Nodeland"]
 description = "A Probabilistic Genetic Algorithm Library for Rust"
 license = "MIT"
 repository = "https://github.com/alexnodeland/fugue-evo"
-keywords = ["genetic-algorithm", "evolution", "optimization", "probabilistic-programming"]
+keywords = ["genetic-algorithm", "evolution", "optimization", "bayesian", "ppl"]
 categories = ["algorithms", "science"]
 
 [features]
