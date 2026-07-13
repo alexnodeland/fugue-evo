@@ -8,6 +8,10 @@ license = "MIT"
 repository = "https://github.com/alexnodeland/fugue-evo"
 keywords = ["genetic-algorithm", "wasm", "webassembly", "optimization"]
 categories = ["algorithms", "wasm"]
+# Distributed via `wasm-pack build` output (npm-shaped pkg/), not crates.io;
+# its fugue-evo path dependency has no `version`, so `cargo publish` would
+# reject the manifest anyway.
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
