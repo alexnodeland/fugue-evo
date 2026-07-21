@@ -7,6 +7,7 @@
 
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -415,10 +416,26 @@ where
 
         // Parallel evolution of islands. EV-12: each island uses its own
         // persistent, master-seeded RNG (not OS entropy), so a seeded run is
-        // reproducible even though evaluation happens in parallel.
+        // bit-reproducible whether islands evolve in parallel (feature
+        // "parallel") or sequentially (e.g. wasm32 builds).
+        #[cfg(feature = "parallel")]
         self.islands
             .par_iter_mut()
             .zip(self.island_rngs.par_iter_mut())
+            .for_each(|(island, island_rng)| {
+                let _ = island.evolve_one_generation(
+                    fitness.as_ref(),
+                    &selection,
+                    &crossover,
+                    &mutation,
+                    elitism,
+                    island_rng,
+                );
+            });
+        #[cfg(not(feature = "parallel"))]
+        self.islands
+            .iter_mut()
+            .zip(self.island_rngs.iter_mut())
             .for_each(|(island, island_rng)| {
                 let _ = island.evolve_one_generation(
                     fitness.as_ref(),

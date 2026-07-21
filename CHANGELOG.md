@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-21
+
+### Added
+
+- Package metadata now includes `documentation` (docs.rs/fugue-evo) and `homepage` (evo.fugue.run), so crates.io shows the documentation link.
+- The island model (`algorithms::island`) is now available without the `parallel` feature: islands evolve sequentially when rayon is absent (e.g. wasm32 builds), with identical seeded results thanks to the per-island RNGs (EV-12).
+- `fugue-evo-wasm` gains incremental explorable engines (`ExploreGa`, `ExploreCma`, `ExploreNsga2`, `ExploreIsland`, `ExploreUmda`, plus `explore_landscape_grid`/`explore_landscape_info`): seeded, generation-by-generation `step()` APIs streaming population, fitness, CMA-ES covariance/eigenstructure, Pareto ranks, and migration events as JSON — the compute layer behind the interactive docs at evo.fugue.run.
+- Interactive explorable documentation (evo.fugue.run): the fugue-viz foundation (navy theme, seeded canvas widgets, lazy init) with evo-specific explorables — a live CMA-ES covariance ellipse, NSGA-II Pareto front formation, island-model migration, GA operator anatomy, UMDA model contraction — plus a WASM playground page running the real crate in the browser.
+
 Remediation of the full 2026-07 audit (`AUDIT-2026-07.md`, findings EV-01
 through EV-106: correctness, math, completeness, usability, elegance, and
 docs issues across CMA-ES, hyperparameter learning, interactive/Bradley-Terry

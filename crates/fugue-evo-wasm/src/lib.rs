@@ -24,6 +24,7 @@ use wasm_bindgen::prelude::*;
 
 mod config;
 mod error;
+mod explore;
 mod fitness;
 mod interactive;
 mod optimizers;
@@ -31,6 +32,7 @@ mod result;
 
 pub use config::*;
 pub use error::*;
+pub use explore::*;
 pub use fitness::*;
 pub use interactive::*;
 pub use optimizers::*;

@@ -12,12 +12,14 @@ lto = true
 
 [package]
 name = "fugue-evo"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Alex Nodeland"]
 description = "A Probabilistic Genetic Algorithm Library for Rust"
 license = "MIT"
 repository = "https://github.com/alexnodeland/fugue-evo"
+documentation = "https://docs.rs/fugue-evo"
+homepage = "https://evo.fugue.run"
 keywords = ["genetic-algorithm", "evolution", "optimization", "bayesian", "ppl"]
 categories = ["algorithms", "science"]
 
