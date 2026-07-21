@@ -54,9 +54,11 @@ fn make_landscape(name: &str) -> Result<Box<dyn BenchmarkFunction>, JsValue> {
         "rosenbrock" => Box::new(Rosenbrock::new(2)),
         "ackley" => Box::new(Ackley::new(2)),
         "styblinski" => Box::new(StyblinskiTang::new(2)),
-        _ => return Err(JsValue::from_str(&format!(
+        _ => {
+            return Err(JsValue::from_str(&format!(
             "unknown landscape '{name}' (expected sphere|rastrigin|rosenbrock|ackley|styblinski)"
-        ))),
+        )))
+        }
     };
     Ok(f)
 }
