@@ -180,21 +180,21 @@
       heatCv.height = GRID_N;
       var hctx = heatCv.getContext("2d");
       var img = hctx.createImageData(GRID_N, GRID_N);
-      var rgb = toRgb(th.colors.ink);
+      var rgb = toRgb(th.colors.data);
       var span = g.max - g.min || 1;
       var lspan = Math.log(1 + span);
       for (var j = 0; j < GRID_N; j++) {      // grid j indexes y from ymin up
         var row = GRID_N - 1 - j;             // canvas y grows downward
         for (var i = 0; i < GRID_N; i++) {
           // Log ramp so deep, narrow basins still read (Rosenbrock's corner
-          // values dwarf the valley on a linear ramp). Basins stay nearly
-          // clear; ridges shade with ink — chrome only, no color role burned.
+          // values dwarf the valley on a linear ramp). Basins glow in the
+          // data role — the same ramp the tutorial widgets use.
           var t = Math.log(1 + (g.vals[j * GRID_N + i] - g.min)) / lspan;
           var off = (row * GRID_N + i) * 4;
           img.data[off] = rgb[0];
           img.data[off + 1] = rgb[1];
           img.data[off + 2] = rgb[2];
-          img.data[off + 3] = Math.round(255 * (0.05 + 0.5 * t));
+          img.data[off + 3] = Math.round(255 * 0.55 * (1 - t));
         }
       }
       hctx.putImageData(img, 0, 0);
