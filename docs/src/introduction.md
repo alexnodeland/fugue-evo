@@ -1,6 +1,32 @@
-# Introduction
+<div class="fugue-hero">
 
-**fugue-evo** is a probabilistic genetic algorithm library for Rust that treats evolution as Bayesian inference over solution spaces. It provides a flexible, type-safe framework for optimization problems ranging from simple continuous optimization to complex genetic programming.
+<div class="fugue-mark fugue-mark-evo"><span>e</span></div>
+
+# Fugue Evo
+
+<p class="fugue-hero-tag">Evolution as Bayesian inference — a probabilistic, type-safe evolutionary computation library for Rust.</p>
+
+<div class="fugue-badge-row">
+<a href="https://crates.io/crates/fugue-evo"><img src="https://img.shields.io/crates/v/fugue-evo.svg" alt="Crates.io"></a>
+<a href="https://docs.rs/fugue-evo"><img src="https://docs.rs/fugue-evo/badge.svg" alt="Dev Docs"></a>
+<a href="https://github.com/alexnodeland/fugue-evo/actions/workflows/ci.yml"><img src="https://github.com/alexnodeland/fugue-evo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</div>
+
+</div>
+
+<div class="fugue-explorable fv-inline" data-viz="mini-convergence" data-landscape="rastrigin" data-seed="11" data-caption="This page is alive — a real genetic algorithm, compiled to WASM, is optimizing Rastrigin right now."></div>
+
+<div class="fugue-cards">
+<a class="fugue-card" href="./getting-started/installation.html"><span class="fugue-card-title">Getting Started</span><span class="fugue-card-desc">Install fugue-evo and run your first optimization in minutes.</span></a>
+<a class="fugue-card" href="./tutorials/continuous-optimization.html"><span class="fugue-card-title">Tutorials</span><span class="fugue-card-desc">Watch a population hunt a landscape, step by step — every figure runs the real crate.</span></a>
+<a class="fugue-card" href="./playground.html"><span class="fugue-card-title">Playground</span><span class="fugue-card-desc">Drive all five algorithms live in the browser: GA, CMA-ES, NSGA-II, islands, UMDA.</span></a>
+<a class="fugue-card" href="./reference/algorithms.html"><span class="fugue-card-title">Reference</span><span class="fugue-card-desc">Algorithms, genome types, operators, fitness, and termination criteria.</span></a>
+<a class="fugue-card" href="./architecture/philosophy.html"><span class="fugue-card-title">Architecture</span><span class="fugue-card-desc">Design philosophy and system internals — evolution through a probabilistic lens.</span></a>
+<a class="fugue-card" href="./api/fugue_evo/index.html"><span class="fugue-card-title">API Reference</span><span class="fugue-card-desc">Complete rustdoc for the <code>fugue-evo</code> crate.</span></a>
+</div>
+
+<a class="fugue-eco" href="https://fugue.run"><span class="fugue-card-title">Fugue <span class="fugue-brand-arrow">↗</span></span><span class="fugue-card-desc">The probabilistic programming library underneath — compose models in direct style and run MH, HMC, and SMC, with its own interactive explorables.</span></a>
 
 ## Why Fugue-Evo?
 
@@ -12,7 +38,7 @@ Traditional genetic algorithms use heuristic operators, but fugue-evo views evol
 
 - **Fitness as Likelihood**: Selection pressure maps directly to Bayesian conditioning
 - **Learnable Operators**: Automatic inference of optimal crossover, mutation, and selection hyperparameters using conjugate priors
-- **Trace-Based Evolution**: Deep integration with the [fugue-ppl](https://github.com/fugue-ppl/fugue) probabilistic programming library enables novel trace-based genetic operators
+- **Trace-Based Evolution**: Deep integration with the [fugue-ppl](https://fugue.run) probabilistic programming library enables novel trace-based genetic operators
 
 ### Type Safety
 
@@ -53,12 +79,6 @@ Built-in genome representations for different problem domains:
 - **Permutation**: Ordering problems (TSP, scheduling)
 - **TreeGenome**: Genetic programming (symbolic regression)
 
-## Getting Started
-
-Ready to dive in? Head to the [Installation](./getting-started/installation.md) guide to add fugue-evo to your project, then follow the [Quick Start](./getting-started/quickstart.md) to run your first optimization.
-
-For a deeper understanding of the library's design, explore the [Core Concepts](./getting-started/concepts.md) section.
-
 ## Example
 
 Here's a taste of what optimization looks like with fugue-evo:
@@ -90,16 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Documentation Structure
+## Getting Started
 
-This documentation is organized into several sections:
+Ready to dive in? Head to the [Installation](./getting-started/installation.md) guide to add fugue-evo to your project, then follow the [Quick Start](./getting-started/quickstart.md) to run your first optimization.
 
-- **Getting Started**: Installation, concepts, and first steps
-- **Tutorials**: Step-by-step walkthroughs of example problems
-- **How-To Guides**: Task-oriented guides for specific use cases
-- **Reference**: Detailed API documentation for algorithms, genomes, and operators
-- **Architecture**: Design philosophy and system internals
-
-## API Reference
-
-For complete API documentation generated from source code, see the [Rustdoc API Reference](./api/fugue_evo/index.html).
+For a deeper understanding of the library's design, explore the [Core Concepts](./getting-started/concepts.md) section.

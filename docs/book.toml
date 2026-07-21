@@ -1,5 +1,5 @@
 [book]
-title = "Fugue-Evo Documentation"
+title = "Fugue Evo Docs"
 authors = ["Fugue-Evo Contributors"]
 language = "en"
 src = "src"
@@ -14,8 +14,9 @@ preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/alexnodeland/fugue-evo"
 edit-url-template = "https://github.com/alexnodeland/fugue-evo/edit/main/docs/{path}"
 site-url = "https://evo.fugue.run/"
-additional-css = ["fugue-viz.css"]
+additional-css = ["fugue-theme.css", "fugue-viz.css"]
 additional-js = [
+    "fugue-brand.js",
     "fugue-viz.js",
     "fugue-evo-wasm-loader.js",
     "viz/landscape.js",
