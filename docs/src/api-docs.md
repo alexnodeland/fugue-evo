@@ -6,11 +6,8 @@ The complete API documentation is generated from rustdoc comments in the source 
 
 ### Online
 
-Visit the docs.rs page (when published):
-
-```text
-https://docs.rs/fugue-evo
-```
+The published API documentation is live on docs.rs:
+[docs.rs/fugue-evo](https://docs.rs/fugue-evo)
 
 ### Local Generation
 

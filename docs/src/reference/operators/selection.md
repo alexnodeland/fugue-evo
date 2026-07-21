@@ -2,6 +2,8 @@
 
 Selection operators choose parents for reproduction.
 
+<div class="fugue-explorable fv-inline" data-viz="mini-diversity" data-seed="11" data-k="3" data-caption="What selection pressure does to a population, measured live: drag tournament size k."></div>
+
 ## Module
 
 ```rust,ignore

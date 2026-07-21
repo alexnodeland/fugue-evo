@@ -15,6 +15,10 @@
 - Discrete or combinatorial problems
 - Problems requiring custom genetic operators
 
+<div class="fugue-explorable" data-viz="cmaes-ellipse" data-landscape="rosenbrock" data-seed="11"></div>
+
+*The algorithm in one picture: the blue ellipse is the search distribution — mean (coral), one and two standard deviations of σ²C. On Rosenbrock’s curved valley, watch it learn the valley’s direction: it elongates along it, slides down it, then contracts onto the optimum. Every sample is drawn by the real crate.*
+
 ## How CMA-ES Works
 
 CMA-ES maintains a multivariate normal distribution over the search space and iteratively:
@@ -130,6 +134,8 @@ println!("Evaluations: {}", cmaes.state.evaluations);
 CMA-ES typically samples λ individuals per generation:
 - Default λ ≈ 4 + 3ln(n) for n dimensions
 - Total evaluations ≈ generations × λ
+
+<div class="fugue-explorable fv-inline" data-viz="mini-sigma" data-landscape="rosenbrock" data-seed="11" data-caption="The global step size σ adapts on its own — rising while the valley is being traversed, collapsing at convergence. This is the trace from the run above."></div>
 
 ## Tuning CMA-ES
 

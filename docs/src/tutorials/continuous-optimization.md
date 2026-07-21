@@ -2,6 +2,8 @@
 
 This tutorial covers optimizing functions with real-valued variables. You'll learn how to set up, run, and analyze continuous optimization problems.
 
+<div class="fugue-explorable fv-inline" data-viz="mini-convergence" data-landscape="sphere" data-seed="11" data-caption="A real GA run on the sphere function — best fitness vs generation, straight from the crate compiled to WebAssembly."></div>
+
 ## The Sphere Function
 
 We'll start with the **Sphere function**, a simple unimodal benchmark:

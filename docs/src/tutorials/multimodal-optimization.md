@@ -16,6 +16,10 @@ f(x) = 10n + Σ[xᵢ² - 10cos(2πxᵢ)]
 - Non-separable: Variables interact through cosine terms
 - Deceptive: Local minima look similar to global minimum
 
+<div class="fugue-explorable" data-viz="ga-anatomy" data-landscape="rastrigin" data-seed="11"></div>
+
+*Rastrigin’s trap, live: many basins, one global. Watch where selection concentrates the population — and how mutation (violet streaks) occasionally kicks a lineage over a ridge. Raise the mutation probability and the population stays scattered; lower it and it commits early.*
+
 ## The Challenge
 
 With 20 dimensions, the Rastrigin function has approximately 10²⁰ local minima. A naive optimization will likely get trapped in one of these local minima.
@@ -33,6 +37,8 @@ With 20 dimensions, the Rastrigin function has approximately 10²⁰ local minim
 ```bash
 cargo run --example rastrigin_benchmark
 ```
+
+<div class="fugue-explorable fv-inline" data-viz="mini-diversity" data-seed="19" data-k="3" data-caption="Diversity is the budget you spend to escape local optima. Drag k to trade exploration against exploitation."></div>
 
 ## Key Strategies
 

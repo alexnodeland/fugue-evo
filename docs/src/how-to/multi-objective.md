@@ -2,6 +2,10 @@
 
 This guide shows how to optimize problems with multiple conflicting objectives using NSGA-II.
 
+<div class="fugue-explorable" data-viz="nsga2-front" data-problem="zdt1" data-seed="11"></div>
+
+*A Pareto front forming, live, in objective space: green points are the current non-dominated set (rank 0), fading points are dominated ranks, the yellow curve is the analytic optimum. Boundary points — kept by infinite crowding distance — get a coral halo. Switch problems to see convex, non-convex, and disconnected fronts.*
+
 ## When to Use Multi-Objective Optimization
 
 Use multi-objective optimization when:

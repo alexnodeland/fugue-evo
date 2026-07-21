@@ -24,6 +24,8 @@ At its core, genetic algorithms follow an iterative process:
 
 Fugue-evo provides abstractions for each step while handling the loop orchestration.
 
+<div class="fugue-explorable fv-inline" data-viz="mini-convergence" data-landscape="rastrigin" data-seed="11" data-caption="The whole loop, compressed to one curve: the best fitness found so far, generation by generation, from a real run of the crate. It falls in bursts — discovery is lumpy."></div>
+
 ## Genomes
 
 A **genome** represents a candidate solution to your optimization problem. The `EvolutionaryGenome` trait is the core abstraction:
@@ -159,6 +161,8 @@ let mutation = GaussianMutation::new(0.1); // std dev
 // Bit-flip for binary genomes
 let mutation = BitFlipMutation::new(0.01); // per-bit rate
 ```
+
+<div class="fugue-explorable fv-inline" data-viz="mini-diversity" data-seed="11" data-k="3" data-caption="Selection pressure in one picture: population diversity collapsing over generations. Drag the tournament size k — harder selection collapses diversity faster."></div>
 
 ## Bounds
 
