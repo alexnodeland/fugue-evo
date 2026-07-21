@@ -23,11 +23,11 @@ use serde_json::json;
 use wasm_bindgen::prelude::*;
 
 use fugue_evo::algorithms::cmaes::{CmaEs, CmaEsFitness};
+use fugue_evo::algorithms::eda::umda::{ContinuousUnivariateModel, UMDAConfig};
 use fugue_evo::algorithms::island::{
     IslandModel, IslandModelBuilder, MigrationPolicy, MigrationTopology,
 };
 use fugue_evo::algorithms::nsga2::{Nsga2, Nsga2Individual};
-use fugue_evo::algorithms::eda::umda::{ContinuousUnivariateModel, UMDAConfig};
 use fugue_evo::fitness::benchmarks::{
     Ackley, BenchmarkFunction, Rastrigin, Rosenbrock, SchafferN1, Sphere, StyblinskiTang, Zdt1,
     Zdt2, Zdt3,
@@ -54,11 +54,9 @@ fn make_landscape(name: &str) -> Result<Box<dyn BenchmarkFunction>, JsValue> {
         "rosenbrock" => Box::new(Rosenbrock::new(2)),
         "ackley" => Box::new(Ackley::new(2)),
         "styblinski" => Box::new(StyblinskiTang::new(2)),
-        _ => {
-            return Err(JsValue::from_str(&format!(
-                "unknown landscape '{name}' (expected sphere|rastrigin|rosenbrock|ackley|styblinski)"
-            )))
-        }
+        _ => return Err(JsValue::from_str(&format!(
+            "unknown landscape '{name}' (expected sphere|rastrigin|rosenbrock|ackley|styblinski)"
+        ))),
     };
     Ok(f)
 }
@@ -670,7 +668,12 @@ impl ExploreIsland {
             .islands
             .iter()
             .filter_map(|i| i.best.as_ref())
-            .map(|b| (b.genome.genes().to_vec(), self.landscape.evaluate_raw(b.genome.genes())))
+            .map(|b| {
+                (
+                    b.genome.genes().to_vec(),
+                    self.landscape.evaluate_raw(b.genome.genes()),
+                )
+            })
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(g, raw)| json!([g[0], g[1], raw]));
 
@@ -747,8 +750,7 @@ impl ExploreUmda {
         sampled.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let n_select = ((self.pop_size as f64 * self.selection_ratio).round() as usize).max(2);
-        let selected: Vec<&RealVector> =
-            sampled.iter().take(n_select).map(|(g, _)| g).collect();
+        let selected: Vec<&RealVector> = sampled.iter().take(n_select).map(|(g, _)| g).collect();
         self.model.update(&selected, &self.config);
         self.generation += 1;
 
@@ -808,7 +810,10 @@ mod tests {
 
         let v: serde_json::Value = serde_json::from_str(&a).unwrap();
         let best = v["best"][2].as_f64().unwrap();
-        assert!(best < 5.0, "GA should find a decent Rastrigin point, got {best}");
+        assert!(
+            best < 5.0,
+            "GA should find a decent Rastrigin point, got {best}"
+        );
     }
 
     #[test]
@@ -821,7 +826,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&last).unwrap();
         let best = v["best"][2].as_f64().unwrap();
         assert!(best < 1e-3, "CMA-ES should nail the sphere, got {best}");
-        assert!(v["sigma"].as_f64().unwrap() < 1.5, "step size should shrink");
+        assert!(
+            v["sigma"].as_f64().unwrap() < 1.5,
+            "step size should shrink"
+        );
         assert_eq!(v["cov"].as_array().unwrap().len(), 4);
         assert_eq!(v["eigenvalues"].as_array().unwrap().len(), 2);
     }
@@ -843,7 +851,10 @@ mod tests {
             .iter()
             .filter(|p| p[2].as_u64() == Some(0))
             .count();
-        assert!(rank0 > 30, "front should dominate the population, got {rank0}");
+        assert!(
+            rank0 > 30,
+            "front should dominate the population, got {rank0}"
+        );
     }
 
     #[test]
