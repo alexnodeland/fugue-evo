@@ -2,6 +2,8 @@
 
 Non-dominated Sorting Genetic Algorithm II for multi-objective optimization.
 
+<div class="fugue-explorable" data-viz="nsga2-front" data-problem="zdt3" data-seed="7"></div>
+
 ## Module
 
 ```rust,ignore

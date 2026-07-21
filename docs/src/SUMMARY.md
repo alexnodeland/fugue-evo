@@ -31,6 +31,10 @@
 - [Multi-Objective Optimization](./how-to/multi-objective.md)
 - [WASM & Browser Usage](./how-to/wasm.md)
 
+# Playground
+
+- [Playground](./playground.md)
+
 # Reference
 
 - [Algorithms](./reference/algorithms.md)

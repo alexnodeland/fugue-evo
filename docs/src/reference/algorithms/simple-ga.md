@@ -2,6 +2,8 @@
 
 The Simple Genetic Algorithm is a flexible, general-purpose evolutionary optimization algorithm.
 
+<div class="fugue-explorable" data-viz="ga-anatomy" data-landscape="rastrigin" data-seed="23"></div>
+
 ## Module
 
 ```rust,ignore

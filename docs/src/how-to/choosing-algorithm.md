@@ -2,6 +2,8 @@
 
 This guide helps you select the right optimization algorithm for your problem.
 
+<div class="fugue-explorable fv-inline" data-viz="mini-convergence" data-landscape="rastrigin" data-seed="7" data-caption="Whatever you choose, this is the curve you’ll be watching: best-so-far fitness per generation, from a live run of the crate."></div>
+
 ## Quick Decision Guide
 
 ### By Problem Type

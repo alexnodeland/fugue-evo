@@ -2,6 +2,8 @@
 
 Covariance Matrix Adaptation Evolution Strategy for continuous optimization.
 
+<div class="fugue-explorable" data-viz="cmaes-ellipse" data-landscape="ackley" data-seed="17"></div>
+
 ## Module
 
 ```rust,ignore

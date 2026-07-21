@@ -2,6 +2,10 @@
 
 In this guide, you'll create a complete optimization from scratch with a custom fitness function. We'll optimize a simple engineering problem: finding the dimensions of a box with maximum volume given a surface area constraint.
 
+<div class="fugue-explorable" data-viz="ga-anatomy" data-landscape="sphere" data-seed="11"></div>
+
+*Every generation is the same three moves. Watch fugue-evo’s real operators run one generation at a time: rings mark the parents tournament selection picked, blue dots are what crossover produced, violet streaks are mutation’s nudges — and the population (green) pours into the basin. Drag the seed to replay a different history.*
+
 ## The Problem
 
 Design a rectangular box with:

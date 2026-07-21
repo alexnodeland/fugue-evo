@@ -33,6 +33,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Install mdbook
         run: |
@@ -56,6 +61,9 @@ jobs:
         env:
           RUSTDOCFLAGS: --enable-index-page -Zunstable-options
 
+      - name: Build fugue-evo-wasm package
+        run: wasm-pack build crates/fugue-evo-wasm --target web --release
+
       - name: Build mdbook
         run: mdbook build docs
 
@@ -64,6 +72,14 @@ jobs:
           # Copy rustdoc into mdbook output under /api
           mkdir -p docs/book/api
           cp -r target/doc/* docs/book/api/
+          # Serve the wasm package next to the book so the explorable
+          # widgets and playground can run the real crate (see
+          # docs/fugue-evo-wasm-loader.js, which imports <site>/pkg/).
+          mkdir -p docs/book/pkg
+          cp crates/fugue-evo-wasm/pkg/fugue_evo_wasm.js \
+             crates/fugue-evo-wasm/pkg/fugue_evo_wasm_bg.wasm \
+             crates/fugue-evo-wasm/pkg/package.json \
+             docs/book/pkg/
           # Create a redirect from api/index.html to the main crate
           echo '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0; url=fugue_evo/index.html"></head><body>Redirecting to <a href="fugue_evo/index.html">fugue_evo</a>...</body></html>' > docs/book/api/index.html
           # Copy CNAME for custom domain

@@ -29,6 +29,8 @@ Fugue-evo includes several advanced optimization algorithms beyond the Simple GA
 
 See [CMA-ES Tutorial](./cmaes.md) for details.
 
+<div class="fugue-explorable fv-inline" data-viz="mini-sigma" data-landscape="rosenbrock" data-seed="11" data-caption="CMA-ES’s signature move: the step size σ adapting itself — no schedule, no tuning."></div>
+
 ## NSGA-II
 
 **Non-dominated Sorting Genetic Algorithm II** is designed for multi-objective optimization.
@@ -44,6 +46,8 @@ See [CMA-ES Tutorial](./cmaes.md) for details.
 - Constraint handling support
 
 See [Multi-Objective Optimization](../how-to/multi-objective.md) for details.
+
+<div class="fugue-explorable fv-inline" data-viz="mini-front" data-problem="zdt1" data-seed="11" data-caption="NSGA-II’s output is not a point but a front: the green points push down onto the true trade-off curve (yellow)."></div>
 
 ## Island Model
 
@@ -61,6 +65,8 @@ See [Multi-Objective Optimization](../how-to/multi-objective.md) for details.
 
 See [Island Model Tutorial](./island-model.md) for details.
 
+<div class="fugue-explorable fv-inline" data-viz="mini-migration" data-seed="11" data-interval="8" data-caption="Island model: four populations plateau separately; violet ticks are migrations — watch stuck islands drop right after."></div>
+
 ## EDA/UMDA
 
 **Estimation of Distribution Algorithm** builds a probabilistic model of good solutions.
@@ -74,6 +80,10 @@ See [Island Model Tutorial](./island-model.md) for details.
 - No crossover operator needed
 - Builds statistical model of population
 - Good for problems with building blocks
+
+<div class="fugue-explorable" data-viz="umda-contract" data-landscape="sphere" data-seed="11"></div>
+
+*An EDA doesn’t breed individuals — it fits a distribution to the winners and samples the next generation from it. The blue ellipse is the learned model (one and two standard deviations); watch it slide onto the basin and contract.*
 
 ## Algorithm Selection Guide
 

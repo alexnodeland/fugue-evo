@@ -136,6 +136,38 @@ async function interactiveEvolution() {
 }
 ```
 
+## Incremental Explore Engines
+
+The `fugue-evo-wasm` crate also ships seeded, generation-by-generation
+engines built for animation loops — they power the interactive figures and
+the [Playground](../playground.md) in these docs. Each wraps the real
+algorithm, advances one generation per `step()`, and returns the state as a
+JSON string:
+
+```javascript
+import init, { ExploreCma } from 'fugue-evo-wasm';
+
+await init();
+
+// CMA-ES on the 2-D Rosenbrock benchmark, seeded (BigInt for u64)
+const cma = new ExploreCma('rosenbrock', 3.5, -3.5, 1.5, 0, 11n);
+
+function frame() {
+  const s = JSON.parse(cma.step());
+  // s.mean, s.sigma, s.cov, s.eigenvalues, s.population, s.best, s.converged
+  draw(s);
+  if (!s.converged) requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+```
+
+Available engines: `ExploreGa` (operator-level generation anatomy),
+`ExploreCma` (mean/σ/covariance/eigenstructure), `ExploreNsga2` (objective
+points with Pareto rank and crowding), `ExploreIsland` (per-island
+populations and migration events), `ExploreUmda` (the learned univariate
+model), plus `explore_landscape_grid`/`explore_landscape_info` for heatmap
+backgrounds. All are deterministic under a fixed seed.
+
 ## Web Worker Integration
 
 For heavy computations, use a Web Worker:

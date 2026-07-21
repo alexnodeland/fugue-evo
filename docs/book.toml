@@ -9,11 +9,22 @@ build-dir = "book"
 create-missing = true
 
 [output.html]
-default-theme = "rust"
-preferred-dark-theme = "ayu"
+default-theme = "navy"
+preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/alexnodeland/fugue-evo"
 edit-url-template = "https://github.com/alexnodeland/fugue-evo/edit/main/docs/{path}"
 site-url = "https://evo.fugue.run/"
+additional-css = ["fugue-viz.css"]
+additional-js = [
+    "fugue-viz.js",
+    "fugue-evo-wasm-loader.js",
+    "viz/landscape.js",
+    "viz/cmaes.js",
+    "viz/nsga2.js",
+    "viz/island.js",
+    "viz/inline.js",
+    "viz/playground.js",
+]
 
 [output.html.playground]
 editable = true

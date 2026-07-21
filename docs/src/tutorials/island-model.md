@@ -2,6 +2,10 @@
 
 The **Island Model** runs multiple populations (islands) in parallel with periodic migration of individuals between them. This approach helps maintain diversity and escape local optima in multimodal problems.
 
+<div class="fugue-explorable" data-viz="island-migration" data-landscape="rastrigin" data-seed="11" data-interval="8"></div>
+
+*Four islands evolve independently on Rastrigin — each finds its own basin and plateaus. Every few generations (violet flashes), the best individuals migrate along the ring, and stuck islands jump. The strip chart below the panels shows each island’s best fitness; migration ticks mark the moments genes cross the water.*
+
 ## When to Use Island Model
 
 **Ideal for:**

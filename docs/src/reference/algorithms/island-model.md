@@ -2,6 +2,8 @@
 
 Parallel evolution with multiple populations and migration.
 
+<div class="fugue-explorable fv-inline" data-viz="mini-migration" data-seed="11" data-interval="8" data-caption="Migration on the ring topology: violet ticks, then fitness drops on receiving islands."></div>
+
 ## Module
 
 ```rust,ignore

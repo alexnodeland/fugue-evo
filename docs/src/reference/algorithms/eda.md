@@ -2,6 +2,8 @@
 
 Estimation of Distribution Algorithms using probabilistic models.
 
+<div class="fugue-explorable" data-viz="umda-contract" data-landscape="sphere" data-seed="11"></div>
+
 ## Module
 
 ```rust,ignore
