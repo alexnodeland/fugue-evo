@@ -1,6 +1,22 @@
-# fugue-evo
+<div align="center">
 
-A broad evolutionary-computation library for Rust, with an optional probabilistic-programming bridge to [Fugue](https://github.com/fugue-ppl/fugue).
+<img src="assets/fugue-evo-mark.png" alt="Fugue Evo" width="140" height="140">
+
+# Fugue Evo
+
+**Evolution as Bayesian inference — a probabilistic, type-safe evolutionary computation library for Rust**
+
+*Populations hunting real landscapes, live in your browser: every figure in the docs at [evo.fugue.run](https://evo.fugue.run) runs the actual crate, compiled to WASM.*
+
+[![Crates.io](https://img.shields.io/crates/v/fugue-evo.svg)](https://crates.io/crates/fugue-evo)
+[![Dev Docs](https://docs.rs/fugue-evo/badge.svg)](https://docs.rs/fugue-evo)
+[![User Docs](https://img.shields.io/badge/guides-evo.fugue.run-blue)](https://evo.fugue.run)
+[![CI](https://github.com/alexnodeland/fugue-evo/actions/workflows/ci.yml/badge.svg)](https://github.com/alexnodeland/fugue-evo/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+</div>
+
+A broad evolutionary-computation library for Rust, with an optional probabilistic-programming bridge to [Fugue](https://github.com/alexnodeland/fugue).
 
 The default flagship algorithms (SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState) are standalone evolutionary computation: they use Fugue's `Trace` only as an address→value data container for the optional `to_trace`/`from_trace` round-trip, not for inference. The genuine "evolution as Bayesian inference over solution spaces" story — a tempered Sequential Monte Carlo pipeline over Fugue's `Model`/`Handler`/`factor` machinery — lives in the `fugue_integration` module (`EvolutionarySMC`/`EvolutionStep`/`BayesianAdaptiveGA`), demonstrated by `examples/bayesian_evolution.rs`. Reach for that module, not the default algorithms, when you want the PPL-powered inference path (EV-17).
 
@@ -70,6 +86,12 @@ Run an example:
 cargo run --example sphere_optimization
 ```
 
+## Documentation
+
+- **[User Guide](https://evo.fugue.run/)** - Tutorials, how-to guides, and reference, with live WASM-backed figures throughout
+- **[Playground](https://evo.fugue.run/playground.html)** - Drive all five algorithms in the browser: SimpleGA, CMA-ES, NSGA-II, islands, UMDA
+- **[API Reference](https://docs.rs/fugue-evo)** - Complete API documentation
+
 ## Core Concepts
 
 ### Fitness as Likelihood
@@ -132,7 +154,7 @@ crates were never exercised against together:
 
 ```toml
 [dependencies]
-fugue-ppl = { path = "../fugue", version = "0.1.0" }
+fugue-ppl = { path = "../fugue", version = "0.2.0" }
 ```
 
 Both crates live side by side under the same `fugue-ecosystem` parent
@@ -141,7 +163,7 @@ committed default once `fugue`'s own 2026-07 audit remediation landed with a
 green full-test gate; earlier in the remediation the sibling checkout was
 frequently mid-edit and momentarily uncompilable, which is why the dependency
 had been pinned to the published registry release until the sibling stabilized.
-The `version = "0.1.0"` field is honored if `fugue-ppl` is ever resolved from
+The `version = "0.2.0"` field is honored if `fugue-ppl` is ever resolved from
 crates.io instead (e.g. the sibling checkout is absent).
 
 To build against the published crates.io release rather than your local
@@ -149,7 +171,7 @@ To build against the published crates.io release rather than your local
 
 ```toml
 [dependencies]
-fugue-ppl = "0.1.0"
+fugue-ppl = "0.2.0"
 ```
 
 Run `cargo check` after switching either way to confirm the resolved `fugue`
