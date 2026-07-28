@@ -11,17 +11,28 @@
 //!     π_β(x, w) ∝ p(x) · exp(−β · ⟨w, f(x)⟩)
 //! ```
 //!
-//! the joint posterior's marginal over genomes traces out the **Pareto
-//! front**: each weight vector `w` selects a scalarized optimum on the front,
-//! and integrating over `w` spreads the population across it. Each particle's
-//! trace carries its own `w` (at `pareto#v{i}` stick-breaking sites), telling
-//! you *where on the front* that particle lives — a posterior over the front,
-//! with the usual inference dividends (uncertainty, evidence), which NSGA-II
-//! cannot express.
+//! the joint posterior spreads over front-adjacent configurations: each
+//! weight vector `w` selects a scalarized optimum on the front, and each
+//! particle's trace carries its own `w` (at `pareto#v{i}` stick-breaking
+//! sites), telling you *where on the front* that particle lives — a posterior
+//! over front positions, with the usual inference dividends (uncertainty,
+//! evidence), which NSGA-II cannot express.
 //!
-//! Weighted-sum scalarization recovers the convex part of the front; for
-//! non-convex fronts a Chebyshev scalarization would be needed (future work,
-//! same architecture).
+//! **Marginal-tilt caveat (read this)**: in the latent-`w` model the
+//! `w`-marginal is *not* uniform — it is tilted by `exp(−s·m(w))`, where
+//! `m(w)` is the scalarized optimum's value at `w`, so weights whose optima
+//! score better attract more mass, and high sharpness or heavy annealing
+//! concentrates the population near the best-scoring front regions (often the
+//! endpoints). The *conditional* `x | w` is what tracks the front. For
+//! uniform front coverage, sweep **fixed** weights
+//! ([`ChebyshevScalarization::with_weight`]) across a grid, or keep sharpness
+//! moderate and read positions off `particle_weights`.
+//!
+//! [`ParetoScalarization`] uses weighted-sum scalarization, which recovers
+//! the convex part of the front; [`ChebyshevScalarization`] uses the weighted
+//! Chebyshev (weighted-max) norm, which reaches every (weakly)
+//! Pareto-optimal point — including non-convex front regions where every
+//! weighted-sum optimum collapses to the front's endpoints.
 
 use fugue::{addr, factor, Beta, Model, ModelExt, Trace};
 
@@ -96,6 +107,91 @@ where
                 factor(f64::NEG_INFINITY)
             }
         })
+    }
+}
+
+/// The Chebyshev (weighted-max) scalarization likelihood with a latent
+/// weight vector:
+///
+/// ```text
+///     w ~ Uniform(simplex)
+///     π_β(x, w) ∝ p(x) · exp(−β · s · max_i  w_i · (f_i(x) − z_i))
+/// ```
+///
+/// where `z` is the **ideal point** (a reference component-wise ≤ the
+/// objective values of interest, e.g. per-objective minima or a slightly
+/// optimistic estimate). Minimizing the weighted Chebyshev norm over `x`
+/// reaches every weakly Pareto-optimal point as `w` varies over the simplex
+/// (Miettinen 1999) — in particular the **non-convex** front regions where a
+/// weighted sum's interior stationary point is a maximum and all its mass
+/// collapses onto the front's endpoints. Use this when the front may be
+/// non-convex; use [`ParetoScalarization`] when it is known convex (the
+/// weighted sum is smoother).
+#[derive(Clone)]
+pub struct ChebyshevScalarization<M> {
+    /// The multi-objective fitness (objectives **minimized**).
+    pub objectives: M,
+    /// Sharpness of the scalarized likelihood (see [`ParetoScalarization`]).
+    pub sharpness: f64,
+    /// The ideal/reference point `z` (one entry per objective).
+    pub ideal: Vec<f64>,
+    /// `None`: the weight is a latent site (subject to the marginal-tilt
+    /// caveat in the [module docs](self)). `Some(w)`: a fixed weight — the
+    /// posterior concentrates on that weight's own front point, which is the
+    /// mode to use for sweeping the front uniformly.
+    pub weight: Option<Vec<f64>>,
+}
+
+impl<M> ChebyshevScalarization<M> {
+    /// Create a Chebyshev-scalarization likelihood with a **latent** weight.
+    pub fn new(objectives: M, sharpness: f64, ideal: Vec<f64>) -> Self {
+        Self {
+            objectives,
+            sharpness,
+            ideal,
+            weight: None,
+        }
+    }
+
+    /// Fix the scalarization weight (front-sweeping mode): the posterior
+    /// targets this weight's own scalarized optimum — reaching interior
+    /// points of non-convex fronts that no weighted sum can select.
+    pub fn with_weight(mut self, weight: Vec<f64>) -> Self {
+        self.weight = Some(weight);
+        self
+    }
+}
+
+impl<G, M> GenomeLikelihood<G> for ChebyshevScalarization<M>
+where
+    G: 'static,
+    M: MultiObjectiveFitness<G> + Clone + Send + Sync + 'static,
+{
+    fn model(&self, genome: &G, beta: f64) -> Model<()> {
+        let objs = self.objectives.evaluate(genome);
+        let k = objs.len();
+        let sharpness = self.sharpness;
+        let ideal = self.ideal.clone();
+        if k == 0 {
+            return fugue::pure(());
+        }
+        debug_assert_eq!(ideal.len(), k, "ideal point must match objective count");
+        let cheby_factor = move |w: &[f64], objs: &[f64], ideal: &[f64]| -> Model<()> {
+            let cheby = w
+                .iter()
+                .zip(objs.iter().zip(ideal))
+                .map(|(wi, (fi, zi))| wi * (fi - zi))
+                .fold(f64::NEG_INFINITY, f64::max);
+            if cheby.is_finite() {
+                factor(-beta * sharpness * cheby)
+            } else {
+                factor(f64::NEG_INFINITY)
+            }
+        };
+        match self.weight.clone() {
+            Some(w) => cheby_factor(&w, &objs, &ideal),
+            None => weight_model(k).bind(move |w| cheby_factor(&w, &objs, &ideal)),
+        }
     }
 }
 
@@ -206,6 +302,182 @@ mod tests {
         assert!(
             mean_w_err < 0.45,
             "particles should sit near their weight's scalarized optimum; mean |x − 2(1−w)| = {mean_w_err:.3}"
+        );
+    }
+
+    /// The non-convex-front contrast, at the theorem level. Objectives
+    /// (minimized) on x ∈ [0,1]: `f1 = x`, `f2 = 1 − x²`. Every x in [0,1]
+    /// is Pareto-optimal and the front `f2 = 1 − f1²` is CONCAVE, so for any
+    /// FIXED weight the weighted-sum scalarization `w·x + (1−w)(1−x²)` has
+    /// its interior stationary point as a MAXIMUM (second derivative
+    /// −2(1−w) < 0): its minimizers are always the endpoints, and interior
+    /// front points are unreachable. The Chebyshev scalarization's fixed-w
+    /// optimum is the interior crossing point `w·x = (1−w)(1−x²)` — for
+    /// w = 1/2, x* = (√5−1)/2 ≈ 0.618. We pin both facts.
+    #[test]
+    fn test_chebyshev_reaches_nonconvex_front_where_weighted_sum_cannot() {
+        #[derive(Clone)]
+        struct ConcaveFront;
+        impl MultiObjectiveFitness<RealVector> for ConcaveFront {
+            fn num_objectives(&self) -> usize {
+                2
+            }
+            fn evaluate(&self, g: &RealVector) -> Vec<f64> {
+                let x = g.genes()[0];
+                vec![x, 1.0 - x * x]
+            }
+        }
+
+        /// Test-local fixed-weight weighted-sum likelihood (the published
+        /// ParetoScalarization is latent-w only).
+        #[derive(Clone)]
+        struct FixedWeightSum {
+            w: f64,
+            sharpness: f64,
+        }
+        impl GenomeLikelihood<RealVector> for FixedWeightSum {
+            fn model(&self, g: &RealVector, beta: f64) -> Model<()> {
+                let objs = ConcaveFront.evaluate(g);
+                let s = self.w * objs[0] + (1.0 - self.w) * objs[1];
+                factor(-beta * self.sharpness * s)
+            }
+        }
+
+        let prior = || UniformBoxPrior::new(MultiBounds::new(vec![Bounds::new(0.0, 1.0)]));
+        let cfg = || EvoSmcConfig {
+            num_particles: 500,
+            ess_threshold: 0.5,
+            resampling: ResamplingMethod::Systematic,
+            rejuvenation_steps: 5,
+            crossover: Some(CrossoverConfig::default()),
+        };
+
+        let mut rng = StdRng::seed_from_u64(271828);
+
+        // (a) Fixed w = 1/2, weighted sum: bimodal at the endpoints; the
+        // interior is a scalarization MAXIMUM and must be avoided.
+        let ws_model = EvolutionModel::from_likelihood(
+            prior(),
+            FixedWeightSum {
+                w: 0.5,
+                sharpness: 25.0,
+            },
+        );
+        let ws = EvolutionSMC::anneal(&mut rng, &ws_model, cfg(), 8.0, 8);
+        let ws_fn = ws_model.smc_model();
+        let ws_interior: f64 = fugue::decode_particles(&ws.particles, &ws_fn)
+            .iter()
+            .filter(|(g, _)| (0.25..0.75).contains(&g.genes()[0]))
+            .map(|(_, w)| w)
+            .sum();
+        assert!(
+            ws_interior < 0.1,
+            "fixed-w weighted sum put {ws_interior:.3} mass in the interior — impossible for a concave front"
+        );
+
+        // (b) Fixed w = 1/2, Chebyshev: concentrates on the interior front
+        // point x* = (√5 − 1)/2 ≈ 0.618 — the point weighted-sum cannot reach.
+        let x_star = (5.0f64.sqrt() - 1.0) / 2.0;
+        let ch_model = EvolutionModel::from_likelihood(
+            prior(),
+            ChebyshevScalarization::new(ConcaveFront, 25.0, vec![0.0, 0.0])
+                .with_weight(vec![0.5, 0.5]),
+        );
+        let ch = EvolutionSMC::anneal(&mut rng, &ch_model, cfg(), 8.0, 8);
+        let mean = ch.weighted_mean(0);
+        assert!(
+            (mean - x_star).abs() < 0.08,
+            "fixed-w Chebyshev posterior mean {mean:.3} should sit at the interior front point {x_star:.3}"
+        );
+        let ch_fn = ch_model.smc_model();
+        let ch_interior: f64 = fugue::decode_particles(&ch.particles, &ch_fn)
+            .iter()
+            .filter(|(g, _)| (0.25..0.75).contains(&g.genes()[0]))
+            .map(|(_, w)| w)
+            .sum();
+        assert!(
+            ch_interior > 0.8,
+            "fixed-w Chebyshev interior mass {ch_interior:.3} — must reach the non-convex front interior"
+        );
+
+        // (c) Sweeping fixed weights traces the whole front, ends included.
+        for (w, lo, hi) in [(0.15, 0.75, 1.0), (0.5, 0.5, 0.75), (0.85, 0.1, 0.45)] {
+            let m = EvolutionModel::from_likelihood(
+                prior(),
+                ChebyshevScalarization::new(ConcaveFront, 25.0, vec![0.0, 0.0])
+                    .with_weight(vec![w, 1.0 - w]),
+            );
+            let r = EvolutionSMC::anneal(&mut rng, &m, cfg(), 8.0, 8);
+            let mean = r.weighted_mean(0);
+            assert!(
+                (lo..=hi).contains(&mean),
+                "weight {w}: front point {mean:.3} outside expected band [{lo}, {hi}]"
+            );
+        }
+    }
+
+    /// Latent-weight Chebyshev: the CONDITIONAL x | w tracks the front even
+    /// though the w-marginal is tilted (module-docs caveat). Among particles
+    /// whose latent weight is interior (w₀ ∈ [0.35, 0.65]), most mass must
+    /// sit in the interior of the front — the region a weighted sum's
+    /// conditional never occupies.
+    #[test]
+    fn test_chebyshev_latent_weight_conditional_tracks_front() {
+        #[derive(Clone)]
+        struct ConcaveFront;
+        impl MultiObjectiveFitness<RealVector> for ConcaveFront {
+            fn num_objectives(&self) -> usize {
+                2
+            }
+            fn evaluate(&self, g: &RealVector) -> Vec<f64> {
+                let x = g.genes()[0];
+                vec![x, 1.0 - x * x]
+            }
+        }
+
+        let prior = UniformBoxPrior::new(MultiBounds::new(vec![Bounds::new(0.0, 1.0)]));
+        let model = EvolutionModel::from_likelihood(
+            prior,
+            ChebyshevScalarization::new(ConcaveFront, 8.0, vec![0.0, 0.0]),
+        );
+        let mut rng = StdRng::seed_from_u64(314159);
+        // β = 1 posterior only — annealing would concentrate the tilted
+        // w-marginal onto the endpoints (see module docs).
+        let result = EvolutionSMC::run(
+            &mut rng,
+            &model,
+            EvoSmcConfig {
+                num_particles: 800,
+                ess_threshold: 0.5,
+                resampling: ResamplingMethod::Systematic,
+                rejuvenation_steps: 6,
+                crossover: Some(CrossoverConfig::default()),
+            },
+        );
+        let model_fn = model.smc_model();
+        let decoded = fugue::decode_particles(&result.particles, &model_fn);
+
+        let mut stratum_mass = 0.0;
+        let mut stratum_interior = 0.0;
+        for (p, (g, w)) in result.particles.iter().zip(&decoded) {
+            if let Some(wv) = particle_weights(&p.trace, 2) {
+                if (0.35..=0.65).contains(&wv[0]) {
+                    stratum_mass += w;
+                    let x = g.genes()[0];
+                    if (0.25..0.75).contains(&x) {
+                        stratum_interior += w;
+                    }
+                }
+            }
+        }
+        assert!(
+            stratum_mass > 0.02,
+            "interior-weight stratum carries only {stratum_mass:.4} mass — too depleted to test"
+        );
+        let frac = stratum_interior / stratum_mass;
+        assert!(
+            frac > 0.5,
+            "interior-weight particles put only {frac:.2} of their mass on the front interior"
         );
     }
 

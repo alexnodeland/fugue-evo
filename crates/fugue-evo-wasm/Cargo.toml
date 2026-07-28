@@ -18,7 +18,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Classic EC layer without parallel/checkpoint/ppl features
-fugue-evo = { path = "../..", default-features = false, features = ["std", "classic"] }
+fugue-evo = { path = "../..", default-features = false, features = ["std", "classic", "ppl"] }
+fugue-ppl = { path = "../../../fugue", version = "0.2.1" }
 
 # WASM bindings
 wasm-bindgen = "0.2"

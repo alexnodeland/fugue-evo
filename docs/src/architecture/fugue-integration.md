@@ -16,6 +16,20 @@ is not merely a mathematical analogy — it is a [fugue](https://fugue.run)
 program, and every sampler in the layer is fugue's own inference machinery run
 against that program.
 
+<div class="fugue-explorable" data-viz="smc-inference" data-seed="11" data-pop="240" data-rungs="18" data-betamax="1"></div>
+
+*This is the whole idea, live: fugue-evo's real inference layer (compiled to
+WASM) runs tempered SMC against a twin-peaks Boltzmann target. The yellow heat
+is the exact tempered density `π_β ∝ p(x)·exp(β·f(x))`, recomputed each rung
+as β climbs from the prior (β = 0, the blue rings) to the posterior (β = 1);
+the green particles are the SMC population — reweighted, resampled when the
+ESS drops (watch the ESS readout flash), rejuvenated by typed MH, and mixed
+across the two modes by the crossover kernel (a product-target Metropolis
+swap of x-coordinates). Push β MAX past 1 to watch inference become an
+annealed optimizer, and drag the seed to replay a different history. The
+log Z readout is the running evidence estimate — a model score no classic GA
+can report.*
+
 ## Priors are programs
 
 The `GenomePrior` trait replaces any notion of a built-in prior enum:

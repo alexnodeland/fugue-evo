@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-28
+
+### Added
+
+- **Chebyshev scalarization for non-convex Pareto fronts**
+  (`inference::pareto::ChebyshevScalarization`): the weighted-max norm
+  `max_i w_i·(f_i − z_i)` over an ideal point `z`, reaching every weakly
+  Pareto-optimal point — including the non-convex front regions where every
+  weighted-sum optimum provably collapses onto the endpoints. Supports a
+  latent weight (like `ParetoScalarization`) or a **fixed** weight
+  (`with_weight`) for uniform front sweeps. Pinned at the theorem level on
+  the concave front `f1 = x, f2 = 1 − x²`: fixed-w weighted-sum mass avoids
+  the interior (< 0.1) while fixed-w Chebyshev concentrates on the interior
+  front point `x* = (√5−1)/2`, and a weight sweep traces the whole front.
+- **Honest marginal-tilt documentation** for the latent-weight Pareto models:
+  the `w`-marginal is tilted by `exp(−s·m(w))` (the scalarized optimum's
+  value), so the *conditional* `x | w` is what tracks the front; uniform
+  coverage comes from fixed-weight sweeps. New regression
+  `test_chebyshev_latent_weight_conditional_tracks_front` pins the
+  conditional property.
+- **"Evolution as inference" explorable** (evo.fugue.run, Architecture →
+  Evolution as Inference): `ExploreSmcInference` in `fugue-evo-wasm` steps
+  the crate's real inference layer one tempering rung at a time — Gaussian
+  prior program, twin-peaks Boltzmann target, fugue's SMC primitives
+  (reweight / ESS-triggered systematic resampling / typed-MH rejuvenation /
+  crossover kernel), exact tempered-density heat recomputed each rung,
+  β-ladder up to annealed-optimizer territory, and live ESS / log-evidence /
+  swap readouts. The wasm crate now enables the `ppl` feature and depends on
+  `fugue-ppl` directly. Engine pinned by determinism, ladder-shape,
+  analytic-posterior-mean, analytic-evidence, and annealing-concentration
+  tests; the page verified live in a browser against the built wasm.
+
+
 ## [0.3.0] - 2026-07-28
 
 **Inference-first.** fugue-evo's identity is now "an implementation of fugue
