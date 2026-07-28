@@ -14,6 +14,8 @@
 //! function that returns `NaN` — never silently rank a `NaN` individual as
 //! "best" or "worst" and continue.
 
+#![cfg(feature = "classic")]
+
 use fugue_evo::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;

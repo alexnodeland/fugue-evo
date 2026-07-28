@@ -5,6 +5,8 @@
 //! uninterrupted run. Before the fix the RNG state was never captured, so a
 //! resumed run silently diverged.
 
+#![cfg(all(feature = "classic", feature = "checkpoint"))]
+
 use fugue_evo::prelude::*;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;

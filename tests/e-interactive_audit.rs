@@ -4,6 +4,8 @@
 //! These drive the public `InteractiveGA` / session API end-to-end so they pin
 //! behavior that only manifests once the pieces are wired together.
 
+#![cfg(feature = "classic")]
+
 use fugue_evo::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;

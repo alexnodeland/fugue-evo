@@ -157,6 +157,131 @@ impl GenomePrior for ArithmeticGrammarPrior {
         self.node_model("node".to_string(), 0)
             .map(move |root| TreeGenome::new(root, max_depth))
     }
+
+    /// Encode a tree under the grammar's own address scheme (the inverse of
+    /// running [`Self::model`]): a deterministic walk emitting the
+    /// `#leaf`/`#tkind`/`#var`/`#const`/`#func` choices at each node path.
+    ///
+    /// This is what makes `EvolutionModel::score`, `to_weighted_trace`, and
+    /// `EvolutionChain::init_from` work for grammar-driven trees: replaying
+    /// the encoding through the grammar program recovers the genuine PCFG
+    /// log-prior. A tree using a function outside the restricted
+    /// `n_functions` set, or deeper than `max_depth`, scores `−∞` under
+    /// replay (out of the prior's support) rather than erroring.
+    ///
+    /// `Erc` terminals are encoded as constants (evaluation-identical; the
+    /// grammar itself only generates `Variable`/`Constant`).
+    fn trace_of(&self, genome: &Self::Genome) -> Trace {
+        fn walk(
+            node: &TreeNode<ArithmeticTerminal, ArithmeticFunction>,
+            key: &str,
+            trace: &mut Trace,
+        ) {
+            use fugue::ChoiceValue;
+            match node {
+                TreeNode::Terminal(term) => {
+                    trace.insert_choice(addr!(key, "leaf"), ChoiceValue::Bool(true), 0.0);
+                    match term {
+                        ArithmeticTerminal::Variable(i) => {
+                            trace.insert_choice(addr!(key, "tkind"), ChoiceValue::Usize(0), 0.0);
+                            trace.insert_choice(addr!(key, "var"), ChoiceValue::Usize(*i), 0.0);
+                        }
+                        ArithmeticTerminal::Constant(c) | ArithmeticTerminal::Erc(c) => {
+                            trace.insert_choice(addr!(key, "tkind"), ChoiceValue::Usize(1), 0.0);
+                            trace.insert_choice(addr!(key, "const"), ChoiceValue::F64(*c), 0.0);
+                        }
+                    }
+                }
+                TreeNode::Function(func, children) => {
+                    trace.insert_choice(addr!(key, "leaf"), ChoiceValue::Bool(false), 0.0);
+                    let fi = ArithmeticFunction::functions()
+                        .iter()
+                        .position(|f| f == func)
+                        .expect("function present in the canonical table");
+                    trace.insert_choice(addr!(key, "func"), ChoiceValue::Usize(fi), 0.0);
+                    for (c, child) in children.iter().enumerate() {
+                        walk(child, &child_key(key, c), trace);
+                    }
+                }
+            }
+        }
+        let mut trace = Trace::default();
+        walk(&genome.root, "node", &mut trace);
+        trace
+    }
+}
+
+/// Gaussian-noise regression of a dataset under a candidate expression tree,
+/// as an **observation program** — per-datum `observe` statements, with the
+/// noise scale either fixed or a **latent site jointly inferred** with the
+/// program. This is the capability the scalar-factor fitness could never
+/// express: hyperparameters of the "fitness" become posterior quantities,
+/// read straight off the particle traces at `addr!("sigma")`.
+#[derive(Clone, Debug)]
+pub struct GaussianRegression {
+    /// Input points (single variable).
+    pub xs: Vec<f64>,
+    /// Observed outputs.
+    pub ys: Vec<f64>,
+    /// Observation-noise model.
+    pub noise: NoiseSpec,
+}
+
+/// How the observation noise enters the regression likelihood.
+#[derive(Clone, Debug)]
+pub enum NoiseSpec {
+    /// Known, fixed noise standard deviation.
+    Fixed(f64),
+    /// Unknown noise: `σ ~ Uniform(low, high)` as a latent site at
+    /// `addr!("sigma")`, jointly inferred with the program.
+    Infer {
+        /// Lower bound of the uniform prior over σ.
+        low: f64,
+        /// Upper bound of the uniform prior over σ.
+        high: f64,
+    },
+}
+
+impl super::likelihood::GenomeLikelihood<TreeGenome<ArithmeticTerminal, ArithmeticFunction>>
+    for GaussianRegression
+{
+    fn model(
+        &self,
+        tree: &TreeGenome<ArithmeticTerminal, ArithmeticFunction>,
+        beta: f64,
+    ) -> Model<()> {
+        use super::likelihood::tempered_observe;
+        // Evaluate the candidate program once per datum, up front. A
+        // non-finite prediction crushes the whole likelihood.
+        let preds: Vec<f64> = self.xs.iter().map(|&x| tree.evaluate(&[x])).collect();
+        if preds.iter().any(|p| !p.is_finite()) {
+            return fugue::factor(f64::NEG_INFINITY);
+        }
+        let ys = self.ys.clone();
+        let observe_all =
+            move |sigma: f64, beta: f64, preds: Vec<f64>, ys: Vec<f64>| -> Model<()> {
+                let mut m = fugue::pure(());
+                for (k, (pred, y)) in preds.into_iter().zip(ys).enumerate() {
+                    m = m.and_then(move |_| {
+                        tempered_observe(
+                            addr!("y", k),
+                            Normal::new(pred, sigma).expect("valid observation noise"),
+                            y,
+                            beta,
+                        )
+                    });
+                }
+                m
+            };
+        match self.noise {
+            NoiseSpec::Fixed(sigma) => observe_all(sigma, beta, preds, ys),
+            NoiseSpec::Infer { low, high } => sample(
+                addr!("sigma"),
+                fugue::Uniform::new(low, high).expect("valid noise prior bounds"),
+            )
+            .bind(move |sigma| observe_all(sigma, beta, preds.clone(), ys.clone())),
+        }
+    }
 }
 
 /// A value-independent, pair-symmetric **subtree crossover** mask for
@@ -311,6 +436,199 @@ mod tests {
         // changes address-set sizes unless every accepted swap was congruent).
         let after_sets: Vec<usize> = particles.iter().map(|p| p.trace.choices.len()).collect();
         let _ = (before_sets, after_sets); // sizes may or may not differ; decode is the contract
+    }
+
+    /// The grammar encoding is the exact inverse of the generative program:
+    /// a prior-drawn tree's `trace_of` reproduces the generative trace's
+    /// choices, and replay-scoring it recovers the same PCFG log-prior.
+    #[test]
+    fn test_trace_of_inverts_generative_run() {
+        use fugue::runtime::interpreters::ScoreGivenTrace;
+        let prior = ArithmeticGrammarPrior::default();
+        let mut rng = StdRng::seed_from_u64(31);
+        for _ in 0..30 {
+            let (tree, gen_trace) = run(
+                PriorHandler {
+                    rng: &mut rng,
+                    trace: Trace::default(),
+                },
+                prior.model(),
+            );
+            let enc = prior.trace_of(&tree);
+            assert_eq!(enc.choices.len(), gen_trace.choices.len());
+            for (addr, choice) in &gen_trace.choices {
+                assert_eq!(
+                    enc.choices[addr].value, choice.value,
+                    "encoding mismatch at {addr}"
+                );
+            }
+            // Replay-scoring the encoding recovers the PCFG log-prior.
+            let (_t, scored) = run(
+                ScoreGivenTrace {
+                    base: enc,
+                    trace: Trace::default(),
+                },
+                prior.model(),
+            );
+            assert!((scored.log_prior - gen_trace.log_prior).abs() < 1e-9);
+        }
+    }
+
+    /// `EvolutionModel::score` now works for grammar trees: a hand-built
+    /// `(+ x0 1.0)` scores to the hand-computed PCFG log-prior plus β·f.
+    #[test]
+    fn test_score_hand_built_tree_matches_analytic() {
+        use crate::genome::tree::TreeNode;
+        #[derive(Clone, Copy)]
+        struct Zero;
+        impl Fitness for Zero {
+            type Genome = TreeGenome<ArithmeticTerminal, ArithmeticFunction>;
+            type Value = f64;
+            fn evaluate(&self, _t: &Self::Genome) -> f64 {
+                0.0
+            }
+        }
+
+        let prior = ArithmeticGrammarPrior {
+            terminal_prob: 0.4,
+            max_depth: 6,
+            n_vars: 1,
+            p_var: 0.6,
+            const_std: 2.0,
+            n_functions: 4,
+        };
+        // (+ x0 1.0)
+        let tree = TreeGenome::new(
+            TreeNode::function(
+                crate::genome::tree::ArithmeticFunction::Add,
+                vec![
+                    TreeNode::terminal(ArithmeticTerminal::Variable(0)),
+                    TreeNode::terminal(ArithmeticTerminal::Constant(1.0)),
+                ],
+            ),
+            6,
+        );
+        let model = crate::inference::model::EvolutionModel::new(prior.clone(), Zero);
+        let (_g, scored) = model.score(&tree);
+
+        // Hand-computed PCFG log-prior:
+        //   root: not-leaf (1-0.4) · func Add (1/4)
+        //   child 0: leaf 0.4 · var-kind 0.6 · var 0 (1/1)
+        //   child 1: leaf 0.4 · const-kind 0.4 · Normal(0,2).log_prob(1.0)
+        let normal = fugue::Normal::new(0.0, 2.0).unwrap();
+        let analytic = (0.6f64).ln()
+            + (0.25f64).ln()
+            + (0.4f64).ln()
+            + (0.6f64).ln()
+            + (1.0f64).ln()
+            + (0.4f64).ln()
+            + (0.4f64).ln()
+            + fugue::Distribution::log_prob(&normal, &1.0);
+        assert!(
+            (scored.log_prior - analytic).abs() < 1e-9,
+            "scored {} vs analytic {}",
+            scored.log_prior,
+            analytic
+        );
+
+        // Warm-starting a chain from the hand-built tree works.
+        let chain = crate::inference::mh::EvolutionChain::new(
+            crate::inference::model::EvolutionModel::new(prior, Zero),
+        );
+        let init = chain.init_from(&tree).expect("in-support tree");
+        assert!(init.total_log_weight().is_finite());
+    }
+
+    /// Fix A capstone: the observation noise is a latent site in the
+    /// likelihood program, jointly inferred with the program. Data are
+    /// `y = x + 1 + ε`, `ε ~ N(0, 0.3²)`; the posterior over `σ` (read off
+    /// the particle traces at `addr!("sigma")`) must land near the truth.
+    #[test]
+    fn test_symreg_infers_noise_jointly() {
+        let sigma_true = 0.3;
+        let mut data_rng = StdRng::seed_from_u64(4242);
+        let noise_dist = rand_distr::Normal::new(0.0, sigma_true).unwrap();
+        let xs: Vec<f64> = (-10..=10).map(|i| i as f64 / 5.0).collect();
+        let ys: Vec<f64> = xs
+            .iter()
+            .map(|x| x + 1.0 + rand_distr::Distribution::sample(&noise_dist, &mut data_rng))
+            .collect();
+
+        let prior = ArithmeticGrammarPrior {
+            terminal_prob: 0.45,
+            max_depth: 3,
+            n_vars: 1,
+            p_var: 0.6,
+            const_std: 2.0,
+            n_functions: 1, // {Add} — x + 1 is easily reachable
+        };
+        let likelihood = GaussianRegression {
+            xs: xs.clone(),
+            ys,
+            noise: NoiseSpec::Infer {
+                low: 0.02,
+                high: 2.0,
+            },
+        };
+        let model = crate::inference::model::EvolutionModel::from_likelihood(prior, likelihood);
+        let mut rng = StdRng::seed_from_u64(77);
+        let mut kernel = CrossoverKernel {
+            n_pairs: 150,
+            mask: subtree_crossover_mask(),
+        };
+        let result = EvolutionSMC::run_with_kernel(
+            &mut rng,
+            &model,
+            EvoSmcConfig {
+                num_particles: 500,
+                ess_threshold: 0.5,
+                resampling: ResamplingMethod::Systematic,
+                rejuvenation_steps: 6,
+                crossover: None,
+            },
+            &mut kernel,
+        );
+
+        // Posterior over σ, straight off the traces.
+        let mut total_w = 0.0;
+        let mut sigma_mean = 0.0;
+        for p in &result.particles {
+            if let Some(s) = p.trace.get_f64(&fugue::addr!("sigma")) {
+                sigma_mean += p.weight * s;
+                total_w += p.weight;
+            }
+        }
+        assert!(total_w > 0.99, "every particle carries the sigma site");
+        sigma_mean /= total_w;
+        assert!(
+            (0.15..=0.55).contains(&sigma_mean),
+            "posterior sigma mean {} should be near the true 0.3",
+            sigma_mean
+        );
+
+        // And the programs still fit: posterior-weighted predictions track y = x+1.
+        let model_fn = model.smc_model();
+        let decoded = fugue::decode_particles(&result.particles, &model_fn);
+        for &x in &[-1.0, 0.0, 1.5] {
+            let pred: f64 = decoded
+                .iter()
+                .map(|(tree, w)| {
+                    let p = tree.evaluate(&[x]);
+                    if p.is_finite() {
+                        w * p
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            assert!(
+                (pred - (x + 1.0)).abs() < 0.35,
+                "posterior predictive at {} was {} vs truth {}",
+                x,
+                pred,
+                x + 1.0
+            );
+        }
     }
 
     /// Flagship analytic recovery: symbolic regression of `x² + 1` from

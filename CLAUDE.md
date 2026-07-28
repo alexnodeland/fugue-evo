@@ -44,7 +44,10 @@ fugue-evo is a **two-layer** evolutionary-computation library:
 
 - `EvolutionaryGenome` (src/genome/traits.rs): the classic, fugue-free genome trait (decode/dimension/generate/distance).
 - `TraceGenome` (src/genome/trace_genome.rs, `ppl`): extension trait adding `to_trace`/`from_trace`/`trace_prefix` — the boundary into the inference layer. `Permutation` uses a Lehmer-code (rank) encoding so single-site MH moves stay valid.
-- `GenomePrior` (src/inference/prior.rs): a prior as a program — `fn model(&self) -> fugue::Model<G>` returning the decoded genome. Built-ins: `UniformBoxPrior`, `GaussianPrior`, `BitStringPrior`, `PermutationPrior`, `ArithmeticGrammarPrior`.
+- `GenomePrior` (src/inference/prior.rs): a prior as a program — `fn model(&self) -> fugue::Model<G>` returning the decoded genome, plus `trace_of` (encode a genome under the prior's address scheme; grammar prior overrides it). Built-ins: `UniformBoxPrior`, `GaussianPrior`, `BitStringPrior`, `PermutationPrior`, `ArithmeticGrammarPrior`.
+- `GenomeLikelihood` (src/inference/likelihood.rs): an observation program `p(data|g)` — observes, factors, latent nuisance sites (jointly inferred). `FactorFitness` is the black-box Gibbs-posterior adapter; `MemoizedFitness` caches expensive evaluations.
+- Optimizer mode: `EvolutionSMC::anneal` tempers past beta=1. Multi-objective: `ParetoScalarization` (src/inference/pareto.rs) — scalarization weight as a latent site; posterior traces the Pareto front.
+- Feature matrix: `classic` gates the EC toolkit; `ppl` gates inference; each builds without the other (`std,ppl` and `std,parallel,checkpoint,classic` are both CI-relevant configs).
 
 Built-in genome types: `RealVector`, `BitString`, `Permutation`, `TreeGenome`
 

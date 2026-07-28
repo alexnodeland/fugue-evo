@@ -25,6 +25,7 @@ use fugue::{
 };
 use rand::Rng;
 
+use super::likelihood::GenomeLikelihood;
 use super::model::EvolutionModel;
 use super::prior::GenomePrior;
 use crate::fitness::traits::Fitness;
@@ -166,14 +167,14 @@ impl EvolutionSMC {
     /// Run tempered SMC targeting the Boltzmann posterior
     /// `π ∝ p(x)·exp(f(x))` of `model` (β is supplied by fugue's adaptive
     /// tempering; `model`'s own β setting is ignored here by construction).
-    pub fn run<P, F, R>(
+    pub fn run<P, L, R>(
         rng: &mut R,
-        model: &EvolutionModel<P, F>,
+        model: &EvolutionModel<P, L>,
         cfg: EvoSmcConfig,
     ) -> EvolutionPosterior<P::Genome>
     where
         P: GenomePrior,
-        F: Fitness<Genome = P::Genome, Value = f64> + Clone + Send + Sync + 'static,
+        L: GenomeLikelihood<P::Genome>,
         R: Rng,
     {
         let model_fn = model.smc_model();
@@ -214,15 +215,15 @@ impl EvolutionSMC {
     /// (e.g. a [`CrossoverKernel`] with a
     /// [`subtree_crossover_mask`](super::grammar::subtree_crossover_mask) for
     /// grammar-driven tree genomes). `cfg.crossover` is ignored.
-    pub fn run_with_kernel<P, F, R, K>(
+    pub fn run_with_kernel<P, L, R, K>(
         rng: &mut R,
-        model: &EvolutionModel<P, F>,
+        model: &EvolutionModel<P, L>,
         cfg: EvoSmcConfig,
         kernel: &mut K,
     ) -> EvolutionPosterior<P::Genome>
     where
         P: GenomePrior,
-        F: Fitness<Genome = P::Genome, Value = f64> + Clone + Send + Sync + 'static,
+        L: GenomeLikelihood<P::Genome>,
         R: Rng,
         K: fugue::PopulationKernel<P::Genome>,
     {
@@ -238,6 +239,101 @@ impl EvolutionSMC {
             log_evidence: result.log_evidence,
             _g: PhantomData,
         }
+    }
+}
+
+impl EvolutionSMC {
+    /// **Optimizer mode**: run tempered SMC to the posterior (β = 1), then
+    /// keep annealing the ladder toward `beta_max`, concentrating the
+    /// population on the maximizers of the likelihood/fitness.
+    ///
+    /// The continuation is built from fugue's exported primitives and keeps
+    /// every invariant of the tempering loop: at each rung the particles are
+    /// incrementally reweighted by `Δβ·(log_likelihood + log_factors)`,
+    /// normalized, systematically resampled to uniform weights, and
+    /// rejuvenated with π_β-invariant MH (plus the crossover kernel when
+    /// `cfg.crossover` is set). The rung schedule is geometric from 1 to
+    /// `beta_max` over `anneal_steps` rungs.
+    ///
+    /// The returned population approximates `π_{β_max} ∝ p(x)·L(x)^{β_max}`,
+    /// which for large `beta_max` concentrates on the optima — a principled,
+    /// uncertainty-aware replacement for a classic GA on single-objective
+    /// problems. `log_evidence` reflects only the β ≤ 1 ladder (evidence is
+    /// defined at the posterior).
+    pub fn anneal<P, L, R>(
+        rng: &mut R,
+        model: &EvolutionModel<P, L>,
+        cfg: EvoSmcConfig,
+        beta_max: f64,
+        anneal_steps: usize,
+    ) -> EvolutionPosterior<P::Genome>
+    where
+        P: GenomePrior,
+        L: GenomeLikelihood<P::Genome>,
+        R: Rng,
+    {
+        use fugue::{normalize_particles, rejuvenate_particles, resample_particles};
+
+        let crossover = cfg.crossover.clone();
+        let rejuvenation_steps = cfg.rejuvenation_steps;
+        let resampling = cfg.resampling;
+        let mut result = Self::run(rng, model, cfg);
+        if beta_max <= 1.0 || anneal_steps == 0 {
+            return result;
+        }
+
+        let model_fn = model.smc_model();
+        let loglik = |t: &Trace| t.log_likelihood + t.log_factors;
+        let mut kernel = crossover.map(|xcfg| {
+            let p_swap = xcfg.swap_probability.clamp(0.0, 1.0);
+            CrossoverKernel {
+                n_pairs: xcfg.n_pairs,
+                mask: Box::new(move |a: &Trace, _b: &Trace, rng: &mut dyn rand::RngCore| {
+                    a.choices
+                        .keys()
+                        .filter(|_| rand::Rng::gen::<f64>(rng) < p_swap)
+                        .cloned()
+                        .collect()
+                }),
+            }
+        });
+
+        let ln_bmax = beta_max.ln();
+        let mut prev_beta = 1.0;
+        for i in 1..=anneal_steps {
+            let beta = (ln_bmax * i as f64 / anneal_steps as f64).exp();
+            let d_beta = beta - prev_beta;
+
+            // (1) incremental reweight by the tempered increment.
+            for p in &mut result.particles {
+                p.log_weight += d_beta * loglik(&p.trace);
+            }
+            normalize_particles(&mut result.particles);
+
+            // (2) resample to uniform weights.
+            result.particles = resample_particles(rng, &result.particles, resampling);
+
+            // (3) π_β-invariant rejuvenation (+ optional crossover sweep).
+            rejuvenate_particles(
+                rng,
+                &mut result.particles,
+                &model_fn,
+                beta,
+                rejuvenation_steps,
+            );
+            if let Some(k) = kernel.as_mut() {
+                fugue::PopulationKernel::<P::Genome>::sweep(
+                    k,
+                    rng as &mut dyn rand::RngCore,
+                    &mut result.particles,
+                    &model_fn,
+                    beta,
+                );
+            }
+            prev_beta = beta;
+        }
+        normalize_particles(&mut result.particles);
+        result
     }
 }
 
@@ -388,6 +484,51 @@ mod tests {
         let (best, best_f) = result.best(&PtrFitness(quad_k1_c3), &model_fn).unwrap();
         assert!(best_f.is_finite());
         assert!((quad_k1_c3(&best) - best_f).abs() < 1e-12);
+    }
+
+    /// Optimizer mode: annealing past β = 1 concentrates the population on
+    /// the fitness optimum far beyond the posterior's spread.
+    #[test]
+    fn test_anneal_concentrates_on_optimum() {
+        // Fitness -0.5·Σx², prior N(0, 2²): posterior sd ≈ 0.89; at β = 200
+        // the tempered target's sd ≈ 0.07.
+        let prior = GaussianPrior::new(0.0, 2.0, 2);
+        let model = EvolutionModel::new(prior, PtrFitness(super::tests::quad_origin_local));
+        let mut rng = StdRng::seed_from_u64(31);
+        let cfg = || EvoSmcConfig {
+            num_particles: 400,
+            ess_threshold: 0.5,
+            resampling: ResamplingMethod::Systematic,
+            rejuvenation_steps: 4,
+            crossover: Some(CrossoverConfig::default()),
+        };
+        let posterior = EvolutionSMC::run(&mut rng, &model, cfg());
+        let annealed = EvolutionSMC::anneal(&mut rng, &model, cfg(), 200.0, 12);
+
+        let spread = |r: &EvolutionPosterior<RealVector>| {
+            (r.weighted_variance(0) + r.weighted_variance(1)).sqrt()
+        };
+        assert!(
+            spread(&annealed) < 0.35 * spread(&posterior),
+            "annealed spread {} should be far below posterior spread {}",
+            spread(&annealed),
+            spread(&posterior)
+        );
+
+        let model_fn = model.smc_model();
+        let (best, best_f) = annealed
+            .best(&PtrFitness(super::tests::quad_origin_local), &model_fn)
+            .unwrap();
+        assert!(
+            best_f > -0.02,
+            "annealed best fitness {} (genome {:?}) not near optimum 0",
+            best_f,
+            best.genes()
+        );
+    }
+
+    pub(super) fn quad_origin_local(g: &RealVector) -> f64 {
+        -0.5 * g.genes().iter().map(|x| x * x).sum::<f64>()
     }
 
     /// Bounds are respected end-to-end: with a uniform-box prior every

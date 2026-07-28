@@ -157,7 +157,7 @@ where
     P: GenomePrior,
     F: Fitness<Genome = P::Genome, Value = f64> + Clone + Send + Sync + 'static,
 {
-    model: EvolutionModel<P, F>,
+    model: EvolutionModel<P, super::likelihood::FactorFitness<F>>,
     population_size: usize,
     generations: usize,
     tournament_size: usize,

@@ -60,14 +60,13 @@ impl Fitness for SymRegFit {
     }
 }
 
-fn run_inference(
-    rng: &mut StdRng,
-    fitness: &SymRegFit,
-    n_functions: usize,
-) -> (
-    EvolutionPosterior<TreeGenome<ArithmeticTerminal, ArithmeticFunction>>,
-    EvolutionModel<ArithmeticGrammarPrior, SymRegFit>,
-) {
+type SymRegTree = TreeGenome<ArithmeticTerminal, ArithmeticFunction>;
+type SymRegResult = (
+    EvolutionPosterior<SymRegTree>,
+    EvolutionModel<ArithmeticGrammarPrior, FactorFitness<SymRegFit>>,
+);
+
+fn run_inference(rng: &mut StdRng, fitness: &SymRegFit, n_functions: usize) -> SymRegResult {
     let prior = ArithmeticGrammarPrior {
         terminal_prob: 0.35,
         max_depth: 5,

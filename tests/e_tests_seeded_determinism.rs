@@ -17,6 +17,8 @@
 //!     (almost surely true for continuous search spaces / floating point
 //!     fitness landscapes; a hash collision here would itself be newsworthy).
 
+#![cfg(feature = "classic")]
+
 use fugue_evo::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;

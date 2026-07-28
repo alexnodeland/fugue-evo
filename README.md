@@ -4,7 +4,7 @@
 
 # Fugue Evo
 
-**Two layers: classical evolutionary algorithms (standalone), and evolutionary inference — evolutionary algorithms *as* probabilistic programs (tempered SMC in trace space, built on [Fugue](https://github.com/alexnodeland/fugue))**
+**An implementation of [Fugue](https://github.com/alexnodeland/fugue) for running evolutionary algorithms as Bayesian inference — priors and likelihoods as probabilistic programs, tempered SMC in trace space — plus a standalone classical EC toolkit**
 
 *Populations hunting real landscapes, live in your browser: every figure in the docs at [evo.fugue.run](https://evo.fugue.run) runs the actual crate, compiled to WASM.*
 
@@ -16,10 +16,14 @@
 
 </div>
 
-An evolutionary-computation library for Rust with an architectural split that keeps both halves honest:
+fugue-evo runs evolution as inference. The prior over genomes is a user-written fugue `Model<G>` (a `GenomePrior`); the data enter through a `GenomeLikelihood` — an *observation program* that may contain per-datum `observe` statements, latent nuisance parameters (e.g. an unknown noise scale, jointly inferred with the genome), or a black-box `factor(β·f(x))` (the classical Gibbs-posterior mode). The target `π_β(x) ∝ p(x)·p(data|x)^β` **is a fugue program**, and every sampler is fugue's own inference machinery:
 
-- **Classic EC (no fugue dependency).** SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState, all operators, checkpointing, and the WASM surface. Build with `--no-default-features --features std,parallel,checkpoint` and there is no probabilistic-programming dependency at all.
-- **Evolutionary inference (`ppl` feature, on by default): evolutionary algorithms *as* probabilistic programs.** The prior over genomes is a user-written fugue `Model<G>` (a `GenomePrior`), fitness enters as `factor(β·f(x))`, so the Boltzmann posterior `π_β(x) ∝ p(x)·exp(β·f(x))` **is a fugue program** — and every sampler is fugue's own inference machinery: `EvolutionChain` (typed single-site MH), `EvolutionSMC` (adaptive tempered SMC with a population-coupled crossover kernel and an unbiased log-evidence estimate), and `ArithmeticGrammarPrior` (genetic programming over a probabilistic grammar, where subtree mutation and crossover are generic trace moves). See `examples/symbolic_regression_inference.rs` — symbolic regression as exact Bayesian inference.
+- **`EvolutionChain`** — typed single-site MH (every site kind moves: reals, bits, permutation ranks, tree structure with automatic reversible-jump corrections), warm-startable from any genome via `init_from`.
+- **`EvolutionSMC`** — adaptive tempered SMC with a population-coupled crossover kernel, decode-replay genome recovery, and an unbiased **log-evidence** estimate for Bayesian model comparison. `EvolutionSMC::anneal` keeps tempering past β = 1 for **optimizer mode** — a principled single-objective optimizer with uncertainty attached.
+- **`ArithmeticGrammarPrior`** — genetic programming over a probabilistic grammar: subtree mutation and crossover are generic trace moves. `examples/symbolic_regression_inference.rs` does symbolic regression as exact Bayesian inference.
+- **`ParetoScalarization`** — multi-objective optimization as inference: the scalarization weight is a latent model site, so the posterior marginal *traces the Pareto front* and each particle knows where on the front it lives.
+
+The **classic EC toolkit** (`classic` feature, on by default) — SimpleGA, CMA-ES, NSGA-II, Island Model, ES, EDA/UMDA, operators, checkpointing, the WASM surface — remains fully standalone: build with `--no-default-features --features std,parallel,checkpoint,classic` and there is no probabilistic-programming dependency at all. Conversely, `--features std,ppl` builds the inference layer with no classic EC code. CMA-ES and NSGA-II are deliberately *not* reframed as inference (CMA-ES is not a posterior sampler); they serve as baselines.
 
 ## Features
 
