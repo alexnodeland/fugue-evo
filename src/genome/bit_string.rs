@@ -3,6 +3,7 @@
 //! This module provides a fixed-length bit string genome type for combinatorial optimization,
 //! with Fugue trace integration for probabilistic operations.
 
+#[cfg(feature = "ppl")]
 use fugue::{addr, ChoiceValue, Trace};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -205,6 +206,44 @@ impl EvolutionaryGenome for BitString {
     type Allele = bool;
     type Phenotype = Vec<bool>;
 
+    fn decode(&self) -> Self::Phenotype {
+        self.bits.clone()
+    }
+
+    fn dimension(&self) -> usize {
+        self.bits.len()
+    }
+
+    /// Generate a random bit string.
+    ///
+    /// Only `bounds.dimension()` is consulted — it is the number of bits — and
+    /// the per-dimension `min`/`max` values are ignored. Prefer
+    /// [`BitString::generate_with_len`] to make the length explicit.
+    fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
+        Self::generate_with_len(rng, bounds.dimension())
+    }
+
+    fn as_slice(&self) -> Option<&[bool]> {
+        Some(&self.bits)
+    }
+
+    fn as_mut_slice(&mut self) -> Option<&mut [bool]> {
+        Some(&mut self.bits)
+    }
+
+    fn distance(&self, other: &Self) -> f64 {
+        self.try_distance(other).unwrap_or_else(|e| {
+            panic!("BitString::distance: {e}; use try_distance for a fallible comparison")
+        })
+    }
+
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        self.try_hamming_distance(other).map(|d| d as f64)
+    }
+}
+
+#[cfg(feature = "ppl")]
+impl crate::genome::trace_genome::TraceGenome for BitString {
     /// Convert BitString to Fugue trace.
     ///
     /// Each bit is stored at address "bit#i" where i is the index.
@@ -250,41 +289,6 @@ impl EvolutionaryGenome for BitString {
             ));
         }
         Ok(Self { bits })
-    }
-
-    fn decode(&self) -> Self::Phenotype {
-        self.bits.clone()
-    }
-
-    fn dimension(&self) -> usize {
-        self.bits.len()
-    }
-
-    /// Generate a random bit string.
-    ///
-    /// Only `bounds.dimension()` is consulted — it is the number of bits — and
-    /// the per-dimension `min`/`max` values are ignored. Prefer
-    /// [`BitString::generate_with_len`] to make the length explicit.
-    fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
-        Self::generate_with_len(rng, bounds.dimension())
-    }
-
-    fn as_slice(&self) -> Option<&[bool]> {
-        Some(&self.bits)
-    }
-
-    fn as_mut_slice(&mut self) -> Option<&mut [bool]> {
-        Some(&mut self.bits)
-    }
-
-    fn distance(&self, other: &Self) -> f64 {
-        self.try_distance(other).unwrap_or_else(|e| {
-            panic!("BitString::distance: {e}; use try_distance for a fallible comparison")
-        })
-    }
-
-    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
-        self.try_hamming_distance(other).map(|d| d as f64)
     }
 
     fn trace_prefix() -> &'static str {
@@ -362,6 +366,7 @@ impl std::fmt::Display for BitString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "ppl")]
     use fugue::addr;
 
     #[test]
@@ -526,7 +531,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_bit_string_to_trace() {
+        use crate::genome::trace_genome::TraceGenome;
         let bs = BitString::new(vec![true, false, true, false]);
         let trace = bs.to_trace();
 
@@ -538,7 +545,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_bit_string_from_trace() {
+        use crate::genome::trace_genome::TraceGenome;
         let mut trace = Trace::default();
         trace.insert_choice(addr!("bit", 0), ChoiceValue::Bool(true), 0.0);
         trace.insert_choice(addr!("bit", 1), ChoiceValue::Bool(false), 0.0);
@@ -549,7 +558,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_bit_string_trace_roundtrip() {
+        use crate::genome::trace_genome::TraceGenome;
         let original = BitString::new(vec![true, false, true, true, false]);
         let trace = original.to_trace();
         let recovered = BitString::from_trace(&trace).unwrap();
@@ -557,7 +568,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_bit_string_from_trace_empty() {
+        use crate::genome::trace_genome::TraceGenome;
         let trace = Trace::default();
         let result = BitString::from_trace(&trace);
         assert!(result.is_err());
@@ -589,9 +602,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_bit_string_from_trace_type_mismatch() {
         // regression: EV-59 — a present-but-wrong-typed choice must raise
         // TypeMismatch rather than silently truncating the bit string.
+        use crate::genome::trace_genome::TraceGenome;
         let mut trace = Trace::default();
         trace.insert_choice(addr!("bit", 0), ChoiceValue::Bool(true), 0.0);
         trace.insert_choice(addr!("bit", 1), ChoiceValue::F64(1.0), 0.0); // wrong type

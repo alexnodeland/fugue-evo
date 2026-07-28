@@ -3,6 +3,7 @@
 //! This module provides a fixed-length real-valued vector genome type
 //! with Fugue trace integration for probabilistic operations.
 
+#[cfg(feature = "ppl")]
 use fugue::{addr, ChoiceValue, Trace};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -116,6 +117,56 @@ impl EvolutionaryGenome for RealVector {
     type Allele = f64;
     type Phenotype = Vec<f64>;
 
+    fn decode(&self) -> Self::Phenotype {
+        self.genes.clone()
+    }
+
+    fn dimension(&self) -> usize {
+        self.genes.len()
+    }
+
+    fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
+        let genes = bounds
+            .bounds
+            .iter()
+            .map(|b| rng.gen_range(b.min..=b.max))
+            .collect();
+        Self { genes }
+    }
+
+    fn as_slice(&self) -> Option<&[f64]> {
+        Some(&self.genes)
+    }
+
+    fn as_mut_slice(&mut self) -> Option<&mut [f64]> {
+        Some(&mut self.genes)
+    }
+
+    fn distance(&self, other: &Self) -> f64 {
+        self.try_distance(other).unwrap_or_else(|e| {
+            panic!("RealVector::distance: {e}; use try_distance for a fallible comparison")
+        })
+    }
+
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        if self.genes.len() != other.genes.len() {
+            return Err(GenomeError::DimensionMismatch {
+                expected: self.genes.len(),
+                actual: other.genes.len(),
+            });
+        }
+        Ok(self
+            .genes
+            .iter()
+            .zip(other.genes.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt())
+    }
+}
+
+#[cfg(feature = "ppl")]
+impl crate::genome::trace_genome::TraceGenome for RealVector {
     /// Convert RealVector to Fugue trace.
     ///
     /// Each gene is stored at address "gene#i" where i is the index.
@@ -163,53 +214,6 @@ impl EvolutionaryGenome for RealVector {
             ));
         }
         Ok(Self { genes })
-    }
-
-    fn decode(&self) -> Self::Phenotype {
-        self.genes.clone()
-    }
-
-    fn dimension(&self) -> usize {
-        self.genes.len()
-    }
-
-    fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
-        let genes = bounds
-            .bounds
-            .iter()
-            .map(|b| rng.gen_range(b.min..=b.max))
-            .collect();
-        Self { genes }
-    }
-
-    fn as_slice(&self) -> Option<&[f64]> {
-        Some(&self.genes)
-    }
-
-    fn as_mut_slice(&mut self) -> Option<&mut [f64]> {
-        Some(&mut self.genes)
-    }
-
-    fn distance(&self, other: &Self) -> f64 {
-        self.try_distance(other).unwrap_or_else(|e| {
-            panic!("RealVector::distance: {e}; use try_distance for a fallible comparison")
-        })
-    }
-
-    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
-        if self.genes.len() != other.genes.len() {
-            return Err(GenomeError::DimensionMismatch {
-                expected: self.genes.len(),
-                actual: other.genes.len(),
-            });
-        }
-        Ok(self
-            .genes
-            .iter()
-            .zip(other.genes.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum::<f64>()
-            .sqrt())
     }
 }
 
@@ -283,6 +287,7 @@ impl<'a> IntoIterator for &'a RealVector {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+    #[cfg(feature = "ppl")]
     use fugue::addr;
 
     #[test]
@@ -424,7 +429,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_real_vector_to_trace() {
+        use crate::genome::trace_genome::TraceGenome;
         let v = RealVector::new(vec![1.5, 2.5, 3.5]);
         let trace = v.to_trace();
 
@@ -435,7 +442,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_real_vector_from_trace() {
+        use crate::genome::trace_genome::TraceGenome;
         let mut trace = Trace::default();
         trace.insert_choice(addr!("gene", 0), ChoiceValue::F64(1.0), 0.0);
         trace.insert_choice(addr!("gene", 1), ChoiceValue::F64(2.0), 0.0);
@@ -446,7 +455,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_real_vector_trace_roundtrip() {
+        use crate::genome::trace_genome::TraceGenome;
         let original = RealVector::new(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let trace = original.to_trace();
         let recovered = RealVector::from_trace(&trace).unwrap();
@@ -454,7 +465,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_real_vector_from_trace_empty() {
+        use crate::genome::trace_genome::TraceGenome;
         let trace = Trace::default();
         let result = RealVector::from_trace(&trace);
         assert!(result.is_err());
@@ -487,9 +500,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_real_vector_from_trace_type_mismatch() {
         // regression: EV-59 — a present-but-wrong-typed choice mid-sequence must
         // raise TypeMismatch, not be treated as "end of genes" and truncate.
+        use crate::genome::trace_genome::TraceGenome;
         let mut trace = Trace::default();
         trace.insert_choice(addr!("gene", 0), ChoiceValue::F64(1.0), 0.0);
         trace.insert_choice(addr!("gene", 1), ChoiceValue::Bool(true), 0.0); // wrong type
@@ -511,8 +526,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_real_vector_from_trace_missing_stops_cleanly() {
         // A genuinely absent address terminates the scan (not an error).
+        use crate::genome::trace_genome::TraceGenome;
         let mut trace = Trace::default();
         trace.insert_choice(addr!("gene", 0), ChoiceValue::F64(1.0), 0.0);
         trace.insert_choice(addr!("gene", 1), ChoiceValue::F64(2.0), 0.0);

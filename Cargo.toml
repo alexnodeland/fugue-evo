@@ -24,10 +24,14 @@ keywords = ["genetic-algorithm", "evolution", "optimization", "bayesian", "ppl"]
 categories = ["algorithms", "science"]
 
 [features]
-default = ["std", "parallel", "checkpoint"]
+default = ["std", "parallel", "checkpoint", "ppl"]
 std = []
 parallel = ["rayon"]
 checkpoint = []  # File-based checkpointing (requires std)
+# Probabilistic-programming bridge: the TraceGenome extension trait and the
+# fugue-native inference layer. Off => the classic EC layer compiles with no
+# fugue-ppl dependency at all.
+ppl = ["dep:fugue-ppl"]
 
 [dependencies]
 # Linear algebra for CMA-ES
@@ -52,7 +56,9 @@ thiserror = "2.0"
 
 # Observability
 tracing = "0.1"
-fugue-ppl = { path = "../fugue", version = "0.2.0" }
+
+# Probabilistic-programming bridge (optional; enabled by the `ppl` feature)
+fugue-ppl = { path = "../fugue", version = "0.2.1", optional = true }
 
 # WASM support (enabled via getrandom js feature when targeting wasm32)
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -86,3 +92,7 @@ tempfile = "3.10"
 [[example]]
 name = "island_model"
 required-features = ["parallel"]
+
+[[example]]
+name = "bayesian_evolution"
+required-features = ["ppl"]

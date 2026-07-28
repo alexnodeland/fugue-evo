@@ -21,6 +21,7 @@
 //! [`TreeGenome::dismantle`] and [`drop_node_iteratively`] remain as explicit,
 //! self-documenting entry points but are no longer required for correctness.
 
+#[cfg(feature = "ppl")]
 use fugue::{addr, ChoiceValue, Trace};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -700,30 +701,6 @@ impl<T: Terminal, F: Function> EvolutionaryGenome for TreeGenome<T, F> {
     type Allele = TreeNode<T, F>;
     type Phenotype = Self;
 
-    fn to_trace(&self) -> Trace {
-        let mut trace = Trace::default();
-        let mut index = 0;
-        self.node_to_trace(&self.root, &mut trace, &mut index);
-        // Store max_depth and total size
-        trace.insert_choice(
-            addr!("tree_max_depth"),
-            ChoiceValue::Usize(self.max_depth),
-            0.0,
-        );
-        trace.insert_choice(addr!("tree_size"), ChoiceValue::Usize(index), 0.0);
-        trace
-    }
-
-    fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
-        let max_depth = trace
-            .get_usize(&addr!("tree_max_depth"))
-            .ok_or_else(|| GenomeError::MissingAddress("tree_max_depth".to_string()))?;
-
-        let mut index = 0;
-        let root = Self::node_from_trace(trace, &mut index)?;
-        Ok(Self { root, max_depth })
-    }
-
     fn decode(&self) -> Self::Phenotype {
         self.clone()
     }
@@ -754,12 +731,40 @@ impl<T: Terminal, F: Function> EvolutionaryGenome for TreeGenome<T, F> {
         // Any two trees are comparable (size/depth deltas), so this never errs.
         Ok(self.distance(other))
     }
+}
+
+#[cfg(feature = "ppl")]
+impl<T: Terminal, F: Function> crate::genome::trace_genome::TraceGenome for TreeGenome<T, F> {
+    fn to_trace(&self) -> Trace {
+        let mut trace = Trace::default();
+        let mut index = 0;
+        self.node_to_trace(&self.root, &mut trace, &mut index);
+        // Store max_depth and total size
+        trace.insert_choice(
+            addr!("tree_max_depth"),
+            ChoiceValue::Usize(self.max_depth),
+            0.0,
+        );
+        trace.insert_choice(addr!("tree_size"), ChoiceValue::Usize(index), 0.0);
+        trace
+    }
+
+    fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
+        let max_depth = trace
+            .get_usize(&addr!("tree_max_depth"))
+            .ok_or_else(|| GenomeError::MissingAddress("tree_max_depth".to_string()))?;
+
+        let mut index = 0;
+        let root = Self::node_from_trace(trace, &mut index)?;
+        Ok(Self { root, max_depth })
+    }
 
     fn trace_prefix() -> &'static str {
         "tree"
     }
 }
 
+#[cfg(feature = "ppl")]
 impl<T: Terminal, F: Function> TreeGenome<T, F> {
     fn node_to_trace(&self, node: &TreeNode<T, F>, trace: &mut Trace, index: &mut usize) {
         let current_index = *index;
@@ -1115,10 +1120,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_tree_genome_trace_roundtrip() {
         // regression: EV-04 — from_trace(to_trace(g)) must reproduce g *exactly*
         // (function identity and terminal values), not fabricate Add nodes and
         // fresh random terminals as the previous implementation did.
+        use crate::genome::trace_genome::TraceGenome;
         let x0 = TreeNode::terminal(ArithmeticTerminal::Variable(0));
         let c1 = TreeNode::terminal(ArithmeticTerminal::Constant(2.5));
         // Use a non-Add function and mixed terminals to expose the old data loss.
@@ -1146,11 +1153,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_tree_genome_trace_roundtrip_pow_node() {
         // regression: EV-04 — a TreeGenome containing a `Pow` node must round-trip
         // losslessly. `Pow` was previously absent from ArithmeticFunction::functions(),
         // so encode_function's `.position(...).unwrap_or(0)` silently mapped it to
         // index 0 = Add, corrupting the tree with no error.
+        use crate::genome::trace_genome::TraceGenome;
         let x0 = TreeNode::terminal(ArithmeticTerminal::Variable(0));
         let two = TreeNode::terminal(ArithmeticTerminal::Constant(2.0));
         let root = TreeNode::function(ArithmeticFunction::Pow, vec![x0, two]);
@@ -1175,11 +1184,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_every_arithmetic_function_variant_roundtrips_losslessly() {
         // regression: EV-04 — prove the round-trip is lossless for EVERY public
         // ArithmeticFunction variant, not just the ones the generators draw from.
         // Each variant is exercised as a real node whose arity matches, and both
         // exact structural equality and evaluation equality are asserted.
+        use crate::genome::trace_genome::TraceGenome;
         use ArithmeticFunction::*;
         let all = [Add, Sub, Mul, Div, Sin, Cos, Exp, Log, Sqrt, Pow, Neg, Abs];
         // functions() must contain every variant exactly once (index table).
@@ -1236,6 +1247,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_arithmetic_function_ordering_is_stable() {
         // regression: EV-04 — encode_function relies on the stable ordering of
         // F::functions(); pin that ordering so encode/decode stays consistent.

@@ -3,6 +3,7 @@
 //! This module provides a variable-length real-valued vector genome type
 //! for problems where the solution dimension is not fixed.
 
+#[cfg(feature = "ppl")]
 use fugue::{addr, ChoiceValue, Trace};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -304,6 +305,57 @@ impl EvolutionaryGenome for DynamicRealVector {
     type Allele = f64;
     type Phenotype = Vec<f64>;
 
+    fn decode(&self) -> Self::Phenotype {
+        self.genes.clone()
+    }
+
+    fn dimension(&self) -> usize {
+        self.genes.len()
+    }
+
+    /// Generate a random variable-length vector.
+    ///
+    /// `bounds.dimension()` is interpreted as the maximum length (minimum length
+    /// 1); the per-dimension `[min, max]` intervals bound the sampled gene
+    /// values. For empty (0-dimension) `bounds` there is nothing to sample, so
+    /// this degrades gracefully to an empty genome instead of panicking on an
+    /// inverted `gen_range(1..=0)`. Use [`try_generate`](Self::try_generate) if
+    /// you want that degenerate case reported as an error, or
+    /// [`generate_with_len`](Self::generate_with_len) for explicit length bounds.
+    fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
+        Self::try_generate(rng, bounds).unwrap_or_else(|_| Self {
+            genes: Vec::new(),
+            min_length: 0,
+            max_length: 0,
+        })
+    }
+
+    fn distance(&self, other: &Self) -> f64 {
+        // Euclidean distance for common genes, plus penalty for different
+        // lengths. Comparing genomes of different lengths is *meaningful* for a
+        // variable-length representation, so this never panics.
+        let common_len = self.genes.len().min(other.genes.len());
+        let mut dist_sq = 0.0;
+
+        for i in 0..common_len {
+            let diff = self.genes[i] - other.genes[i];
+            dist_sq += diff * diff;
+        }
+
+        // Add penalty for length difference
+        let length_penalty = (self.genes.len() as f64 - other.genes.len() as f64).abs();
+        dist_sq.sqrt() + length_penalty
+    }
+
+    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
+        // Length differences are expected and handled by a penalty, so distance
+        // is always well-defined; this never returns Err.
+        Ok(self.distance(other))
+    }
+}
+
+#[cfg(feature = "ppl")]
+impl crate::genome::trace_genome::TraceGenome for DynamicRealVector {
     /// Convert DynamicRealVector to Fugue trace.
     ///
     /// Stores genes at `"<trace_prefix()>#i"` and metadata at "meta#min_length",
@@ -366,54 +418,6 @@ impl EvolutionaryGenome for DynamicRealVector {
         }
 
         Self::new(genes, min_length, max_length)
-    }
-
-    fn decode(&self) -> Self::Phenotype {
-        self.genes.clone()
-    }
-
-    fn dimension(&self) -> usize {
-        self.genes.len()
-    }
-
-    /// Generate a random variable-length vector.
-    ///
-    /// `bounds.dimension()` is interpreted as the maximum length (minimum length
-    /// 1); the per-dimension `[min, max]` intervals bound the sampled gene
-    /// values. For empty (0-dimension) `bounds` there is nothing to sample, so
-    /// this degrades gracefully to an empty genome instead of panicking on an
-    /// inverted `gen_range(1..=0)`. Use [`try_generate`](Self::try_generate) if
-    /// you want that degenerate case reported as an error, or
-    /// [`generate_with_len`](Self::generate_with_len) for explicit length bounds.
-    fn generate<R: Rng>(rng: &mut R, bounds: &MultiBounds) -> Self {
-        Self::try_generate(rng, bounds).unwrap_or_else(|_| Self {
-            genes: Vec::new(),
-            min_length: 0,
-            max_length: 0,
-        })
-    }
-
-    fn distance(&self, other: &Self) -> f64 {
-        // Euclidean distance for common genes, plus penalty for different
-        // lengths. Comparing genomes of different lengths is *meaningful* for a
-        // variable-length representation, so this never panics.
-        let common_len = self.genes.len().min(other.genes.len());
-        let mut dist_sq = 0.0;
-
-        for i in 0..common_len {
-            let diff = self.genes[i] - other.genes[i];
-            dist_sq += diff * diff;
-        }
-
-        // Add penalty for length difference
-        let length_penalty = (self.genes.len() as f64 - other.genes.len() as f64).abs();
-        dist_sq.sqrt() + length_penalty
-    }
-
-    fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
-        // Length differences are expected and handled by a penalty, so distance
-        // is always well-defined; this never returns Err.
-        Ok(self.distance(other))
     }
 
     fn trace_prefix() -> &'static str {
@@ -531,7 +535,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_trace_roundtrip() {
+        use crate::genome::trace_genome::TraceGenome;
         let genome = DynamicRealVector::new(vec![1.0, 2.0, 3.0], 2, 5).unwrap();
         let trace = genome.to_trace();
         let restored = DynamicRealVector::from_trace(&trace).unwrap();
@@ -616,9 +622,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_trace_prefix_matches_addresses() {
         // regression: EV-91 — the address prefix used by to_trace/from_trace is
         // now derived from trace_prefix(), so they cannot diverge.
+        use crate::genome::trace_genome::TraceGenome;
         use fugue::addr;
         let genome = DynamicRealVector::new(vec![1.0, 2.0, 3.0], 1, 5).unwrap();
         let trace = genome.to_trace();

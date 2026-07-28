@@ -30,7 +30,7 @@ use rand::Rng;
 
 use super::trace_operators::{CrossoverMask, MutationSelector};
 use crate::error::GenomeError;
-use crate::genome::traits::EvolutionaryGenome;
+use crate::genome::trace_genome::TraceGenome;
 
 /// A genuine [`fugue::Handler`] that scores a *fixed* trace of choices.
 ///
@@ -615,7 +615,7 @@ pub fn hooked_mutate_trace<G, S, H, R>(
     rng: &mut R,
 ) -> Result<G, GenomeError>
 where
-    G: EvolutionaryGenome,
+    G: TraceGenome,
     S: MutationSelector,
     H: MutationHook,
     R: Rng,
@@ -675,7 +675,7 @@ pub fn hooked_crossover_traces<G, M, H, R>(
     _rng: &mut R,
 ) -> Result<(G, G), GenomeError>
 where
-    G: EvolutionaryGenome,
+    G: TraceGenome,
     M: CrossoverMask,
     H: CrossoverHook,
     R: Rng,
@@ -812,11 +812,11 @@ impl OperationStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fugue_integration::trace_operators::{
+    use crate::genome::real_vector::RealVector;
+    use crate::genome::trace_genome::TraceGenome;
+    use crate::inference::trace_operators::{
         gaussian_mutation, UniformCrossoverMask, UniformMutationSelector,
     };
-    use crate::genome::real_vector::RealVector;
-    use crate::genome::traits::EvolutionaryGenome;
     use fugue::runtime::handler::run;
     use fugue::{factor, ModelExt};
     use rand::SeedableRng;

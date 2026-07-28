@@ -118,7 +118,13 @@ pub mod checkpoint;
 pub mod diagnostics;
 pub mod error;
 pub mod fitness;
-pub mod fugue_integration;
+#[cfg(feature = "ppl")]
+pub mod inference;
+
+/// Deprecated alias for [`inference`] (the module was renamed in 0.2.0).
+#[cfg(feature = "ppl")]
+#[deprecated(since = "0.2.0", note = "renamed to `inference`")]
+pub use inference as fugue_integration;
 pub mod genome;
 pub mod hyperparameter;
 pub mod interactive;
@@ -133,9 +139,10 @@ pub mod prelude {
     pub use crate::diagnostics::prelude::*;
     pub use crate::error::*;
     pub use crate::fitness::prelude::*;
-    pub use crate::fugue_integration::prelude::*;
     pub use crate::genome::prelude::*;
     pub use crate::hyperparameter::prelude::*;
+    #[cfg(feature = "ppl")]
+    pub use crate::inference::prelude::*;
     pub use crate::interactive::prelude::*;
     pub use crate::operators::prelude::*;
     pub use crate::population::prelude::*;

@@ -45,14 +45,6 @@ proptest! {
     }
 
     #[test]
-    fn real_vector_trace_roundtrip(genes in prop::collection::vec(-10.0..10.0f64, 1..20)) {
-        let original = RealVector::new(genes);
-        let trace = original.to_trace();
-        let recovered = RealVector::from_trace(&trace).unwrap();
-        prop_assert_eq!(original.genes(), recovered.genes());
-    }
-
-    #[test]
     fn real_vector_distance_symmetric(
         genes1 in prop::collection::vec(-10.0..10.0f64, 5),
         genes2 in prop::collection::vec(-10.0..10.0f64, 5)
@@ -98,14 +90,6 @@ proptest! {
         prop_assert_eq!(ones + zeros, bits.len());
     }
 
-    #[test]
-    fn bit_string_trace_roundtrip(bits in prop::collection::vec(any::<bool>(), 1..50)) {
-        let original = BitString::new(bits);
-        let trace = original.to_trace();
-        let recovered = BitString::from_trace(&trace).unwrap();
-        prop_assert_eq!(original.bits(), recovered.bits());
-    }
-
     // ==================== Permutation Properties ====================
 
     #[test]
@@ -127,16 +111,6 @@ proptest! {
         let mut sorted = perm.to_vec();
         sorted.sort();
         prop_assert_eq!(sorted, (0..n).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn permutation_trace_roundtrip(n in 2usize..15, seed in any::<u64>()) {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let bounds = MultiBounds::symmetric(1.0, n);
-        let original = Permutation::generate(&mut rng, &bounds);
-        let trace = original.to_trace();
-        let recovered = Permutation::from_trace(&trace).unwrap();
-        prop_assert_eq!(original.permutation(), recovered.permutation());
     }
 
     // ==================== Bounds Properties ====================
@@ -262,6 +236,42 @@ proptest! {
                     prop_assert!(*f <= *best_fitness);
                 }
             }
+        }
+    }
+}
+
+// ==================== Trace round-trip properties (ppl feature) ====================
+
+#[cfg(feature = "ppl")]
+mod trace_roundtrips {
+    use super::*;
+    use fugue_evo::genome::trace_genome::TraceGenome;
+
+    proptest! {
+        #[test]
+        fn real_vector_trace_roundtrip(genes in prop::collection::vec(-10.0..10.0f64, 1..20)) {
+            let original = RealVector::new(genes);
+            let trace = original.to_trace();
+            let recovered = RealVector::from_trace(&trace).unwrap();
+            prop_assert_eq!(original.genes(), recovered.genes());
+        }
+
+        #[test]
+        fn bit_string_trace_roundtrip(bits in prop::collection::vec(any::<bool>(), 1..50)) {
+            let original = BitString::new(bits);
+            let trace = original.to_trace();
+            let recovered = BitString::from_trace(&trace).unwrap();
+            prop_assert_eq!(original.bits(), recovered.bits());
+        }
+
+        #[test]
+        fn permutation_trace_roundtrip(n in 2usize..15, seed in any::<u64>()) {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let bounds = MultiBounds::symmetric(1.0, n);
+            let original = Permutation::generate(&mut rng, &bounds);
+            let trace = original.to_trace();
+            let recovered = Permutation::from_trace(&trace).unwrap();
+            prop_assert_eq!(original.permutation(), recovered.permutation());
         }
     }
 }

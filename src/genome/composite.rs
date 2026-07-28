@@ -3,6 +3,7 @@
 //! This module provides a genome type that combines two different genome types,
 //! enabling optimization over heterogeneous solution spaces.
 
+#[cfg(feature = "ppl")]
 use fugue::{Address, Trace};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -105,43 +106,6 @@ where
     type Allele = (A::Allele, B::Allele);
     type Phenotype = (A::Phenotype, B::Phenotype);
 
-    /// Convert composite genome to Fugue trace.
-    ///
-    /// Each component is delegated to its own [`to_trace`](EvolutionaryGenome::to_trace),
-    /// and every entry of the resulting nested trace is copied verbatim under a
-    /// namespace prefix (`"first/"` / `"second/"`). This preserves full fidelity
-    /// for *any* component genome type — including `Permutation`, `TreeGenome`
-    /// and future encodings — rather than special-casing a fixed set of address
-    /// name literals.
-    fn to_trace(&self) -> Trace {
-        let mut trace = Trace::default();
-        namespace_into(&self.first.to_trace(), "first", &mut trace);
-        namespace_into(&self.second.to_trace(), "second", &mut trace);
-        trace
-    }
-
-    /// Reconstruct composite genome from Fugue trace.
-    ///
-    /// Strips the `"first/"` / `"second/"` namespace back off each entry to
-    /// rebuild the two component sub-traces, then delegates to each component's
-    /// own [`from_trace`](EvolutionaryGenome::from_trace).
-    fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
-        let (first_trace, saw_first) = extract_namespace(trace, "first");
-        let (second_trace, saw_second) = extract_namespace(trace, "second");
-
-        if !saw_first {
-            return Err(GenomeError::MissingAddress("first/*".to_string()));
-        }
-        if !saw_second {
-            return Err(GenomeError::MissingAddress("second/*".to_string()));
-        }
-
-        let first = A::from_trace(&first_trace)?;
-        let second = B::from_trace(&second_trace)?;
-
-        Ok(Self { first, second })
-    }
-
     fn decode(&self) -> Self::Phenotype {
         (self.first.decode(), self.second.decode())
     }
@@ -182,6 +146,61 @@ where
     fn try_distance(&self, other: &Self) -> Result<f64, GenomeError> {
         Ok(self.first.try_distance(&other.first)? + self.second.try_distance(&other.second)?)
     }
+}
+
+#[cfg(feature = "ppl")]
+impl<A, B> crate::genome::trace_genome::TraceGenome for CompositeGenome<A, B>
+where
+    A: crate::genome::trace_genome::TraceGenome
+        + Clone
+        + Send
+        + Sync
+        + Serialize
+        + for<'de> Deserialize<'de>,
+    B: crate::genome::trace_genome::TraceGenome
+        + Clone
+        + Send
+        + Sync
+        + Serialize
+        + for<'de> Deserialize<'de>,
+{
+    /// Convert composite genome to Fugue trace.
+    ///
+    /// Each component is delegated to its own
+    /// [`to_trace`](crate::genome::trace_genome::TraceGenome::to_trace),
+    /// and every entry of the resulting nested trace is copied verbatim under a
+    /// namespace prefix (`"first/"` / `"second/"`). This preserves full fidelity
+    /// for *any* component genome type — including `Permutation`, `TreeGenome`
+    /// and future encodings — rather than special-casing a fixed set of address
+    /// name literals.
+    fn to_trace(&self) -> Trace {
+        let mut trace = Trace::default();
+        namespace_into(&self.first.to_trace(), "first", &mut trace);
+        namespace_into(&self.second.to_trace(), "second", &mut trace);
+        trace
+    }
+
+    /// Reconstruct composite genome from Fugue trace.
+    ///
+    /// Strips the `"first/"` / `"second/"` namespace back off each entry to
+    /// rebuild the two component sub-traces, then delegates to each component's
+    /// own [`from_trace`](crate::genome::trace_genome::TraceGenome::from_trace).
+    fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
+        let (first_trace, saw_first) = extract_namespace(trace, "first");
+        let (second_trace, saw_second) = extract_namespace(trace, "second");
+
+        if !saw_first {
+            return Err(GenomeError::MissingAddress("first/*".to_string()));
+        }
+        if !saw_second {
+            return Err(GenomeError::MissingAddress("second/*".to_string()));
+        }
+
+        let first = A::from_trace(&first_trace)?;
+        let second = B::from_trace(&second_trace)?;
+
+        Ok(Self { first, second })
+    }
 
     fn trace_prefix() -> &'static str {
         "composite"
@@ -191,6 +210,7 @@ where
 /// Copy every entry of `src` into `dst`, prefixing each address with
 /// `"<namespace>/"`. Used to merge a component's own trace into the composite
 /// trace without interpreting the component's address scheme.
+#[cfg(feature = "ppl")]
 fn namespace_into(src: &Trace, namespace: &str, dst: &mut Trace) {
     for (addr, choice) in &src.choices {
         dst.insert_choice(
@@ -204,6 +224,7 @@ fn namespace_into(src: &Trace, namespace: &str, dst: &mut Trace) {
 /// Inverse of [`namespace_into`]: collect every entry whose address begins with
 /// `"<namespace>/"` into a fresh trace with the prefix stripped back off.
 /// Returns the reconstructed sub-trace and whether any entry was found.
+#[cfg(feature = "ppl")]
 fn extract_namespace(trace: &Trace, namespace: &str) -> (Trace, bool) {
     let prefix = format!("{namespace}/");
     let mut sub = Trace::default();
@@ -251,9 +272,12 @@ impl CompositeBounds {
 mod tests {
     use super::*;
     use crate::genome::bit_string::BitString;
+    #[cfg(feature = "ppl")]
     use crate::genome::permutation::Permutation;
     use crate::genome::real_vector::RealVector;
-    use crate::genome::traits::{BinaryGenome, PermutationGenome, RealValuedGenome};
+    #[cfg(feature = "ppl")]
+    use crate::genome::traits::PermutationGenome;
+    use crate::genome::traits::{BinaryGenome, RealValuedGenome};
 
     #[test]
     fn test_composite_creation() {
@@ -396,7 +420,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_composite_trace_roundtrip_real_vectors() {
+        use crate::genome::trace_genome::TraceGenome;
         let first = RealVector::new(vec![1.5, 2.5, 3.5]);
         let second = RealVector::new(vec![4.5, 5.5]);
 
@@ -410,8 +436,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_composite_trace_roundtrip_mixed() {
         // regression: EV-03 — full round-trip fidelity for a mixed composite.
+        use crate::genome::trace_genome::TraceGenome;
         let real = RealVector::new(vec![1.0, 2.0]);
         let binary = BitString::new(vec![true, false, true]);
 
@@ -425,10 +453,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_composite_trace_roundtrip_permutation_realvector() {
         // regression: EV-03 — previously to_trace dropped every permutation value
         // (no "perm" prefix was recognized) and from_trace always failed. The
         // module doc explicitly showcases "topology (permutation) + parameters".
+        use crate::genome::trace_genome::TraceGenome;
         let perm = Permutation::new(vec![2, 0, 3, 1]);
         let real = RealVector::new(vec![1.5, -2.5, 3.5]);
 
@@ -444,8 +474,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_composite_trace_roundtrip_bitstring_permutation() {
         // regression: EV-03 — round-trip for BitString + Permutation.
+        use crate::genome::trace_genome::TraceGenome;
         let bits = BitString::new(vec![true, false, true, true]);
         let perm = Permutation::new(vec![1, 3, 0, 2]);
 
@@ -461,7 +493,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_composite_trace_prefix() {
+        use crate::genome::trace_genome::TraceGenome;
         assert_eq!(
             <CompositeGenome<RealVector, BitString>>::trace_prefix(),
             "composite"
@@ -469,7 +503,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_composite_from_trace_missing_dim_error() {
+        use crate::genome::trace_genome::TraceGenome;
         use fugue::Trace;
         let empty_trace = Trace::default();
 

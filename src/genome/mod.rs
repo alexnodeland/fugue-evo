@@ -9,6 +9,8 @@ pub mod dynamic_ops;
 pub mod dynamic_real_vector;
 pub mod permutation;
 pub mod real_vector;
+#[cfg(feature = "ppl")]
+pub mod trace_genome;
 pub mod traits;
 pub mod tree;
 
@@ -20,6 +22,8 @@ pub mod prelude {
     pub use super::dynamic_real_vector::*;
     pub use super::permutation::*;
     pub use super::real_vector::*;
+    #[cfg(feature = "ppl")]
+    pub use super::trace_genome::*;
     pub use super::traits::*;
     pub use super::tree::*;
 }

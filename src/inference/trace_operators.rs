@@ -10,7 +10,7 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
 use crate::error::GenomeError;
-use crate::genome::traits::EvolutionaryGenome;
+use crate::genome::trace_genome::TraceGenome;
 
 /// Trait for selecting which addresses to mutate
 pub trait MutationSelector: Send + Sync {
@@ -246,7 +246,7 @@ pub fn mutate_trace<G, S, R>(
     rng: &mut R,
 ) -> Result<G, GenomeError>
 where
-    G: EvolutionaryGenome,
+    G: TraceGenome,
     S: MutationSelector,
     R: Rng,
 {
@@ -277,7 +277,7 @@ pub fn crossover_traces<G, M, R>(
     _rng: &mut R,
 ) -> Result<(G, G), GenomeError>
 where
-    G: EvolutionaryGenome,
+    G: TraceGenome,
     M: CrossoverMask,
     R: Rng,
 {
@@ -388,7 +388,7 @@ pub fn bounded_mutation<R: Rng>(
 mod tests {
     use super::*;
     use crate::genome::real_vector::RealVector;
-    use crate::genome::traits::RealValuedGenome;
+    use crate::genome::traits::{EvolutionaryGenome, RealValuedGenome};
 
     #[test]
     fn test_uniform_mutation_selector() {
