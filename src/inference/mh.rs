@@ -17,28 +17,28 @@ use fugue::{
 };
 use rand::Rng;
 
+use super::likelihood::GenomeLikelihood;
 use super::model::EvolutionModel;
 use super::prior::GenomePrior;
-use crate::fitness::traits::Fitness;
 
 /// An MH chain over the fixed-β Boltzmann target `π_β ∝ p(x)·exp(β·f(x))`.
-pub struct EvolutionChain<P, F>
+pub struct EvolutionChain<P, L>
 where
     P: GenomePrior,
-    F: Fitness<Genome = P::Genome, Value = f64> + Clone + Send + Sync + 'static,
+    L: GenomeLikelihood<P::Genome>,
 {
-    model: EvolutionModel<P, F>,
+    model: EvolutionModel<P, L>,
     adaptation: DiminishingAdaptation,
     overrides: HashMap<Address, SiteProposal>,
 }
 
-impl<P, F> EvolutionChain<P, F>
+impl<P, L> EvolutionChain<P, L>
 where
     P: GenomePrior,
-    F: Fitness<Genome = P::Genome, Value = f64> + Clone + Send + Sync + 'static,
+    L: GenomeLikelihood<P::Genome>,
 {
     /// Create a chain over the model's fixed-β target.
-    pub fn new(model: EvolutionModel<P, F>) -> Self {
+    pub fn new(model: EvolutionModel<P, L>) -> Self {
         Self {
             model,
             adaptation: DiminishingAdaptation::new(0.44, 0.7),
@@ -60,7 +60,7 @@ where
     }
 
     /// The underlying model.
-    pub fn model(&self) -> &EvolutionModel<P, F> {
+    pub fn model(&self) -> &EvolutionModel<P, L> {
         &self.model
     }
 
@@ -76,6 +76,21 @@ where
             (self.model.target_model())(),
         );
         trace
+    }
+
+    /// Warm-start the chain from a given genome: encode it under the model's
+    /// prior ([`GenomePrior::trace_of`]) and score it through the target
+    /// program. Works for any prior — including grammar priors over trees —
+    /// so a classic GA/GP result can seed an inference chain. Returns `None`
+    /// if the genome is outside the prior's support (its target density is
+    /// `−∞`, which can never be left by an MH chain).
+    pub fn init_from(&self, genome: &P::Genome) -> Option<Trace> {
+        let (_g, trace) = self.model.score(genome);
+        if trace.total_log_weight().is_finite() {
+            Some(trace)
+        } else {
+            None
+        }
     }
 
     /// One π_β-invariant transition. Moves ANY site type.
@@ -108,6 +123,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fitness::traits::Fitness;
     use crate::genome::bounds::{Bounds, MultiBounds};
     use crate::genome::real_vector::RealVector;
     use crate::genome::traits::{BinaryGenome, PermutationGenome, RealValuedGenome};

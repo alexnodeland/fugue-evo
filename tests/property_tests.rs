@@ -13,6 +13,8 @@
 //! first-class, shrinkable, reproducible input: the same seed file byte-for-byte
 //! reproduces the same genome generation every time.
 
+#![cfg(feature = "classic")]
+
 use fugue_evo::prelude::*;
 use proptest::prelude::*;
 use rand::rngs::StdRng;

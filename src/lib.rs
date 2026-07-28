@@ -16,11 +16,13 @@
 //!
 //! Evolutionary computation for Rust, in **two layers**:
 //!
-//! 1. **Classic EC (standalone, no fugue dependency).** SimpleGA, CMA-ES,
-//!    NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState, the
-//!    interactive GA, all operators, checkpointing, and the WASM surface.
-//!    Compiles with `--no-default-features --features std,parallel,checkpoint`
-//!    with no probabilistic-programming dependency at all.
+//! 1. **Classic EC (`classic` feature; standalone, no fugue dependency).**
+//!    SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA,
+//!    SteadyState, the interactive GA, all operators, checkpointing, and the
+//!    WASM surface. Compiles with
+//!    `--no-default-features --features std,parallel,checkpoint,classic`
+//!    with no probabilistic-programming dependency at all. Conversely,
+//!    `--features std,ppl` builds the inference layer with no classic code.
 //! 2. **Evolutionary inference (`ppl` feature, on by default): evolutionary
 //!    algorithms *as* probabilistic programs.** The prior over genomes is a
 //!    user-written fugue [`Model`](fugue::Model) (a [`GenomePrior`](inference::prior::GenomePrior)),
@@ -30,9 +32,16 @@
 //!    [`EvolutionChain`](inference::mh::EvolutionChain) (typed single-site MH),
 //!    [`EvolutionSMC`](inference::smc::EvolutionSMC) (adaptive tempered SMC
 //!    with a population-coupled crossover kernel and a log-evidence estimate),
-//!    and [`ArithmeticGrammarPrior`](inference::grammar::ArithmeticGrammarPrior)
+//!    [`ArithmeticGrammarPrior`](inference::grammar::ArithmeticGrammarPrior)
 //!    (genetic programming over a probabilistic grammar, where subtree
-//!    mutation/crossover are generic trace moves).
+//!    mutation/crossover are generic trace moves),
+//!    [`GenomeLikelihood`](inference::likelihood::GenomeLikelihood)
+//!    (likelihoods as observation programs, with latent nuisance parameters
+//!    jointly inferred), annealed **optimizer mode**
+//!    ([`EvolutionSMC::anneal`](inference::smc::EvolutionSMC::anneal)), and
+//!    the **Pareto posterior**
+//!    ([`ParetoScalarization`](inference::pareto::ParetoScalarization) —
+//!    multi-objective optimization as inference).
 //!
 //! The boundary between the layers is the
 //! [`TraceGenome`](genome::trace_genome::TraceGenome) extension trait: classic
@@ -107,8 +116,11 @@
 //! - `symbolic_regression_inference.rs`: **flagship** — symbolic regression as
 //!   exact Bayesian inference over a probabilistic grammar
 
+#[cfg(feature = "classic")]
 pub mod algorithms;
+#[cfg(feature = "classic")]
 pub mod checkpoint;
+#[cfg(feature = "classic")]
 pub mod diagnostics;
 pub mod error;
 pub mod fitness;
@@ -120,25 +132,38 @@ pub mod inference;
 #[deprecated(since = "0.2.0", note = "renamed to `inference`")]
 pub use inference as fugue_integration;
 pub mod genome;
+#[cfg(feature = "classic")]
 pub mod hyperparameter;
+#[cfg(feature = "classic")]
 pub mod interactive;
+#[cfg(feature = "classic")]
 pub mod operators;
+#[cfg(feature = "classic")]
 pub mod population;
+#[cfg(feature = "classic")]
 pub mod termination;
 
 /// Prelude module for convenient imports
 pub mod prelude {
+    #[cfg(feature = "classic")]
     pub use crate::algorithms::prelude::*;
+    #[cfg(feature = "classic")]
     pub use crate::checkpoint::prelude::*;
+    #[cfg(feature = "classic")]
     pub use crate::diagnostics::prelude::*;
     pub use crate::error::*;
     pub use crate::fitness::prelude::*;
     pub use crate::genome::prelude::*;
+    #[cfg(feature = "classic")]
     pub use crate::hyperparameter::prelude::*;
     #[cfg(feature = "ppl")]
     pub use crate::inference::prelude::*;
+    #[cfg(feature = "classic")]
     pub use crate::interactive::prelude::*;
+    #[cfg(feature = "classic")]
     pub use crate::operators::prelude::*;
+    #[cfg(feature = "classic")]
     pub use crate::population::prelude::*;
+    #[cfg(feature = "classic")]
     pub use crate::termination::prelude::*;
 }

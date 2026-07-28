@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-28
+
+**Inference-first.** fugue-evo's identity is now "an implementation of fugue
+for running evolutionary algorithms as Bayesian inference"; the classic EC
+toolkit is a standalone, feature-gated companion. This release closes the
+three caveats left by 0.2.0: black-box-only fitness, the classic layer's
+monopoly on optimization/multi-objective, and the tree-encoding seam.
+
+### Added
+
+- **Likelihoods as programs** (`inference::likelihood`): the new
+  `GenomeLikelihood<G>` trait — an observation program `p(data|x)` that may
+  contain per-datum `observe` statements, `factor`s, and **latent nuisance
+  parameters jointly inferred with the genome**. `tempered_observe` helper;
+  `FactorFitness` adapter keeps the classical black-box mode as an explicit
+  Gibbs / generalized-Bayes posterior; `NoLikelihood` for prior-only runs.
+  `GaussianRegression` (`inference::grammar`) demonstrates the payoff: the
+  observation noise is a latent site (`NoiseSpec::Infer`), and its posterior
+  is read off the particle traces — pinned by
+  `test_symreg_infers_noise_jointly` (recovers a true sigma of 0.3).
+- **Optimizer mode** (`EvolutionSMC::anneal`): continue the tempering ladder
+  past beta = 1 toward `beta_max` (incremental reweight + resample +
+  pi_beta-invariant rejuvenation + optional crossover sweeps, all fugue
+  primitives), concentrating the population on the optima — a principled,
+  uncertainty-carrying single-objective optimizer. Pinned by
+  `test_anneal_concentrates_on_optimum`; head-to-head with SimpleGA in
+  `examples/optimize_by_inference.rs`.
+- **Multi-objective as inference** (`inference::pareto`):
+  `ParetoScalarization` puts the scalarization weight *inside the model*
+  (uniform-simplex stick-breaking Beta sites), so the joint posterior's
+  marginal traces the Pareto front and `particle_weights` reads each
+  particle's front position off its trace. Pinned analytically by
+  `test_pareto_posterior_traces_the_front` (biobjective with Pareto set
+  [0,2]: mass on the set, both ends covered, particles near their weight's
+  scalarized optimum x* = 2(1-w)).
+- **Prior-owned encodings** (`GenomePrior::trace_of`): encode a genome under
+  *the prior's* address scheme (default: the canonical `TraceGenome`
+  encoding; `ArithmeticGrammarPrior` overrides with the exact inverse of its
+  generative walk — pinned by `test_trace_of_inverts_generative_run` and a
+  hand-computed PCFG score). `EvolutionModel::score`/`to_weighted_trace` now
+  work for grammar trees, and the new `EvolutionChain::init_from(genome)`
+  warm-starts a chain from any in-support genome — including a classic GA/GP
+  result.
+- **`MemoizedFitness`**: exact-key (bincode) shared-cache fitness wrapper,
+  removing repeated evaluations under replay-heavy inference.
+
+### Changed (breaking)
+
+- `EvolutionModel<P, F>` is now `EvolutionModel<P, L: GenomeLikelihood>`.
+  `EvolutionModel::new(prior, fitness)` still works (it now returns
+  `EvolutionModel<P, FactorFitness<F>>`); explicit type annotations need the
+  `FactorFitness` wrapper. `from_likelihood(prior, likelihood)` accepts any
+  observation program. `fitness_value`/`log_weight`/`to_weighted_trace` are
+  specific to the `FactorFitness` mode (EV-52 unchanged and green).
+- **`classic` feature (default on)**: `algorithms`, `operators`,
+  `population`, `hyperparameter`, `interactive`, `checkpoint`,
+  `diagnostics`, `termination` are now gated. `--no-default-features
+  --features std,ppl` builds the inference layer with no classic EC code;
+  `--features std,parallel,checkpoint,classic` builds classic with no fugue.
+  `MultiObjectiveFitness`/`ClosureMultiObjective` moved to the core
+  `fitness::multi_objective` (re-exported from `algorithms::nsga2`).
+- Crate description and README lead with the inference identity.
+
+
 ## [0.2.0] - 2026-07-28
 
 **"Evolutionary algorithms as probabilistic programs"** — the two-layer

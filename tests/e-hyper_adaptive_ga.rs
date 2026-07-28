@@ -5,6 +5,8 @@
 //! exercise the public API end-to-end and assert that the tuner actually receives
 //! feedback from the GA it is wired into.
 
+#![cfg(feature = "classic")]
+
 use fugue_evo::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;

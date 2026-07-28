@@ -8,7 +8,7 @@
 //!    `on_factor` → `log_factors`, `finish` → [`Trace`]) and can therefore be
 //!    driven with [`fugue::runtime::handler::run`] to score or replay a model
 //!    with correct log-weight bookkeeping.  [`TraceScoringHandler`] is the
-//!    handler that [`crate::fugue_integration::evolution_model::EvolutionModel`]
+//!    handler that [`crate::inference::model::EvolutionModel`]
 //!    uses to inject `factor(β·f(x))` into a genome's trace.
 //!
 //! 2. **Operation hooks** ([`LoggingHook`], [`RateLimitingHook`],
@@ -17,7 +17,7 @@
 //!    trace-based genetic operators in [`super::trace_operators`].  They do not
 //!    participate in probabilistic scoring; the probability mass of an operator
 //!    result is obtained by scoring it with [`TraceScoringHandler`] (or with
-//!    [`crate::fugue_integration::evolution_model::EvolutionModel::to_weighted_trace`]).
+//!    [`crate::inference::model::EvolutionModel::to_weighted_trace`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -605,7 +605,7 @@ impl CrossoverHook for ComposedCrossoverHook {
 /// value), and the trace's `log_prior`/`log_likelihood`/`log_factors`
 /// accumulators are left at zero. To obtain the child's probability mass under
 /// the Boltzmann posterior, score it with [`TraceScoringHandler`] or
-/// [`crate::fugue_integration::evolution_model::EvolutionModel::to_weighted_trace`].
+/// [`crate::inference::model::EvolutionModel::to_weighted_trace`].
 pub fn hooked_mutate_trace<G, S, H, R>(
     genome: &G,
     selector: &S,

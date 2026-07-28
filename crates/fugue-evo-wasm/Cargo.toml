@@ -17,8 +17,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Core library without parallel/checkpoint features
-fugue-evo = { path = "../..", default-features = false, features = ["std"] }
+# Classic EC layer without parallel/checkpoint/ppl features
+fugue-evo = { path = "../..", default-features = false, features = ["std", "classic"] }
 
 # WASM bindings
 wasm-bindgen = "0.2"

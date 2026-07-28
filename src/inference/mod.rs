@@ -33,8 +33,10 @@
 pub mod bayesian_ga;
 pub mod effect_handlers;
 pub mod grammar;
+pub mod likelihood;
 pub mod mh;
 pub mod model;
+pub mod pareto;
 pub mod prior;
 pub mod smc;
 pub mod trace_operators;
@@ -43,8 +45,10 @@ pub mod prelude {
     pub use super::bayesian_ga::*;
     pub use super::effect_handlers::*;
     pub use super::grammar::*;
+    pub use super::likelihood::*;
     pub use super::mh::*;
     pub use super::model::*;
+    pub use super::pareto::*;
     pub use super::prior::*;
     pub use super::smc::*;
     pub use super::trace_operators::*;

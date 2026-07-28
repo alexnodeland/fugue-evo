@@ -11,7 +11,7 @@
 //! The model returns the **decoded genome** `G`, not a bare vector: the model's
 //! return value *is* the decode, which is what lets the SMC layer recover a
 //! genome from a bare particle trace by replay (see
-//! [`crate::inference::smc::EvolutionResult`]).
+//! [`crate::inference::smc::EvolutionPosterior`]).
 
 use fugue::{addr, plate, sample, Bernoulli, Categorical, Model, ModelExt, Normal, Uniform};
 
@@ -37,6 +37,18 @@ pub trait GenomePrior: Clone + Send + Sync + 'static {
 
     /// The generative program `p(x)`.
     fn model(&self) -> Model<Self::Genome>;
+
+    /// Encode a genome as a trace **under this prior's address scheme** — the
+    /// inverse direction of running [`Self::model`]. The default delegates to
+    /// the genome's canonical [`TraceGenome::to_trace`] encoding, which is
+    /// correct whenever the prior samples exactly the canonical sites (all the
+    /// vector priors here). Priors with their own generative scheme — e.g.
+    /// [`ArithmeticGrammarPrior`](super::grammar::ArithmeticGrammarPrior)'s
+    /// tree-path grammar — override this so that scoring, weighted traces, and
+    /// chain warm-starts work for any genome the prior can express.
+    fn trace_of(&self, genome: &Self::Genome) -> fugue::Trace {
+        genome.to_trace()
+    }
 }
 
 /// Independent uniform prior over a bounded box (per-dimension `[min, max]`).

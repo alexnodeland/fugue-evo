@@ -12,10 +12,10 @@ lto = true
 
 [package]
 name = "fugue-evo"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Alex Nodeland"]
-description = "Evolutionary computation for Rust: classical EC algorithms plus evolutionary inference - evolutionary algorithms as probabilistic programs (tempered SMC in trace space, built on fugue-ppl)"
+description = "An implementation of fugue for running evolutionary algorithms as Bayesian inference: priors and likelihoods as probabilistic programs, tempered SMC in trace space, annealed optimization, Pareto posteriors - plus a standalone classical EC toolkit"
 license = "MIT"
 repository = "https://github.com/alexnodeland/fugue-evo"
 documentation = "https://docs.rs/fugue-evo"
@@ -24,10 +24,16 @@ keywords = ["genetic-algorithm", "evolution", "optimization", "bayesian", "ppl"]
 categories = ["algorithms", "science"]
 
 [features]
-default = ["std", "parallel", "checkpoint", "ppl"]
+default = ["std", "parallel", "checkpoint", "ppl", "classic"]
 std = []
 parallel = ["rayon"]
 checkpoint = []  # File-based checkpointing (requires std)
+# Classic EC layer: algorithms, operators, population machinery, checkpointing,
+# hyperparameter tuning, interactive GA, diagnostics, termination. Off => only
+# the core (error/fitness/genome) and, with `ppl`, the inference layer compile.
+# `checkpoint` and `parallel` only affect classic code paths, so they are inert
+# without `classic`.
+classic = []
 # Probabilistic-programming bridge: the TraceGenome extension trait and the
 # fugue-native inference layer. Off => the classic EC layer compiles with no
 # fugue-ppl dependency at all.
@@ -88,10 +94,38 @@ criterion = "0.5"
 approx = "0.5"
 tempfile = "3.10"
 
-# Examples requiring parallel feature
+# Examples gated on the features they exercise
 [[example]]
 name = "island_model"
-required-features = ["parallel"]
+required-features = ["parallel", "classic"]
+
+[[example]]
+name = "sphere_optimization"
+required-features = ["classic"]
+
+[[example]]
+name = "rastrigin_benchmark"
+required-features = ["classic"]
+
+[[example]]
+name = "cma_es_example"
+required-features = ["classic"]
+
+[[example]]
+name = "hyperparameter_learning"
+required-features = ["classic"]
+
+[[example]]
+name = "symbolic_regression"
+required-features = ["classic"]
+
+[[example]]
+name = "checkpointing"
+required-features = ["classic", "checkpoint"]
+
+[[example]]
+name = "interactive_evolution"
+required-features = ["classic"]
 
 [[example]]
 name = "bayesian_evolution"
@@ -100,3 +134,7 @@ required-features = ["ppl"]
 [[example]]
 name = "symbolic_regression_inference"
 required-features = ["ppl"]
+
+[[example]]
+name = "optimize_by_inference"
+required-features = ["ppl", "classic"]
