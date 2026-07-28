@@ -278,7 +278,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fugue-evo"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "approx",
  "bincode",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "fugue-ppl"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libm",
  "rand",

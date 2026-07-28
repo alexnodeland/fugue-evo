@@ -3,6 +3,7 @@
 //! This module provides a permutation genome type for ordering problems
 //! (e.g., TSP, scheduling) with Fugue trace integration.
 
+#[cfg(feature = "ppl")]
 use fugue::{addr, ChoiceValue, Trace};
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -234,54 +235,6 @@ impl EvolutionaryGenome for Permutation {
     type Allele = usize;
     type Phenotype = Vec<usize>;
 
-    /// Convert Permutation to Fugue trace.
-    ///
-    /// Each position is stored at address "perm#i" where i is the index.
-    fn to_trace(&self) -> Trace {
-        let mut trace = Trace::default();
-        for (i, &val) in self.perm.iter().enumerate() {
-            trace.insert_choice(addr!("perm", i), ChoiceValue::Usize(val), 0.0);
-        }
-        trace
-    }
-
-    /// Reconstruct Permutation from Fugue trace.
-    ///
-    /// Reads values from addresses "perm#0", "perm#1", ... until no more are
-    /// found. A *missing* address terminates the scan (normal end of the
-    /// sequence), but an address that is *present with the wrong value type* is
-    /// a corrupt trace and yields [`GenomeError::TypeMismatch`] rather than
-    /// silently truncating — which for a permutation is especially dangerous,
-    /// since a truncated prefix can itself pass the validity check.
-    fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
-        let mut perm = Vec::new();
-        let mut i = 0;
-        loop {
-            match trace.choices.get(&addr!("perm", i)) {
-                None => break,
-                Some(choice) => match choice.value.as_usize() {
-                    Some(val) => {
-                        perm.push(val);
-                        i += 1;
-                    }
-                    None => {
-                        return Err(GenomeError::TypeMismatch {
-                            address: format!("perm#{i}"),
-                            expected: "usize".to_string(),
-                            actual: choice.value.type_name().to_string(),
-                        });
-                    }
-                },
-            }
-        }
-        if perm.is_empty() {
-            return Err(GenomeError::InvalidStructure(
-                "No permutation found in trace".to_string(),
-            ));
-        }
-        Self::try_new(perm)
-    }
-
     fn decode(&self) -> Self::Phenotype {
         self.perm.clone()
     }
@@ -309,6 +262,85 @@ impl EvolutionaryGenome for Permutation {
         // kendall_tau_distance already errors on a length mismatch; propagate it
         // instead of collapsing it to 0.0 (which meant "identical").
         self.kendall_tau_distance(other).map(|d| d as f64)
+    }
+}
+
+#[cfg(feature = "ppl")]
+impl crate::genome::trace_genome::TraceGenome for Permutation {
+    /// Convert Permutation to Fugue trace using the **Lehmer-code (rank)**
+    /// encoding: position `i` stores the rank of `perm[i]` among the values
+    /// not yet used at positions `< i` (a `Usize` in `0..n-i`).
+    ///
+    /// This encoding (rather than storing raw values) is what makes the trace
+    /// *generative*: any in-range assignment of ranks decodes to a valid
+    /// permutation, so a single-site change of one rank is a valid move — the
+    /// value encoding would make every single-site change a duplicate. It
+    /// coincides site-for-site with the sequential categorical prior model in
+    /// [`crate::inference::prior::PermutationPrior`].
+    fn to_trace(&self) -> Trace {
+        let n = self.perm.len();
+        let mut available: Vec<usize> = (0..n).collect();
+        let mut trace = Trace::default();
+        for (i, &val) in self.perm.iter().enumerate() {
+            let rank = available
+                .iter()
+                .position(|&v| v == val)
+                .expect("Permutation invariant guarantees the value is available");
+            available.remove(rank);
+            trace.insert_choice(addr!("perm", i), ChoiceValue::Usize(rank), 0.0);
+        }
+        trace
+    }
+
+    /// Reconstruct Permutation from Fugue trace.
+    ///
+    /// Reads values from addresses "perm#0", "perm#1", ... until no more are
+    /// found. A *missing* address terminates the scan (normal end of the
+    /// sequence), but an address that is *present with the wrong value type* is
+    /// a corrupt trace and yields [`GenomeError::TypeMismatch`] rather than
+    /// silently truncating — which for a permutation is especially dangerous,
+    /// since a truncated prefix can itself pass the validity check.
+    fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
+        // First pass: read the rank sequence (Lehmer code).
+        let mut ranks = Vec::new();
+        let mut i = 0;
+        loop {
+            match trace.choices.get(&addr!("perm", i)) {
+                None => break,
+                Some(choice) => match choice.value.as_usize() {
+                    Some(rank) => {
+                        ranks.push(rank);
+                        i += 1;
+                    }
+                    None => {
+                        return Err(GenomeError::TypeMismatch {
+                            address: format!("perm#{i}"),
+                            expected: "usize".to_string(),
+                            actual: choice.value.type_name().to_string(),
+                        });
+                    }
+                },
+            }
+        }
+        if ranks.is_empty() {
+            return Err(GenomeError::InvalidStructure(
+                "No permutation found in trace".to_string(),
+            ));
+        }
+        // Second pass: decode ranks against the shrinking available list.
+        let n = ranks.len();
+        let mut available: Vec<usize> = (0..n).collect();
+        let mut perm = Vec::with_capacity(n);
+        for (i, &rank) in ranks.iter().enumerate() {
+            if rank >= available.len() {
+                return Err(GenomeError::InvalidStructure(format!(
+                    "Lehmer rank {rank} at perm#{i} out of range 0..{}",
+                    available.len()
+                )));
+            }
+            perm.push(available.remove(rank));
+        }
+        Self::try_new(perm)
     }
 
     fn trace_prefix() -> &'static str {
@@ -530,21 +562,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_permutation_to_trace() {
+        use crate::genome::trace_genome::TraceGenome;
         let p = Permutation::new(vec![2, 0, 1]);
         let trace = p.to_trace();
 
+        // Lehmer-code (rank) encoding: [2,0,1] -> ranks (2, 0, 0).
         assert_eq!(trace.get_usize(&addr!("perm", 0)), Some(2));
         assert_eq!(trace.get_usize(&addr!("perm", 1)), Some(0));
-        assert_eq!(trace.get_usize(&addr!("perm", 2)), Some(1));
+        assert_eq!(trace.get_usize(&addr!("perm", 2)), Some(0));
         assert_eq!(trace.get_usize(&addr!("perm", 3)), None);
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_permutation_from_trace() {
+        use crate::genome::trace_genome::TraceGenome;
         let mut trace = Trace::default();
+        // Lehmer ranks (1, 1, 0): available [0,1,2] -> 1; [0,2] -> 2; [0] -> 0.
         trace.insert_choice(addr!("perm", 0), ChoiceValue::Usize(1), 0.0);
-        trace.insert_choice(addr!("perm", 1), ChoiceValue::Usize(2), 0.0);
+        trace.insert_choice(addr!("perm", 1), ChoiceValue::Usize(1), 0.0);
         trace.insert_choice(addr!("perm", 2), ChoiceValue::Usize(0), 0.0);
 
         let p = Permutation::from_trace(&trace).unwrap();
@@ -552,7 +590,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_permutation_trace_roundtrip() {
+        use crate::genome::trace_genome::TraceGenome;
         let original = Permutation::new(vec![4, 2, 0, 3, 1]);
         let trace = original.to_trace();
         let recovered = Permutation::from_trace(&trace).unwrap();
@@ -560,17 +600,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_permutation_from_trace_invalid() {
+        use crate::genome::trace_genome::TraceGenome;
         let mut trace = Trace::default();
         trace.insert_choice(addr!("perm", 0), ChoiceValue::Usize(0), 0.0);
-        trace.insert_choice(addr!("perm", 1), ChoiceValue::Usize(0), 0.0); // duplicate!
+        trace.insert_choice(addr!("perm", 1), ChoiceValue::Usize(5), 0.0); // rank out of range
 
         let result = Permutation::from_trace(&trace);
         assert!(result.is_err());
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_permutation_from_trace_empty() {
+        use crate::genome::trace_genome::TraceGenome;
         let trace = Trace::default();
         let result = Permutation::from_trace(&trace);
         assert!(result.is_err());
@@ -637,10 +681,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ppl")]
     fn test_permutation_from_trace_type_mismatch() {
         // regression: EV-59 — a present-but-wrong-typed choice must raise
         // TypeMismatch. This is especially important for permutations, since a
         // silently truncated prefix can itself be a "valid" shorter permutation.
+        use crate::genome::trace_genome::TraceGenome;
         let mut trace = Trace::default();
         trace.insert_choice(addr!("perm", 0), ChoiceValue::Usize(2), 0.0);
         trace.insert_choice(addr!("perm", 1), ChoiceValue::Bool(true), 0.0); // wrong type

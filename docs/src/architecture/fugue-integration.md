@@ -1,207 +1,101 @@
-# Fugue Integration
+# Evolution as inference
 
-Fugue-evo integrates deeply with [fugue-ppl](https://github.com/fugue-ppl/fugue), a probabilistic programming library. This enables novel trace-based genetic operators.
+*This page describes the `ppl` feature (on by default). Without it, fugue-evo
+is a standalone evolutionary-computation library with no
+probabilistic-programming dependency at all.*
 
-## Core Concept: Genomes as Traces
+fugue-evo's inference layer makes "evolutionary algorithms as probabilistic
+programs" literal. Given a fitness `f` and a prior over genomes, the
+Boltzmann/Gibbs posterior
 
-In fugue-ppl, a **trace** records all random choices made during program execution. Fugue-evo represents genomes as traces:
+```text
+pi_beta(x) ∝ p(x) · exp(beta · f(x))
+```
+
+is not merely a mathematical analogy — it is a [fugue](https://fugue.run)
+program, and every sampler in the layer is fugue's own inference machinery run
+against that program.
+
+## Priors are programs
+
+The `GenomePrior` trait replaces any notion of a built-in prior enum:
 
 ```rust,ignore
-// A genome's genes become trace entries
-genome.to_trace() → {
-    addr!("gene", 0) → 1.234,
-    addr!("gene", 1) → -0.567,
-    addr!("gene", 2) → 3.890,
-    // ...
+pub trait GenomePrior: Clone + Send + Sync + 'static {
+    type Genome: TraceGenome;
+    fn model(&self) -> fugue::Model<Self::Genome>;
 }
 ```
 
-## Why Traces?
+The model samples the genome's canonical trace sites (`gene#i`, `bit#i`,
+`perm#i`, …) and returns the assembled genome — the model's return value *is*
+the decode. Anything expressible as a fugue model is a valid prior:
+correlated coordinates, hierarchical scales, variable-length genomes.
+Built-ins: `UniformBoxPrior`, `GaussianPrior`, `BitStringPrior`,
+`PermutationPrior` (a Fisher–Yates/Lehmer-code program whose single-site
+moves always decode to valid permutations), and `ArithmeticGrammarPrior`
+(below).
 
-### 1. Selective Resampling
+There is deliberately **no hand-written density code** anywhere in the layer:
+prior mass, tempered joints, and MH acceptance ratios are all obtained by
+running or replaying the target program through fugue's handlers.
 
-Mutation becomes selective resampling of addresses:
+## The target as a program
 
-```rust,ignore
-// Traditional mutation: perturb random genes
-genes[i] += noise;
-
-// Trace mutation: resample selected addresses
-let addresses_to_mutate = select_addresses(&trace, probability);
-let mutated_trace = resample(trace, addresses_to_mutate);
-```
-
-### 2. Structured Crossover
-
-Crossover can respect genome structure:
+`EvolutionModel::new(prior, fitness)` assembles
 
 ```rust,ignore
-// Exchange subtrees of traces
-let child_trace = merge_traces(
-    parent1_trace,
-    parent2_trace,
-    &crossover_points,
-);
+prior.model().bind(move |g| {
+    let fit = fitness.evaluate(&g);
+    factor(beta * fit).map(move |_| g)
+})
 ```
 
-### 3. Probabilistic Interpretation
+Two builders exist because MH wants a fixed-beta target (`target_model()`)
+while tempered SMC must receive the *untempered* factor (`smc_model()`):
+fugue's `adaptive_smc` supplies beta by likelihood-tempering, applying it
+exactly once.
 
-Genetic operators have probabilistic semantics:
+## Samplers
 
-- **Selection** = Conditioning on high fitness
-- **Mutation** = Partial resampling from prior
-- **Crossover** = Trace merging
+- **`EvolutionChain`** — Metropolis–Hastings via fugue's
+  `adaptive_single_site_mh`. Typed proposals move every site kind: Gaussian /
+  log-space walks for reals, flips for bits, prior-resample for categorical
+  sites (permutation ranks), with reversible-jump corrections when a proposal
+  changes the model's structure.
+- **`EvolutionSMC`** — tempered SMC via fugue's `adaptive_smc_with_kernel`:
+  an adaptive ESS-driven beta ladder from the prior to the posterior,
+  systematic resampling, per-particle MH rejuvenation, an optional
+  population-coupled **crossover kernel** (a product-target Metropolis move
+  that swaps an address block between two particles), and an unbiased
+  **log-evidence** estimate — a genuine Bayesian model score. Genomes are
+  recovered from bare particle traces by decode-replay.
 
-## The EvolutionaryGenome Trait
+## Genetic programming as exact inference
 
-```rust,ignore
-pub trait EvolutionaryGenome: Clone + Send + Sync {
-    /// Convert genome to Fugue trace
-    fn to_trace(&self) -> Trace;
+`ArithmeticGrammarPrior` is a probabilistic context-free grammar over
+expression trees, written as a fugue program with tree-path addresses
+(`node#leaf`, `node/0#func`, `node/0/1#const`, …). Because an execution's
+structure is encoded in its own choices:
 
-    /// Reconstruct genome from trace
-    fn from_trace(trace: &Trace) -> Result<Self, GenomeError>;
-}
-```
+- **subtree regeneration mutation** is fugue's ordinary single-site MH — a
+  flip of one `#leaf` bit births or kills the subtree below it, fresh
+  structure drawn from the grammar, reversible-jump corrections applied
+  automatically;
+- **subtree crossover** is the crossover kernel with a mask that grafts the
+  subtrees under one shared node path between two particles;
+- **parsimony** is the grammar prior itself — deeper trees pay more mass, no
+  ad-hoc penalty needed.
 
-### Example: RealVector Implementation
+The flagship example, `examples/symbolic_regression_inference.rs`, fits
+`x² + 1` by sampling the posterior over programs and compares function-set
+grammars by Bayes factor. The regression test
+`test_symreg_recovers_known_expression` pins the recovery.
 
-```rust,ignore
-impl EvolutionaryGenome for RealVector {
-    fn to_trace(&self) -> Trace {
-        let mut trace = Trace::new();
-        for (i, &gene) in self.genes.iter().enumerate() {
-            trace.insert(addr!("gene", i), gene);
-        }
-        trace
-    }
+## The layer boundary
 
-    fn from_trace(trace: &Trace) -> Result<Self, GenomeError> {
-        let mut genes = Vec::new();
-        let mut i = 0;
-        while let Some(&value) = trace.get(&addr!("gene", i)) {
-            genes.push(value);
-            i += 1;
-        }
-        Ok(RealVector::new(genes))
-    }
-}
-```
-
-## Trace-Based Operators
-
-### Trace Mutation
-
-```rust,ignore
-use fugue_evo::fugue_integration::trace_operators::TraceMutation;
-
-let mutation = TraceMutation::new(mutation_probability);
-let mutated_genome = mutation.mutate_via_trace(&genome, &bounds, &mut rng);
-```
-
-How it works:
-1. Convert genome to trace
-2. For each address, decide whether to resample
-3. Resample selected addresses from prior (uniform within bounds)
-4. Reconstruct genome from mutated trace
-
-### Trace Crossover
-
-```rust,ignore
-use fugue_evo::fugue_integration::trace_operators::TraceCrossover;
-
-let crossover = TraceCrossover::new(crossover_type);
-let (child1, child2) = crossover.crossover_via_trace(&p1, &p2, &mut rng);
-```
-
-How it works:
-1. Convert both parents to traces
-2. For each address, select source parent
-3. Merge into child traces
-4. Reconstruct child genomes
-
-## Effect Handlers
-
-Fugue uses **effect handlers** (poutine-style) for program transformation. Fugue-evo provides evolution-specific handlers:
-
-### Conditioning Handler
-
-Interprets selection as conditioning:
-
-```rust,ignore
-use fugue_evo::fugue_integration::effect_handlers::ConditioningHandler;
-
-// Selection biases toward high fitness
-let handler = ConditioningHandler::new(fitness_function);
-let selected_trace = handler.condition(trace, fitness_threshold);
-```
-
-### Resampling Handler
-
-Implements mutation as partial resampling:
-
-```rust,ignore
-use fugue_evo::fugue_integration::effect_handlers::ResamplingHandler;
-
-let handler = ResamplingHandler::new(resample_probability);
-let mutated_trace = handler.resample(trace, &prior, &mut rng);
-```
-
-## Evolution Model
-
-The full probabilistic evolution model:
-
-```rust,ignore
-use fugue_evo::fugue_integration::evolution_model::EvolutionModel;
-
-let model = EvolutionModel::new()
-    .with_prior(UniformPrior::new(&bounds))
-    .with_likelihood(fitness_function)
-    .with_mutation_kernel(GaussianKernel::new(sigma));
-
-// One generation = one inference step
-let posterior_population = model.step(prior_population, &mut rng);
-```
-
-## Advanced: Custom Trace Structures
-
-For complex genomes, design meaningful trace structures:
-
-```rust,ignore
-// Neural network genome
-impl EvolutionaryGenome for NeuralNetwork {
-    fn to_trace(&self) -> Trace {
-        let mut trace = Trace::new();
-
-        // Layer structure
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            for (neuron_idx, neuron) in layer.neurons.iter().enumerate() {
-                // Weight addresses
-                for (weight_idx, &weight) in neuron.weights.iter().enumerate() {
-                    trace.insert(
-                        addr!("layer", layer_idx, "neuron", neuron_idx, "weight", weight_idx),
-                        weight,
-                    );
-                }
-                // Bias address
-                trace.insert(
-                    addr!("layer", layer_idx, "neuron", neuron_idx, "bias"),
-                    neuron.bias,
-                );
-            }
-        }
-
-        trace
-    }
-}
-```
-
-This enables:
-- Layer-aware mutation (mutate one layer at a time)
-- Structural crossover (exchange layers between parents)
-- Hierarchical analysis of evolved networks
-
-## See Also
-
-- [Custom Genome Types](../how-to/custom-genome.md)
-- [Design Philosophy](./philosophy.md)
+The `TraceGenome` extension trait (`genome::trace_genome`) is the boundary:
+classic algorithms require only `EvolutionaryGenome`; genomes that also
+implement `TraceGenome` can be driven by the inference layer. The canonical
+trace encoding is pure data (zero stored log-probabilities); probability mass
+always comes from scoring under a prior program.

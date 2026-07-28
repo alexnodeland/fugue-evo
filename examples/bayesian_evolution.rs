@@ -1,20 +1,21 @@
 //! Evolution as Bayesian inference — an end-to-end pipeline through the
-//! `fugue_integration` layer.
+//! `inference` layer.
 //!
-//! This flagship example makes the "evolution as Bayesian inference over
-//! solution spaces" story concrete and checkable. Given a fitness `f` and a
-//! prior `p`, it targets the **Boltzmann / Gibbs posterior**
+//! Given a fitness `f` and a prior *program* `p(x)` (a [`GenomePrior`] — any
+//! fugue `Model<G>`), the Boltzmann / Gibbs posterior
 //!
 //! ```text
 //!     π_β(x) ∝ p(x) · exp(β · f(x))
 //! ```
 //!
-//! and runs a genuine tempered Sequential Monte Carlo sampler (through Fugue's
-//! `Model`/`Handler`/`factor` machinery) from the prior (`β = 0`) to the
-//! posterior (`β = 1`), using trace-based mutation and crossover as
-//! `π_β`-invariant rejuvenation moves. Because the prior is Gaussian and the
-//! fitness quadratic, the posterior is a known conjugate Gaussian, so we can
-//! print the SMC estimate next to the analytic truth.
+//! is itself a fugue program: `prior.model().bind(|g| factor(β·f(g)))`. This
+//! example runs fugue's tempered Sequential Monte Carlo against that program —
+//! adaptive β ladder from the prior (β = 0) to the posterior (β = 1),
+//! ESS-driven resampling, typed single-site MH rejuvenation, a
+//! population-coupled crossover kernel, and an unbiased log-evidence estimate.
+//! Because the prior is Gaussian and the fitness quadratic, the posterior is a
+//! known conjugate Gaussian, so every estimate is printed next to the analytic
+//! truth.
 //!
 //! It then runs the single-level Bayesian adaptive GA, which learns which
 //! mutation step size works via conjugate `Beta`/`Gamma` posteriors and
@@ -51,7 +52,6 @@ impl Fitness for Quadratic {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Evolution as Bayesian Inference ===\n");
 
-    // Fixed seed for reproducibility (audit date 2026-07-10).
     let mut rng = StdRng::seed_from_u64(20260710);
 
     // ---------------------------------------------------------------------
@@ -68,116 +68,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sigma0 = 2.0;
 
     let fitness = Quadratic { center };
-    let bounds = MultiBounds::symmetric(30.0, DIM);
+    let model = EvolutionModel::new(GaussianPrior::new(0.0, sigma0, DIM), fitness.clone());
 
-    let smc = EvolutionarySMC::new(fitness.clone(), bounds.clone(), 3000)
-        .with_prior(Prior::Gaussian {
-            mean: 0.0,
-            std: sigma0,
-        })
-        .with_beta_schedule(EvolutionarySMC::<RealVector, Quadratic>::linear_beta_schedule(16))
-        .with_mcmc_steps(6)
-        .with_mutation(0.9, 0.6)
-        .with_crossover(true); // trace-based crossover as a rejuvenation move
-
-    println!(
-        "Running tempered SMC: prior N(0, {:.1}²) ⇒ Boltzmann posterior over a",
-        sigma0
-    );
-    println!(
-        "quadratic fitness peaked at {}, along a β ladder 0 → 1.\n",
-        center
+    println!("-- Tempered SMC (fugue adaptive_smc_with_kernel) --");
+    let result = EvolutionSMC::run(
+        &mut rng,
+        &model,
+        EvoSmcConfig {
+            num_particles: 3000,
+            rejuvenation_steps: 5,
+            crossover: Some(CrossoverConfig {
+                n_pairs: 500,
+                swap_probability: 0.5,
+            }),
+            ..Default::default()
+        },
     );
 
-    let particles = smc.run(&mut rng);
-
-    let est_mean = EvolutionarySMC::<RealVector, Quadratic>::weighted_mean(&particles);
-    let est_var = EvolutionarySMC::<RealVector, Quadratic>::weighted_variance(&particles);
-    let ess = EvolutionarySMC::<RealVector, Quadratic>::effective_sample_size(&particles);
-
-    let tau0 = 1.0 / (sigma0 * sigma0);
-    let tau = tau0 + 1.0;
+    let tau = 1.0 / (sigma0 * sigma0) + 1.0;
     let analytic_mean = center / tau;
     let analytic_var = 1.0 / tau;
 
+    for coord in 0..DIM {
+        let mean = result.weighted_mean(coord);
+        let var = result.weighted_variance(coord);
+        println!(
+            "  coord {coord}: posterior mean {mean:7.4}  (analytic {analytic_mean:7.4})   \
+             variance {var:6.4}  (analytic {analytic_var:6.4})"
+        );
+    }
     println!(
-        "  Effective sample size at β=1 : {:.1} / {}",
-        ess,
-        particles.len()
-    );
-    println!(
-        "  Posterior mean     (SMC)     : [{:.3}, {:.3}]",
-        est_mean[0], est_mean[1]
-    );
-    println!(
-        "  Posterior mean     (analytic): [{:.3}, {:.3}]",
-        analytic_mean, analytic_mean
-    );
-    println!(
-        "  Posterior variance (SMC)     : [{:.3}, {:.3}]",
-        est_var[0], est_var[1]
-    );
-    println!(
-        "  Posterior variance (analytic): [{:.3}, {:.3}]",
-        analytic_var, analytic_var
+        "  log evidence: {:.4} (Bayesian model score, free from the tempering ladder)",
+        result.log_evidence
     );
 
-    if let Some(best) = EvolutionarySMC::<RealVector, Quadratic>::best_particle(&particles) {
+    // Optimizer-mode readout: the MAP-ish best particle by raw fitness.
+    let model_fn = model.smc_model();
+    if let Some((best, best_f)) = result.best(&fitness, &model_fn) {
         println!(
-            "  MAP-ish best particle        : {:?} (f = {:.4})\n",
-            best.genome.genes(),
-            best.fitness
+            "  best genome (decode-replay): {:?} with fitness {best_f:.4}\n",
+            best.genes()
         );
     }
 
     // ---------------------------------------------------------------------
-    // Part 2: fitness as a literal likelihood in a Fugue trace.
+    // Part 2: A fixed-β Metropolis-Hastings chain over the same target.
     // ---------------------------------------------------------------------
-    // `to_weighted_trace` runs the genuine Fugue model `factor(β·f(x))` through
-    // a real Handler, so the trace's total log-weight IS β·f(x).
-    let model = EvolutionModel::new(fitness.clone(), bounds.clone()).with_beta(1.0);
-    let probe = RealVector::new(vec![center, center]); // the fitness peak
-    let wt = model.to_weighted_trace(&probe);
-    println!("Fitness as likelihood (β = 1):");
-    println!(
-        "  f(peak)                = {:.4}",
-        model.fitness_value(&probe)
-    );
-    println!(
-        "  trace.total_log_weight = {:.4}  (== β·f, in log_factors: {:.4})\n",
-        wt.total_log_weight(),
-        wt.log_factors
-    );
+    println!("-- MH chain (fugue adaptive_single_site_mh) --");
+    let chain_model = EvolutionModel::new(GaussianPrior::new(0.0, sigma0, 1), Quadratic { center })
+        .with_beta(1.0);
+    let mut chain = EvolutionChain::new(chain_model);
+    let mut current = chain.init(&mut rng);
+    let mut samples = Vec::new();
+    for i in 0..20_000 {
+        let (g, t) = chain.step(&mut rng, &current);
+        current = t;
+        if i >= 2_000 {
+            samples.push(g.genes()[0]);
+        }
+    }
+    let mh_mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    println!("  MH posterior mean {mh_mean:7.4}  (analytic {analytic_mean:7.4})\n");
 
     // ---------------------------------------------------------------------
-    // Part 3: single-level Bayesian adaptive GA (Thompson sampling).
+    // Part 3: The Bayesian adaptive GA (Thompson sampling over operators).
     // ---------------------------------------------------------------------
-    println!("Running Bayesian adaptive GA (Thompson sampling over step sizes)...\n");
-    let sphere = Sphere::new(5);
-    let ga_bounds = MultiBounds::symmetric(5.12, 5);
-    let mut ga = BayesianAdaptiveGA::new(sphere, ga_bounds, 60, 120)
-        .with_step_sizes(vec![0.02, 0.1, 0.5, 2.0]);
+    println!("-- Bayesian adaptive GA (conjugate posteriors + Thompson sampling) --");
+    let sphere = Sphere::new(4);
+    let bounds = MultiBounds::symmetric(5.12, 4);
+    let mut ga = BayesianAdaptiveGA::new(UniformBoxPrior::new(bounds), sphere, 60, 80);
     let result = ga.run(&mut rng);
 
-    println!("  Best fitness found          : {:.5}", result.best_fitness);
-    println!("  Learned operator posteriors (Beta success probability):");
-    for arm in &result.operator_posteriors {
+    println!("  best fitness: {:.6}", result.best_fitness);
+    for (i, arm) in result.operator_posteriors.iter().enumerate() {
         println!(
-            "    σ = {:<4}  E[θ] = {:.3}  (α={:.0}, β={:.0}, selected {} gens)",
+            "  arm {i}: σ = {:5.2}  posterior mean success = {:.3}  (selected {}×)",
             arm.sigma,
             arm.posterior.mean(),
-            arm.posterior.alpha,
-            arm.posterior.beta,
             arm.times_selected
         );
     }
     println!(
-        "  Improvement-rate posterior  : Gamma(shape={:.1}, rate={:.1}), E[λ] = {:.2} improving/gen\n",
-        result.improvement_rate.shape,
-        result.improvement_rate.rate,
+        "  improvement-rate posterior mean: {:.2} events/generation",
         result.improvement_rate.mean()
     );
 
-    println!("Done. Evolution ran as genuine posterior inference through the Fugue layer.");
     Ok(())
 }

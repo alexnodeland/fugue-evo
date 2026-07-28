@@ -30,13 +30,13 @@
 //! no hyperprior over the `Beta`/`Gamma` parameters), hence the honest name
 //! `BayesianAdaptiveGA` rather than "hierarchical Bayesian".
 
-use fugue::{Beta, Distribution, Gamma};
 use rand::Rng;
+use rand_distr::{Beta, Distribution, Gamma};
 
-use super::evolution_model::{EvolutionChainConfig, EvolutionModel, EvolutionStep};
+use super::model::EvolutionModel;
+use super::prior::GenomePrior;
 use crate::fitness::traits::Fitness;
-use crate::genome::bounds::MultiBounds;
-use crate::genome::traits::EvolutionaryGenome;
+use crate::genome::trace_genome::TraceGenome;
 
 /// Conjugate `Beta(α, β)` posterior over a Bernoulli success probability.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -118,7 +118,8 @@ impl GammaRatePosterior {
 
     /// Draw `λ ~ Gamma(shape, rate)` from the current posterior.
     pub fn sample<R: Rng>(&self, rng: &mut R) -> f64 {
-        Gamma::new(self.shape, self.rate)
+        // rand_distr's Gamma is (shape, scale); ours is (shape, rate).
+        Gamma::new(self.shape, 1.0 / self.rate)
             .expect("valid Gamma parameters")
             .sample(rng)
     }
@@ -151,12 +152,12 @@ impl OperatorArm {
 /// See the [module docs](self) for the model. Operator step sizes are selected
 /// by Thompson sampling over per-operator `Beta` success posteriors, which are
 /// updated by conjugate Bayesian updates from observed improvement events.
-pub struct BayesianAdaptiveGA<G, F>
+pub struct BayesianAdaptiveGA<P, F>
 where
-    G: EvolutionaryGenome,
-    F: Fitness<Genome = G, Value = f64>,
+    P: GenomePrior,
+    F: Fitness<Genome = P::Genome, Value = f64> + Clone + Send + Sync + 'static,
 {
-    model: EvolutionModel<G, F>,
+    model: EvolutionModel<P, F>,
     population_size: usize,
     generations: usize,
     tournament_size: usize,
@@ -165,20 +166,15 @@ where
     improvement_rate: GammaRatePosterior,
 }
 
-impl<G, F> BayesianAdaptiveGA<G, F>
+impl<P, F> BayesianAdaptiveGA<P, F>
 where
-    G: EvolutionaryGenome + Clone,
-    F: Fitness<Genome = G, Value = f64> + Clone,
+    P: GenomePrior,
+    F: Fitness<Genome = P::Genome, Value = f64> + Clone + Send + Sync + 'static,
 {
     /// Create a new adaptive GA with a default set of mutation step sizes.
-    pub fn new(
-        fitness: F,
-        bounds: MultiBounds,
-        population_size: usize,
-        generations: usize,
-    ) -> Self {
+    pub fn new(prior: P, fitness: F, population_size: usize, generations: usize) -> Self {
         Self {
-            model: EvolutionModel::new(fitness, bounds),
+            model: EvolutionModel::new(prior, fitness),
             population_size,
             generations,
             tournament_size: 3,
@@ -227,8 +223,8 @@ where
     }
 
     /// Run the adaptive GA.
-    pub fn run<R: Rng>(&mut self, rng: &mut R) -> BayesianAdaptiveGAResult<G> {
-        let mut population: Vec<G> = (0..self.population_size)
+    pub fn run<R: Rng>(&mut self, rng: &mut R) -> BayesianAdaptiveGAResult<P::Genome> {
+        let mut population: Vec<P::Genome> = (0..self.population_size)
             .map(|_| self.model.sample_prior(rng))
             .collect();
         let mut fitnesses: Vec<f64> = population
@@ -255,13 +251,6 @@ where
             selected_arm_history.push(arm_idx);
             let sigma = self.arms[arm_idx].sigma;
 
-            let step = EvolutionStep::new(
-                self.model.clone(),
-                EvolutionChainConfig::default()
-                    .mutation_rate(self.mutation_rate)
-                    .mutation_sigma(sigma),
-            );
-
             // (2) Produce the next generation via tournament selection + the
             // chosen mutation operator, recording improvement events.
             let mut next_population = Vec::with_capacity(self.population_size);
@@ -274,7 +263,7 @@ where
                 let parent = &population[parent_idx];
                 let parent_fitness = fitnesses[parent_idx];
 
-                let child = step.propose(parent, rng);
+                let child = gaussian_trace_mutation(parent, self.mutation_rate, sigma, rng);
                 let child_fitness = self.model.fitness_value(&child);
 
                 if child_fitness > parent_fitness {
@@ -325,6 +314,33 @@ where
     }
 }
 
+/// Gaussian trace-space mutation used as the GA's variation operator: each
+/// `F64` choice of the genome's canonical trace is perturbed with probability
+/// `rate` by `N(0, sigma²)` noise (non-real sites pass through unchanged).
+/// This replaces the deleted `EvolutionStep::propose`, which existed only to
+/// provide exactly this perturbation.
+fn gaussian_trace_mutation<G: TraceGenome, R: Rng>(
+    genome: &G,
+    rate: f64,
+    sigma: f64,
+    rng: &mut R,
+) -> G {
+    use fugue::{ChoiceValue, Trace};
+    let normal = rand_distr::Normal::new(0.0, sigma.max(1e-12)).expect("valid mutation sigma");
+    let trace = genome.to_trace();
+    let mut new_trace = Trace::default();
+    for (addr, choice) in &trace.choices {
+        let value = match &choice.value {
+            ChoiceValue::F64(v) if rng.gen::<f64>() < rate => {
+                ChoiceValue::F64(v + normal.sample(rng))
+            }
+            other => other.clone(),
+        };
+        new_trace.insert_choice(addr.clone(), value, 0.0);
+    }
+    G::from_trace(&new_trace).unwrap_or_else(|_| genome.clone())
+}
+
 /// Result of a [`BayesianAdaptiveGA`] run.
 pub struct BayesianAdaptiveGAResult<G> {
     /// Best genome found.
@@ -346,6 +362,7 @@ mod tests {
     use super::*;
     use crate::fitness::benchmarks::Sphere;
     use crate::genome::bounds::MultiBounds;
+    use crate::inference::prior::UniformBoxPrior;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -402,7 +419,7 @@ mod tests {
         // Sphere::evaluate returns -Σx² (higher is better, optimum 0 at origin).
         let fit = Sphere::new(3);
         let bounds = MultiBounds::symmetric(5.0, 3);
-        let mut ga = BayesianAdaptiveGA::new(fit, bounds, 40, 60);
+        let mut ga = BayesianAdaptiveGA::new(UniformBoxPrior::new(bounds), fit, 40, 60);
         let mut rng = StdRng::seed_from_u64(7);
         let result = ga.run(&mut rng);
 
@@ -441,7 +458,8 @@ mod tests {
         // huge ones, so the small-σ arm should earn a higher posterior mean.
         let fit = Sphere::new(2);
         let bounds = MultiBounds::symmetric(0.5, 2);
-        let mut ga = BayesianAdaptiveGA::new(fit, bounds, 50, 80).with_step_sizes(vec![0.02, 2.0]);
+        let mut ga = BayesianAdaptiveGA::new(UniformBoxPrior::new(bounds), fit, 50, 80)
+            .with_step_sizes(vec![0.02, 2.0]);
         let mut rng = StdRng::seed_from_u64(11);
         let result = ga.run(&mut rng);
 
