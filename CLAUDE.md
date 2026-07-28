@@ -35,13 +35,16 @@ cargo run --example sphere_optimization
 
 ## Architecture
 
-fugue-evo is a probabilistic genetic algorithm library that treats evolution as Bayesian inference. It integrates with `fugue-ppl` (a probabilistic programming library) for trace-based evolutionary operators.
+fugue-evo is a **two-layer** evolutionary-computation library:
 
-### Core Abstraction: `EvolutionaryGenome` Trait
+1. **Classic EC layer** (no fugue dependency): all algorithms, operators, population machinery, checkpointing, WASM. Compiles with `--no-default-features --features std,parallel,checkpoint`.
+2. **Inference layer** (`ppl` feature, default on; `src/inference/`): evolutionary algorithms as probabilistic programs. The prior over genomes is a fugue `Model<G>` (`GenomePrior`), fitness enters as `factor(β·f)`, and the Boltzmann posterior is sampled by fugue's own MH/SMC engines (`EvolutionChain`, `EvolutionSMC`). `ArithmeticGrammarPrior` does genetic programming over a probabilistic grammar — subtree mutation/crossover are generic trace moves.
 
-The central abstraction is `EvolutionaryGenome` (src/genome/traits.rs), which requires genomes to convert to/from Fugue traces. This enables:
-- **Trace-based mutation**: Selective resampling of addresses
-- **Trace-based crossover**: Merging parent traces with constraints
+### Core Abstractions
+
+- `EvolutionaryGenome` (src/genome/traits.rs): the classic, fugue-free genome trait (decode/dimension/generate/distance).
+- `TraceGenome` (src/genome/trace_genome.rs, `ppl`): extension trait adding `to_trace`/`from_trace`/`trace_prefix` — the boundary into the inference layer. `Permutation` uses a Lehmer-code (rank) encoding so single-site MH moves stay valid.
+- `GenomePrior` (src/inference/prior.rs): a prior as a program — `fn model(&self) -> fugue::Model<G>` returning the decoded genome. Built-ins: `UniformBoxPrior`, `GaussianPrior`, `BitStringPrior`, `PermutationPrior`, `ArithmeticGrammarPrior`.
 
 Built-in genome types: `RealVector`, `BitString`, `Permutation`, `TreeGenome`
 
@@ -52,7 +55,7 @@ Built-in genome types: `RealVector`, `BitString`, `Permutation`, `TreeGenome`
 - **operators/**: Selection, crossover, mutation operators with trait bounds
 - **fitness/**: `Fitness` trait and benchmark functions (Sphere, Rastrigin, Rosenbrock)
 - **hyperparameter/**: Adaptive and Bayesian hyperparameter tuning (schedules, self-adaptive, conjugate priors)
-- **fugue_integration/**: Trace operators and effect handlers for probabilistic evolution
+- **inference/**: (`ppl`) priors as programs, `EvolutionModel` (Boltzmann target as a fugue program), `EvolutionChain` (MH), `EvolutionSMC` (tempered SMC + crossover kernel + log-evidence), `ArithmeticGrammarPrior` (grammar GP), effect handlers, trace operators
 - **checkpoint/**: State serialization for pausing/resuming evolution
 - **termination/**: Convergence criteria (max generations, fitness threshold, stagnation)
 
@@ -75,6 +78,8 @@ SimpleGABuilder::<RealVector, f64, _, _, _, _, _>::new()
 
 Operators implement traits like `SelectionOperator`, `CrossoverOperator`, `MutationOperator`. Bounded variants (`BoundedCrossoverOperator`, `BoundedMutationOperator`) receive bounds information for constraint handling.
 
-### Fugue Integration
+### Inference layer invariants
 
-Genomes convert to `fugue::Trace` objects where genes are stored at indexed addresses (e.g., `addr!("gene", 0)`). This enables probabilistic interpretation of genetic operators through the `fugue_integration` module's effect handlers.
+- The SMC path uses `EvolutionModel::smc_model()` (untempered `factor(f)`): β is applied exactly once by fugue's adaptive tempering. Never bake β into the SMC factor.
+- All densities come from running/replaying the target program (`ScoreGivenTrace`); there is deliberately no hand-written density code in this crate.
+- Regression anchors that must stay green: EV-16 (conjugate SMC posterior + analytic evidence), EV-52 (weighted trace = β·f), EV-90 (MH truncated-exponential mean), the dead-chain regressions (`test_bitstring_chain_moves`, `test_permutation_chain_moves`), and `test_symreg_recovers_known_expression`.

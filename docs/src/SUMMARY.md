@@ -58,7 +58,7 @@
 # Architecture
 
 - [Design Philosophy](./architecture/philosophy.md)
-- [Fugue Integration](./architecture/fugue-integration.md)
+- [Evolution as Inference](./architecture/fugue-integration.md)
 - [Type System](./architecture/type-system.md)
 
 -----------

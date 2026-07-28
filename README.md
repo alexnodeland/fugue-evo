@@ -4,7 +4,7 @@
 
 # Fugue Evo
 
-**Evolution as Bayesian inference — a probabilistic, type-safe evolutionary computation library for Rust**
+**Two layers: classical evolutionary algorithms (standalone), and evolutionary inference — evolutionary algorithms *as* probabilistic programs (tempered SMC in trace space, built on [Fugue](https://github.com/alexnodeland/fugue))**
 
 *Populations hunting real landscapes, live in your browser: every figure in the docs at [evo.fugue.run](https://evo.fugue.run) runs the actual crate, compiled to WASM.*
 
@@ -16,16 +16,17 @@
 
 </div>
 
-A broad evolutionary-computation library for Rust, with an optional probabilistic-programming bridge to [Fugue](https://github.com/alexnodeland/fugue).
+An evolutionary-computation library for Rust with an architectural split that keeps both halves honest:
 
-The default flagship algorithms (SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState) are standalone evolutionary computation: they use Fugue's `Trace` only as an address→value data container for the optional `to_trace`/`from_trace` round-trip, not for inference. The genuine "evolution as Bayesian inference over solution spaces" story — a tempered Sequential Monte Carlo pipeline over Fugue's `Model`/`Handler`/`factor` machinery — lives in the `fugue_integration` module (`EvolutionarySMC`/`EvolutionStep`/`BayesianAdaptiveGA`), demonstrated by `examples/bayesian_evolution.rs`. Reach for that module, not the default algorithms, when you want the PPL-powered inference path (EV-17).
+- **Classic EC (no fugue dependency).** SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState, all operators, checkpointing, and the WASM surface. Build with `--no-default-features --features std,parallel,checkpoint` and there is no probabilistic-programming dependency at all.
+- **Evolutionary inference (`ppl` feature, on by default): evolutionary algorithms *as* probabilistic programs.** The prior over genomes is a user-written fugue `Model<G>` (a `GenomePrior`), fitness enters as `factor(β·f(x))`, so the Boltzmann posterior `π_β(x) ∝ p(x)·exp(β·f(x))` **is a fugue program** — and every sampler is fugue's own inference machinery: `EvolutionChain` (typed single-site MH), `EvolutionSMC` (adaptive tempered SMC with a population-coupled crossover kernel and an unbiased log-evidence estimate), and `ArithmeticGrammarPrior` (genetic programming over a probabilistic grammar, where subtree mutation and crossover are generic trace moves). See `examples/symbolic_regression_inference.rs` — symbolic regression as exact Bayesian inference.
 
 ## Features
 
 - **Multiple Algorithms**: Simple GA, CMA-ES, NSGA-II, Island Model
 - **Flexible Genomes**: Real-valued vectors, bit strings, permutations, and GP trees
 - **Rich Operators**: SBX crossover, polynomial mutation, tournament selection, and more
-- **Probabilistic Integration**: a genuine tempered Sequential Monte Carlo pipeline over Fugue's `Model`/`Handler`/`factor` machinery, targeting the Boltzmann/Gibbs posterior `π_β(x) ∝ p(x) · exp(β·f(x))` (see `examples/bayesian_evolution.rs`)
+- **Evolutionary inference**: priors as programs (`GenomePrior` → `fugue::Model<G>`), adaptive tempered SMC over the Boltzmann posterior with log-evidence, typed-proposal MH, and grammar-based GP as exact inference (`examples/bayesian_evolution.rs`, `examples/symbolic_regression_inference.rs`)
 - **Bayesian Learning**: opt-in online hyperparameter tuning via a Thompson-sampling multi-armed bandit over conjugate `Beta`/`Gamma` posteriors (`SimpleGABuilder::adaptive_operators` + `run_adaptive`; see `examples/hyperparameter_learning.rs`)
 - **Production Ready**: checkpointing with bit-identical resume (ChaCha RNG family), convergence detection, parallel evaluation
 
@@ -78,7 +79,8 @@ The `examples/` directory contains demonstrations of various features:
 - `checkpointing.rs` - Save and restore evolution state with bit-identical resume
 - `symbolic_regression.rs` - Genetic programming with tree genomes
 - `hyperparameter_learning.rs` - Opt-in Thompson-sampling operator-parameter tuning
-- `bayesian_evolution.rs` - Flagship end-to-end pipeline: tempered SMC over the Boltzmann posterior, plus the Bayesian adaptive GA
+- `bayesian_evolution.rs` - End-to-end inference pipeline: tempered SMC over the Boltzmann posterior, MH chain, plus the Bayesian adaptive GA
+- `symbolic_regression_inference.rs` - **Flagship**: symbolic regression as exact Bayesian inference over a probabilistic grammar (subtree moves as generic trace machinery, model comparison by Bayes factor)
 
 Run an example:
 
@@ -96,7 +98,7 @@ cargo run --example sphere_optimization
 
 ### Fitness as Likelihood
 
-The `exp(f/T)` selection weight corresponds to Bayesian conditioning on fitness. In this crate that correspondence is realized concretely in two places: `BoltzmannSelection` (a standalone softmax-of-`f/T` selection operator), and the tempered-SMC path in `fugue_integration`, which targets the Boltzmann/Gibbs posterior `π_β(x) ∝ p(x)·exp(β·f(x))` using Fugue's `factor` machinery. The other default selection operators (tournament, roulette, rank) are ordinary EC and do not perform inference.
+The `exp(f/T)` selection weight corresponds to Bayesian conditioning on fitness. In this crate that correspondence is realized concretely in two places: `BoltzmannSelection` (a standalone softmax-of-`f/T` selection operator in the classic layer), and the `inference` module, where the Boltzmann/Gibbs posterior `π_β(x) ∝ p(x)·exp(β·f(x))` is assembled as a literal fugue program (`prior.model().bind(|g| factor(β·f(g)))`) and sampled by fugue's MH and tempered-SMC engines. The other default selection operators (tournament, roulette, rank) are ordinary EC and do not perform inference.
 
 ### Learnable Operators
 
@@ -110,22 +112,32 @@ The `EvolutionaryGenome` trait provides a unified abstraction supporting:
 - `Permutation` - Ordering problems (TSP, scheduling)
 - `TreeGenome` - Genetic programming
 
-### Fugue Integration
+### Evolution as inference (`ppl`)
 
-Genomes can be converted to Fugue PPL traces for probabilistic operations:
+Genomes implementing the `TraceGenome` extension trait can be encoded as fugue
+traces (`use fugue_evo::genome::trace_genome::TraceGenome`):
 
 ```rust
 let trace = genome.to_trace();
 let recovered = RealVector::from_trace(&trace)?;
 ```
 
-Beyond trace conversion, the `fugue_integration` module runs a genuine tempered
-Sequential Monte Carlo sampler (`EvolutionarySMC`) over Fugue's
-`Model`/`Handler`/`factor` machinery, targeting the Boltzmann/Gibbs posterior
-`π_β(x) ∝ p(x) · exp(β·f(x))` from the prior (`β = 0`) to the full posterior
-(`β = 1`), using trace-based mutation/crossover as `π_β`-invariant
-Metropolis–Hastings rejuvenation moves. See `examples/bayesian_evolution.rs`
-for the end-to-end pipeline.
+The real story is the `inference` module: the prior is any fugue program
+returning the decoded genome, fitness is a likelihood factor, and the
+posterior is sampled by fugue's engines —
+
+```rust
+let model = EvolutionModel::new(GaussianPrior::new(0.0, 2.0, DIM), fitness);
+let posterior = EvolutionSMC::run(&mut rng, &model, EvoSmcConfig::default());
+// posterior.weighted_mean(0), posterior.log_evidence, posterior.best(..)
+```
+
+Adaptive ESS-driven tempering from the prior (β = 0) to the posterior
+(β = 1), typed single-site MH rejuvenation (all site kinds move, including
+bits and permutation ranks), a population-coupled crossover kernel, decode-
+replay genome recovery, and an unbiased log-evidence estimate for Bayesian
+model comparison. See `examples/bayesian_evolution.rs` and the flagship
+`examples/symbolic_regression_inference.rs`.
 
 ## Algorithms
 
@@ -154,7 +166,7 @@ crates were never exercised against together:
 
 ```toml
 [dependencies]
-fugue-ppl = { path = "../fugue", version = "0.2.0" }
+fugue-ppl = { path = "../fugue", version = "0.2.1", optional = true }
 ```
 
 Both crates live side by side under the same `fugue-ecosystem` parent

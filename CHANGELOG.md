@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-28
+
+**"Evolutionary algorithms as probabilistic programs"** — the two-layer
+refactor (cross-repo plan, tracking issue
+[#18](https://github.com/alexnodeland/fugue-evo/issues/18); upstream
+primitives in fugue-ppl 0.2.1 / fugue#45). fugue-evo is now explicitly two
+layers: a standalone classic EC layer with **no** fugue dependency, and a
+fugue-native inference layer where the Boltzmann target is literally a fugue
+program and every sampler is fugue's own inference machinery.
+
+### Changed (breaking)
+
+- **Trait split**: `EvolutionaryGenome` no longer has `to_trace` /
+  `from_trace` / `trace_prefix`. They moved to the new `TraceGenome`
+  extension trait (`genome::trace_genome`, behind the `ppl` feature); bring
+  it into scope with `use fugue_evo::genome::trace_genome::TraceGenome`.
+  The `ChoiceValue` re-export moved there too.
+- **`ppl` feature (default on)**: `fugue-ppl` is now optional. With
+  `--no-default-features --features std,parallel,checkpoint` the entire
+  classic layer (all 8 algorithms, operators, wasm crate) compiles with no
+  fugue dependency.
+- **`fugue_integration` renamed to `inference`** (deprecated alias kept for
+  one release).
+- **`Prior` enum removed** — priors are programs now. `GenomePrior::model()
+  -> fugue::Model<G>` returns the decoded genome; built-in constructors:
+  `UniformBoxPrior`, `GaussianPrior`, `BitStringPrior`, `PermutationPrior`,
+  and the PCFG `ArithmeticGrammarPrior`. All hand-written density code
+  (`log_prior_density`, `log_boltzmann_target` internals) is deleted;
+  scoring is `ScoreGivenTrace` replay of the target program.
+- **`EvolutionModel<G, F>` is now `EvolutionModel<P: GenomePrior, F>`**:
+  `EvolutionModel::new(prior, fitness)`. `target_model()` builds the fixed-β
+  Boltzmann program for MH; `smc_model()` builds the untempered program for
+  SMC (β applied exactly once by fugue's adaptive tempering — fixing the old
+  hand-rolled SMC's β double-counting).
+- **`EvolutionStep` removed** → `EvolutionChain`, a thin wrapper over
+  `fugue::adaptive_single_site_mh`. Typed proposals move **every** site kind;
+  the old proposal only perturbed `F64` choices, so BitString/Permutation
+  chains silently never moved (new regressions:
+  `test_bitstring_chain_moves`, `test_permutation_chain_moves`).
+- **`Permutation`'s trace encoding is now the Lehmer code** (ranks against
+  the shrinking available-value list) instead of raw values, matching the
+  sequential-categorical `PermutationPrior` so single-site MH moves decode to
+  valid, distinct permutations.
+- **`EvolutionarySMC` removed** → `EvolutionSMC::run` /
+  `run_with_kernel` over `fugue::adaptive_smc_with_kernel`: adaptive
+  ESS-driven β ladder, systematic resampling, per-particle rejuvenation, the
+  population-coupled `CrossoverKernel`, and an unbiased **log-evidence**
+  estimate. Results are `EvolutionPosterior` (fugue particles); genomes are
+  recovered by decode-replay (`best`, `genomes`, `weighted_mean/variance`).
+- **`BayesianAdaptiveGA::new(prior, fitness, pop, gens)`** (was
+  `(fitness, bounds, ..)`); its conjugate `Beta`/`Gamma` machinery now uses
+  `rand_distr` instead of fugue distributions.
+
+### Added
+
+- **`ArithmeticGrammarPrior`** (`inference::grammar`): expression trees as a
+  probabilistic context-free grammar program with tree-path addresses
+  (`node/0/1#leaf`, `#func`, `#const`, …). Structure lives in the choices, so
+  fugue's generic machinery becomes genetic programming: single-site MH on a
+  `#leaf`/`#func` site births/kills subtrees with automatic reversible-jump
+  corrections (subtree regeneration), and `subtree_crossover_mask()` +
+  `fugue::CrossoverKernel` grafts subtrees between particles (subtree
+  crossover). Parsimony is the grammar prior itself.
+- **Flagship example** `examples/symbolic_regression_inference.rs`: symbolic
+  regression posed as exact Bayesian inference — PCFG prior, Gaussian
+  likelihood factor, tempered SMC with both genetic moves, MAP program by
+  decode-replay, posterior-predictive readout, and grammar comparison by
+  Bayes factor. Pinned by `test_symreg_recovers_known_expression` (recovers
+  `x² + 1`).
+- Analytic regression anchors kept green through the rewrite: EV-16
+  (conjugate SMC posterior, now with an added analytic *evidence* check),
+  EV-52 (weighted trace = β·f), EV-90 (MH truncated-exponential mean),
+  EV-53 (conjugate updates / Thompson preference).
+
+
 ## [0.1.1] - 2026-07-21
 
 ### Added

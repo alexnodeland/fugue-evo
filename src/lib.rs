@@ -14,51 +14,44 @@
 
 //! # fugue-evo
 //!
-//! A Probabilistic Genetic Algorithm Library for Rust.
+//! Evolutionary computation for Rust, in **two layers**:
 //!
-//! This library is primarily a broad, standalone **evolutionary computation**
-//! toolkit that *optionally* interoperates with the
-//! [fugue-ppl](https://github.com/fugue-ppl/fugue) probabilistic-programming
-//! library. Being precise about the coupling (EV-17): the default flagship
-//! algorithms — [`SimpleGA`](algorithms::simple_ga::SimpleGA), CMA-ES, NSGA-II,
-//! Island Model, Evolution Strategy, EDA/UMDA, SteadyState — are ordinary EC.
-//! They use fugue's [`Trace`](fugue::Trace) only as an address→value **data
-//! container** for the optional `to_trace`/`from_trace` round-trip; they never
-//! construct a fugue `Model` or call its inference engines. The genuine
-//! "evolution as Bayesian inference over solution spaces" machinery —
-//! `EvolutionarySMC` (tempered SMC over a Boltzmann posterior), `EvolutionStep`,
-//! and `BayesianAdaptiveGA` — lives entirely in the [`fugue_integration`]
-//! module (exercised by `examples/bayesian_evolution.rs`), which is where
-//! fugue's `Model`/`factor` inference path is actually used. Treat that module,
-//! not the default algorithms, as the "deep integration" story.
+//! 1. **Classic EC (standalone, no fugue dependency).** SimpleGA, CMA-ES,
+//!    NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState, the
+//!    interactive GA, all operators, checkpointing, and the WASM surface.
+//!    Compiles with `--no-default-features --features std,parallel,checkpoint`
+//!    with no probabilistic-programming dependency at all.
+//! 2. **Evolutionary inference (`ppl` feature, on by default): evolutionary
+//!    algorithms *as* probabilistic programs.** The prior over genomes is a
+//!    user-written fugue [`Model`](fugue::Model) (a [`GenomePrior`](inference::prior::GenomePrior)),
+//!    fitness enters as `factor(β·f(x))`, so the Boltzmann posterior
+//!    `π_β(x) ∝ p(x)·exp(β·f(x))` **is a fugue program** — and every sampler
+//!    is fugue's own inference machinery:
+//!    [`EvolutionChain`](inference::mh::EvolutionChain) (typed single-site MH),
+//!    [`EvolutionSMC`](inference::smc::EvolutionSMC) (adaptive tempered SMC
+//!    with a population-coupled crossover kernel and a log-evidence estimate),
+//!    and [`ArithmeticGrammarPrior`](inference::grammar::ArithmeticGrammarPrior)
+//!    (genetic programming over a probabilistic grammar, where subtree
+//!    mutation/crossover are generic trace moves).
+//!
+//! The boundary between the layers is the
+//! [`TraceGenome`](genome::trace_genome::TraceGenome) extension trait: classic
+//! algorithms require only [`EvolutionaryGenome`](genome::traits::EvolutionaryGenome);
+//! genomes that also implement `TraceGenome` can be driven by the inference
+//! layer.
 //!
 //! ## Features
 //!
 //! - **Multiple Algorithms**: SimpleGA, CMA-ES, NSGA-II, Island Model, EDA, Interactive GA (standalone EC)
 //! - **Flexible Genomes**: RealVector, BitString, Permutation, TreeGenome
 //! - **Modular Operators**: Pluggable selection, crossover, and mutation operators
-//! - **Adaptive Hyperparameters**: opt-in Thompson-sampling tuning of operator parameters (`SimpleGABuilder::adaptive_operators` + `SimpleGA::run_adaptive`)
-//! - **Optional Fugue integration**: [`fugue_integration`] adds a genuine tempered-SMC / Boltzmann inference path over evolutionary traces
+//! - **Adaptive Hyperparameters**: opt-in Thompson-sampling tuning of operator parameters
+//! - **Evolutionary inference** (`ppl`): priors as programs, tempered SMC over the
+//!   Boltzmann posterior, MH with typed proposals, symbolic regression as exact
+//!   Bayesian inference
 //! - **Production Ready**: Checkpointing (bit-identical resume), parallel evaluation, WASM support
 //!
-//! ## Core Concepts
-//!
-//! - **Fitness as Likelihood**: the exp(f/T) ↔ conditioning correspondence, realized concretely by [`BoltzmannSelection`](operators::selection::BoltzmannSelection) and by the tempered-SMC path in [`fugue_integration`]
-//! - **Learnable Operators**: opt-in online tuning of operator parameters via a Thompson-sampling bandit (`SimpleGABuilder::adaptive_operators` + `run_adaptive`); the default `run` path uses fixed parameters
-//! - **Trace-Based Evolution**: genomes round-trip through fugue [`Trace`](fugue::Trace)s as a data structure; the deeper Fugue-integrated inference (SMC/Boltzmann) is scoped to the [`fugue_integration`] module, not the default algorithms
-//! - **Type Safety**: Compile-time guarantees via Rust's type system
-//!
-//! ## Quick Start
-//!
-//! Add to your `Cargo.toml`:
-//!
-//! ```toml
-//! [dependencies]
-//! fugue-evo = "0.1"
-//! rand = "0.8"
-//! ```
-//!
-//! Basic optimization example:
+//! ## Quick Start (classic optimization)
 //!
 //! ```rust,ignore
 //! use fugue_evo::prelude::*;
@@ -67,13 +60,7 @@
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut rng = StdRng::seed_from_u64(42);
-//!
-//!     // Define search bounds: 10 dimensions in [-5.12, 5.12]
 //!     let bounds = MultiBounds::symmetric(5.12, 10);
-//!
-//!     // Run optimization. `real_valued()` pins the genome/fitness types (no
-//!     // turbofish) and pre-installs tournament selection, SBX crossover, and
-//!     // polynomial mutation as overridable defaults.
 //!     let result = SimpleGABuilder::real_valued()
 //!         .population_size(100)
 //!         .bounds(bounds)
@@ -81,37 +68,44 @@
 //!         .max_generations(200)
 //!         .build()?
 //!         .run(&mut rng)?;
-//!
 //!     println!("Best fitness: {:.6}", result.best_fitness);
 //!     Ok(())
 //! }
 //! ```
 //!
+//! ## Quick Start (evolution as inference, `ppl`)
+//!
+//! ```rust,ignore
+//! use fugue_evo::prelude::*;
+//!
+//! // Prior as a program; fitness as a likelihood factor; posterior by SMC.
+//! let model = EvolutionModel::new(GaussianPrior::new(0.0, 2.0, DIM), fitness);
+//! let posterior = EvolutionSMC::run(&mut rng, &model, EvoSmcConfig::default());
+//! println!("posterior mean: {}", posterior.weighted_mean(0));
+//! println!("log evidence:   {}", posterior.log_evidence);
+//! ```
+//!
 //! ## Module Overview
 //!
-//! - [`algorithms`]: Optimization algorithms (SimpleGA, CMA-ES, NSGA-II, Island Model)
-//! - [`genome`]: Genome types and the [`EvolutionaryGenome`](genome::traits::EvolutionaryGenome) trait
+//! - [`algorithms`]: Classic optimization algorithms (SimpleGA, CMA-ES, NSGA-II, Island Model)
+//! - [`genome`]: Genome types, [`EvolutionaryGenome`](genome::traits::EvolutionaryGenome), and (behind `ppl`) [`TraceGenome`](genome::trace_genome::TraceGenome)
 //! - [`operators`]: Selection, crossover, and mutation operators
 //! - [`fitness`]: Fitness traits and benchmark functions
 //! - [`population`]: Population management and individual types
-//! - [`termination`]: Stopping criteria (max generations, target fitness, stagnation)
+//! - [`termination`]: Stopping criteria
 //! - [`hyperparameter`]: Adaptive and Bayesian hyperparameter tuning
 //! - [`interactive`]: Human-in-the-loop evolutionary optimization
 //! - [`checkpoint`]: State serialization for pause/resume
-//! - [`fugue_integration`]: Trace operators and effect handlers
+//! - [`inference`]: Evolution as inference — priors as programs, MH, tempered SMC, grammar GP (`ppl`)
 //!
 //! ## Examples
 //!
-//! See the `examples/` directory for complete examples:
-//!
-//! - `sphere_optimization.rs`: Basic continuous optimization
-//! - `rastrigin_benchmark.rs`: Multimodal function optimization
-//! - `cma_es_example.rs`: CMA-ES algorithm usage
-//! - `island_model.rs`: Parallel island evolution
-//! - `hyperparameter_learning.rs`: Bayesian parameter adaptation
-//! - `symbolic_regression.rs`: Genetic programming
-//! - `checkpointing.rs`: Save/restore evolution state
-//! - `interactive_evolution.rs`: Human-in-the-loop optimization
+//! - `sphere_optimization.rs`, `rastrigin_benchmark.rs`, `cma_es_example.rs`,
+//!   `island_model.rs`, `symbolic_regression.rs` (classic GP),
+//!   `checkpointing.rs`, `interactive_evolution.rs`: the classic layer
+//! - `bayesian_evolution.rs`: the inference layer end-to-end (SMC + MH + adaptive GA)
+//! - `symbolic_regression_inference.rs`: **flagship** — symbolic regression as
+//!   exact Bayesian inference over a probabilistic grammar
 
 pub mod algorithms;
 pub mod checkpoint;

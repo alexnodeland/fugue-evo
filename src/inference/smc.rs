@@ -209,6 +209,38 @@ impl EvolutionSMC {
     }
 }
 
+impl EvolutionSMC {
+    /// Like [`EvolutionSMC::run`], but with an explicit population kernel
+    /// (e.g. a [`CrossoverKernel`] with a
+    /// [`subtree_crossover_mask`](super::grammar::subtree_crossover_mask) for
+    /// grammar-driven tree genomes). `cfg.crossover` is ignored.
+    pub fn run_with_kernel<P, F, R, K>(
+        rng: &mut R,
+        model: &EvolutionModel<P, F>,
+        cfg: EvoSmcConfig,
+        kernel: &mut K,
+    ) -> EvolutionPosterior<P::Genome>
+    where
+        P: GenomePrior,
+        F: Fitness<Genome = P::Genome, Value = f64> + Clone + Send + Sync + 'static,
+        R: Rng,
+        K: fugue::PopulationKernel<P::Genome>,
+    {
+        let model_fn = model.smc_model();
+        let smc_cfg = SMCConfig {
+            resampling_method: cfg.resampling,
+            ess_threshold: cfg.ess_threshold,
+            rejuvenation_steps: cfg.rejuvenation_steps,
+        };
+        let result = adaptive_smc_with_kernel(rng, cfg.num_particles, &model_fn, smc_cfg, kernel);
+        EvolutionPosterior {
+            particles: result.particles,
+            log_evidence: result.log_evidence,
+            _g: PhantomData,
+        }
+    }
+}
+
 /// Score a genome's canonical trace under an arbitrary model — convenience
 /// used by readouts and tests.
 pub fn score_genome<G: TraceGenome, A>(genome: &G, model: Model<A>) -> (A, Trace) {

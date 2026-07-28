@@ -32,6 +32,7 @@
 
 pub mod bayesian_ga;
 pub mod effect_handlers;
+pub mod grammar;
 pub mod mh;
 pub mod model;
 pub mod prior;
@@ -41,6 +42,7 @@ pub mod trace_operators;
 pub mod prelude {
     pub use super::bayesian_ga::*;
     pub use super::effect_handlers::*;
+    pub use super::grammar::*;
     pub use super::mh::*;
     pub use super::model::*;
     pub use super::prior::*;
