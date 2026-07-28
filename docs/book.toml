@@ -24,6 +24,7 @@ additional-js = [
     "viz/nsga2.js",
     "viz/island.js",
     "viz/inline.js",
+    "viz/inference.js",
     "viz/playground.js",
 ]
 
