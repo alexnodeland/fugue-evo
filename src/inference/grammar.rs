@@ -33,7 +33,7 @@
 //! by construction.
 //!
 //! Note: tree genomes are decoded from particles by replay (the model returns
-//! the built [`TreeGenome`]); the flat [`TraceGenome`] encoding of
+//! the built [`TreeGenome`]); the flat [`TraceGenome`](crate::genome::trace_genome::TraceGenome) encoding of
 //! `TreeGenome` is unrelated to this grammar's address scheme, so
 //! `EvolutionModel::score`/`to_weighted_trace` (which replay `to_trace`) do
 //! not apply to grammar-driven trees — use the SMC/MH drivers, which never

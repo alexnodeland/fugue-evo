@@ -11,7 +11,7 @@
 //! The model returns the **decoded genome** `G`, not a bare vector: the model's
 //! return value *is* the decode, which is what lets the SMC layer recover a
 //! genome from a bare particle trace by replay (see
-//! [`crate::inference::smc::EvolutionResult`]).
+//! [`crate::inference::smc::EvolutionPosterior`]).
 
 use fugue::{addr, plate, sample, Bernoulli, Categorical, Model, ModelExt, Normal, Uniform};
 

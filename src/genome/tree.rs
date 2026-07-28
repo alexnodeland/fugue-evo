@@ -258,9 +258,9 @@ pub trait Terminal:
     /// `type_code` identifies the terminal variant (a discriminant) and
     /// `payload` carries its associated value. The pair must satisfy the
     /// inverse relationship `Self::decode(self.encode()) == *self` so that
-    /// [`TreeGenome::from_trace`](crate::genome::traits::EvolutionaryGenome::from_trace)
+    /// [`TreeGenome::from_trace`](crate::genome::trace_genome::TraceGenome::from_trace)
     /// reproduces the exact terminal that
-    /// [`TreeGenome::to_trace`](crate::genome::traits::EvolutionaryGenome::to_trace)
+    /// [`TreeGenome::to_trace`](crate::genome::trace_genome::TraceGenome::to_trace)
     /// serialized.
     fn encode(&self) -> (f64, f64);
 

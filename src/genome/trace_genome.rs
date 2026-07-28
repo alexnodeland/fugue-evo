@@ -10,7 +10,7 @@
 //! address→value map at the genome's site addresses (`gene#i`, `bit#i`,
 //! `perm#i`, …) with zero stored log-probabilities. Probability mass is never
 //! carried by this encoding; it is recovered by scoring the trace under a
-//! genuine prior model (see [`crate::inference::GenomePrior`]), which is also
+//! genuine prior model (see [`crate::inference::prior::GenomePrior`]), which is also
 //! how the inference layer decodes a genome from a particle
 //! (`decode`-by-replay).
 

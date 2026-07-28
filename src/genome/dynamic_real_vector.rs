@@ -360,7 +360,7 @@ impl crate::genome::trace_genome::TraceGenome for DynamicRealVector {
     ///
     /// Stores genes at `"<trace_prefix()>#i"` and metadata at "meta#min_length",
     /// "meta#max_length" and "meta#length". The gene address prefix is taken
-    /// from [`Self::trace_prefix`] so that the prefix advertised by the trait and
+    /// from [`trace_prefix`](crate::genome::trace_genome::TraceGenome::trace_prefix) so that the prefix advertised by the trait and
     /// the prefix actually written can never diverge.
     fn to_trace(&self) -> Trace {
         let mut trace = Trace::default();
