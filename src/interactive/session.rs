@@ -6,11 +6,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[cfg(feature = "checkpoint")]
+#[cfg(all(feature = "checkpoint", not(target_arch = "wasm32")))]
 use std::fs::File;
-#[cfg(feature = "checkpoint")]
+#[cfg(all(feature = "checkpoint", not(target_arch = "wasm32")))]
 use std::io::{BufReader, BufWriter};
-#[cfg(feature = "checkpoint")]
+#[cfg(all(feature = "checkpoint", not(target_arch = "wasm32")))]
 use std::path::Path;
 
 use super::aggregation::FitnessAggregator;
@@ -384,8 +384,10 @@ where
     }
 }
 
-/// File-based session persistence (requires `checkpoint` feature)
-#[cfg(feature = "checkpoint")]
+/// File-based session persistence (requires the `checkpoint` feature and a
+/// target with a filesystem — see [`crate::checkpoint`] for why the second
+/// half of that is not a new restriction).
+#[cfg(all(feature = "checkpoint", not(target_arch = "wasm32")))]
 impl<G> InteractiveSession<G>
 where
     G: EvolutionaryGenome + Serialize + for<'de> Deserialize<'de>,
