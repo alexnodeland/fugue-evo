@@ -14,15 +14,22 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use fugue_evo::interactive::selection_strategy::SelectionStrategy;
+//! # use fugue_evo::interactive::aggregation::{AggregationModel, FitnessAggregator};
+//! # use fugue_evo::interactive::evaluator::Candidate;
+//! # use fugue_evo::prelude::RealVector;
+//! # use rand::SeedableRng;
+//! # let candidates: Vec<Candidate<RealVector>> = Vec::new();
+//! # let aggregator = FitnessAggregator::new(AggregationModel::default());
+//! # let mut rng = rand::rngs::StdRng::seed_from_u64(0);
 //!
 //! // Use uncertainty sampling with coverage bonus
 //! let strategy = SelectionStrategy::UncertaintySampling {
 //!     uncertainty_weight: 1.0,
 //! };
 //!
-//! let selected = strategy.select_batch(&candidates, &aggregator, 4);
+//! let selected: Vec<usize> = strategy.select_batch(&candidates, &aggregator, 4, &mut rng);
 //! ```
 
 use rand::prelude::*;

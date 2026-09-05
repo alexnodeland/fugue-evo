@@ -54,7 +54,7 @@ fugue_evo
 ├── interactive         # Human-in-the-loop
 ├── checkpoint          # State persistence
 ├── diagnostics         # Statistics and tracking
-├── fugue_integration   # PPL integration
+├── inference           # Evolution as inference (`ppl`): priors as programs, MH, tempered SMC, grammar GP
 └── error               # Error types
 ```
 

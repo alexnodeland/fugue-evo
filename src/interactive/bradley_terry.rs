@@ -18,9 +18,12 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust
+//! use fugue_evo::interactive::aggregation::ComparisonRecord;
 //! use fugue_evo::interactive::bradley_terry::{BradleyTerryModel, BradleyTerryOptimizer};
+//! use fugue_evo::interactive::evaluator::CandidateId;
 //!
+//! let candidate_ids = vec![CandidateId(0), CandidateId(1), CandidateId(2)];
 //! let comparisons = vec![
 //!     ComparisonRecord { winner: CandidateId(0), loser: CandidateId(1), generation: 0 },
 //!     ComparisonRecord { winner: CandidateId(0), loser: CandidateId(2), generation: 0 },
@@ -29,7 +32,7 @@
 //! let model = BradleyTerryModel::new(BradleyTerryOptimizer::default());
 //! let result = model.fit(&comparisons, &candidate_ids);
 //!
-//! let estimate = result.get_estimate(CandidateId(0));
+//! let estimate = result.get_estimate(CandidateId(0)).expect("candidate 0 was fitted");
 //! println!("Strength: {:.2} ± {:.2}", estimate.mean, estimate.std_error());
 //! ```
 

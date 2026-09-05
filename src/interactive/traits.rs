@@ -69,15 +69,16 @@ impl Default for EvaluationMode {
 ///
 /// # Example Implementation
 ///
-/// ```rust,ignore
+/// ```rust
 /// use fugue_evo::interactive::prelude::*;
+/// use fugue_evo::prelude::RealVector;
 ///
 /// struct ArtFitness {
 ///     mode: EvaluationMode,
 /// }
 ///
 /// impl InteractiveFitness for ArtFitness {
-///     type Genome = MyArtGenome;
+///     type Genome = RealVector;
 ///
 ///     fn evaluation_mode(&self) -> EvaluationMode {
 ///         self.mode
