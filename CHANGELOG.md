@@ -9,14 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2026-09-05
 
-**Audit follow-up (AUDIT-2026-09: EV-N1 … EV-N5, X-3, X-5).** Requires the
-unreleased fugue-ppl 0.2.3 (the sibling `../fugue` checkout at or after its
-FG-N1 … FG-N9 / X-5 fixes): this crate now calls
+**Audit follow-up (AUDIT-2026-09: EV-N1 … EV-N5, X-3, X-5).** Requires
+fugue-ppl **0.2.3** (its FG-N1 … FG-N9 / X-5 fixes): this crate now calls
 `adaptive_single_site_mh_cached`, `score_given_trace_reconciled`,
 `PopulationKernel::is_identity`, `NoKernel`, and relies on the
-support-based `f64` proposal selection. The path dependency's `version`
-requirement stays at `0.2.1` because fugue's manifest has not been bumped
-yet; a published `fugue-ppl 0.2.2` does **not** have these APIs.
+support-based `f64` proposal selection. The dependency's `version`
+requirement is `0.2.3` accordingly; a published `fugue-ppl 0.2.2` does
+**not** have these APIs, which is why the first publish attempt of 0.4.0
+(made while the requirement still read `0.2.1`) failed its dry run.
 
 ### Breaking
 
