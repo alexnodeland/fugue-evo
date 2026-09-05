@@ -35,6 +35,17 @@ use rand::Rng;
 use super::likelihood::GenomeLikelihood;
 use super::model::EvolutionModel;
 use super::prior::GenomePrior;
+use crate::error::GenomeError;
+
+fn finite_state(trace: Trace) -> Result<Trace, GenomeError> {
+    if trace.total_log_weight().is_finite() {
+        Ok(trace)
+    } else {
+        Err(GenomeError::ConstraintViolation(
+            "genome is outside the prior's support (target log-density is not finite)".to_string(),
+        ))
+    }
+}
 
 /// An MH chain over the fixed-β Boltzmann target `π_β ∝ p(x)·exp(β·f(x))`.
 pub struct EvolutionChain<P, L>
@@ -110,14 +121,36 @@ where
     /// program. Works for any prior — including grammar priors over trees —
     /// so a classic GA/GP result can seed an inference chain. Returns `None`
     /// if the genome is outside the prior's support (its target density is
-    /// `−∞`, which can never be left by an MH chain).
+    /// `−∞`, which can never be left by an MH chain) **or** cannot be scored
+    /// from its encoding alone: wrong dimension for the prior, or a likelihood
+    /// with latent nuisance sites (see [`Self::try_init_from`] for the reason
+    /// and [`Self::init_from_with_latents`] to draw them). Never panics
+    /// (EV-N3).
     pub fn init_from(&self, genome: &P::Genome) -> Option<Trace> {
-        let (_g, trace) = self.model.score(genome);
-        if trace.total_log_weight().is_finite() {
-            Some(trace)
-        } else {
-            None
-        }
+        self.try_init_from(genome).ok()
+    }
+
+    /// [`Self::init_from`] with the reason on failure:
+    /// [`EvolutionModel::score`]'s errors for a structural mismatch, or
+    /// [`GenomeError::ConstraintViolation`] for a genome outside the prior's
+    /// support.
+    pub fn try_init_from(&self, genome: &P::Genome) -> Result<Trace, GenomeError> {
+        let (_g, trace) = self.model.score(genome)?;
+        finite_state(trace)
+    }
+
+    /// Warm-start from a genome when the likelihood has **latent nuisance
+    /// sites** (an inferred noise scale, a Pareto weight): the genome's sites
+    /// come from its encoding, the latent ones are drawn from their priors
+    /// with `rng`, and the result is a complete, fully scored state. Same
+    /// errors as [`Self::try_init_from`].
+    pub fn init_from_with_latents<R: Rng>(
+        &self,
+        rng: &mut R,
+        genome: &P::Genome,
+    ) -> Result<Trace, GenomeError> {
+        let (_g, trace) = self.model.score_with_latents(rng, genome)?;
+        finite_state(trace)
     }
 
     /// One π_β-invariant transition. Moves ANY site type; honours

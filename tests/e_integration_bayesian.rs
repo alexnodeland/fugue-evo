@@ -85,7 +85,9 @@ fn e_integration_weighted_trace_is_boltzmann_weight() {
         EvolutionModel::new(UniformBoxPrior::new(bounds), Quadratic { center: 0.0 }).with_beta(1.5);
     let g = RealVector::new(vec![1.0, 0.0, -2.0]);
     let f = model.fitness_value(&g);
-    let trace = model.to_weighted_trace(&g);
+    let trace = model
+        .to_weighted_trace(&g)
+        .expect("genome matches the prior's dimension");
     assert!((trace.total_log_weight() - 1.5 * f).abs() < 1e-9);
 }
 

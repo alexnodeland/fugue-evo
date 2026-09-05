@@ -24,13 +24,61 @@
 //! double-count it).
 
 use fugue::runtime::handler::run;
-use fugue::runtime::interpreters::{PriorHandler, ScoreGivenTrace};
-use fugue::{factor, Model, ModelExt, Trace};
-use rand::Rng;
+use fugue::runtime::interpreters::PriorHandler;
+use fugue::{factor, score_given_trace_reconciled, Model, ModelExt, ReconcileReport, Trace};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 use super::likelihood::{FactorFitness, GenomeLikelihood};
 use super::prior::GenomePrior;
+use crate::error::GenomeError;
 use crate::fitness::traits::Fitness;
+
+/// Replay `model` over `base` and require a **complete, exact** assignment:
+/// every site the program visits is in `base` (with the right type) and every
+/// site of `base` is visited. Structural mismatches come back as errors
+/// instead of a panic (EV-N3).
+///
+/// Built on fugue's reconciling scorer rather than the strict one: the strict
+/// handler keeps running the program with `Default::default()` values after a
+/// missing site, and a program whose control flow depends on such a value can
+/// recurse without bound (a grammar reading a missing `#leaf` as "function
+/// node"). The reconciling scorer instead draws a missing site from its prior
+/// — from a fixed-seed generator here, so this function stays deterministic —
+/// and reports it; the draw only ever serves to terminate a replay that is
+/// rejected anyway.
+pub(crate) fn score_complete<A>(base: Trace, model: Model<A>) -> Result<(A, Trace), GenomeError> {
+    let mut rng = StdRng::seed_from_u64(0);
+    let (a, scored, report) = score_given_trace_reconciled(base, &mut rng, model)
+        .map_err(|e| GenomeError::InvalidStructure(e.to_string()))?;
+    check_exact(&report)?;
+    Ok((a, scored))
+}
+
+fn check_exact(report: &ReconcileReport) -> Result<(), GenomeError> {
+    if let Some(addr) = report.fresh_addresses.first() {
+        return Err(GenomeError::MissingAddress(addr.to_string()));
+    }
+    if !report.vanished_addresses.is_empty() {
+        let shown: Vec<String> = report
+            .vanished_addresses
+            .iter()
+            .take(3)
+            .map(|a| a.to_string())
+            .collect();
+        return Err(GenomeError::InvalidStructure(format!(
+            "encoding carries {} site(s) the program never visits: {}{}",
+            report.vanished_addresses.len(),
+            shown.join(", "),
+            if report.vanished_addresses.len() > 3 {
+                ", …"
+            } else {
+                ""
+            }
+        )));
+    }
+    Ok(())
+}
 
 /// A probabilistic model of an evolutionary population: a genome prior
 /// program, an observation program (likelihood), and an inverse temperature
@@ -76,15 +124,18 @@ where
     /// the "fitness as likelihood" weighted-trace contract (EV-52): a genuine
     /// `factor(β·f)` model run through
     /// [`TraceScoringHandler`](super::effect_handlers::TraceScoringHandler),
-    /// so the mass lands in `log_factors`.
-    pub fn to_weighted_trace(&self, genome: &P::Genome) -> Trace {
+    /// so the mass lands in `log_factors`. Fails with the prior's
+    /// [`GenomePrior::validate`] error (e.g. `DimensionMismatch`) for a genome
+    /// of the wrong shape, before the fitness is evaluated.
+    pub fn to_weighted_trace(&self, genome: &P::Genome) -> Result<Trace, GenomeError> {
+        self.prior.validate(genome)?;
         let logw = self.log_weight(genome);
         let base = self.prior.trace_of(genome);
         let (_r, trace) = run(
             super::effect_handlers::TraceScoringHandler::new(base),
             factor(logw),
         );
-        trace
+        Ok(trace)
     }
 }
 
@@ -187,25 +238,53 @@ where
     ///
     /// The returned trace satisfies `log π_β(g) = trace.total_log_weight()`
     /// and `log p(g) = trace.log_prior`. A genome outside the prior's support
-    /// scores `log_prior = −∞`.
+    /// scores `log_prior = −∞` (that is a valid score, not an error).
     ///
-    /// Note: if the likelihood contains latent nuisance sites, they are not
-    /// part of `trace_of(g)` and would abort a strict replay — score via the
-    /// SMC/MH drivers in that case (which sample them), or marginalize them
-    /// externally.
-    pub fn score(&self, genome: &P::Genome) -> (P::Genome, Trace) {
-        run(
-            ScoreGivenTrace {
-                base: self.prior.trace_of(genome),
-                trace: Trace::default(),
-            },
-            (self.target_model())(),
-        )
+    /// # Errors
+    ///
+    /// Never panics on a structural mismatch (EV-N3). Returns the prior's
+    /// [`GenomePrior::validate`] error for a genome of the wrong shape
+    /// ([`GenomeError::DimensionMismatch`] for the vector priors);
+    /// [`GenomeError::MissingAddress`] when the program visits a site the
+    /// encoding lacks — in particular a **latent nuisance site** of the
+    /// likelihood (`NoiseSpec::Infer`'s `sigma`, a Pareto weight), which is
+    /// not part of `trace_of(g)`: use [`Self::score_with_latents`] to draw it
+    /// from its prior, or the SMC/MH drivers, which sample it; and
+    /// [`GenomeError::InvalidStructure`] when the encoding carries sites the
+    /// program never visits.
+    pub fn score(&self, genome: &P::Genome) -> Result<(P::Genome, Trace), GenomeError> {
+        self.prior.validate(genome)?;
+        score_complete(self.prior.trace_of(genome), (self.target_model())())
     }
 
-    /// Unnormalised log target `log π_β(x) = log p(x) + β·log p(data|x)`.
-    pub fn log_boltzmann_target(&self, genome: &P::Genome) -> f64 {
-        self.score(genome).1.total_log_weight()
+    /// Like [`Self::score`], but a site the program visits that the genome's
+    /// encoding lacks — a latent nuisance parameter of the likelihood — is
+    /// **drawn from its prior** with `rng` and kept in the returned trace,
+    /// which is then a complete, fully scored state of the target (the shape
+    /// [`EvolutionChain::step`](super::mh::EvolutionChain::step) needs).
+    /// Sites of the encoding the program never visits are still an error.
+    pub fn score_with_latents<R: Rng>(
+        &self,
+        rng: &mut R,
+        genome: &P::Genome,
+    ) -> Result<(P::Genome, Trace), GenomeError> {
+        self.prior.validate(genome)?;
+        let (g, scored, report) =
+            score_given_trace_reconciled(self.prior.trace_of(genome), rng, (self.target_model())())
+                .map_err(|e| GenomeError::InvalidStructure(e.to_string()))?;
+        if !report.vanished_addresses.is_empty() {
+            check_exact(&ReconcileReport {
+                fresh_addresses: Vec::new(),
+                vanished_addresses: report.vanished_addresses,
+            })?;
+        }
+        Ok((g, scored))
+    }
+
+    /// Unnormalised log target `log π_β(x) = log p(x) + β·log p(data|x)`;
+    /// `−∞` outside the prior's support. Errors as [`Self::score`].
+    pub fn log_boltzmann_target(&self, genome: &P::Genome) -> Result<f64, GenomeError> {
+        Ok(self.score(genome)?.1.total_log_weight())
     }
 }
 
@@ -240,7 +319,9 @@ pub(crate) mod tests {
         let model = EvolutionModel::new(prior, PtrFitness(quad_origin)).with_beta(2.0);
         let genome = RealVector::new(vec![1.0, 2.0]);
         let f = model.fitness_value(&genome); // -0.5*(1+4) = -2.5
-        let trace = model.to_weighted_trace(&genome);
+        let trace = model
+            .to_weighted_trace(&genome)
+            .expect("matching dimension");
         assert!((trace.total_log_weight() - 2.0 * f).abs() < 1e-9);
         assert!((trace.log_factors - 2.0 * f).abs() < 1e-9);
         assert!(trace.total_log_weight().abs() > 1e-6);
@@ -252,7 +333,7 @@ pub(crate) mod tests {
         let prior = GaussianPrior::new(0.0, 2.0, 2);
         let model = EvolutionModel::new(prior, PtrFitness(quad_origin)).with_beta(1.5);
         let g = RealVector::new(vec![0.5, -1.0]);
-        let (decoded, scored) = model.score(&g);
+        let (decoded, scored) = model.score(&g).expect("matching dimension");
         assert_eq!(decoded.genes(), g.genes());
         assert!((scored.log_factors - 1.5 * quad_origin(&g)).abs() < 1e-12);
         assert!(scored.log_prior.is_finite());
@@ -266,7 +347,98 @@ pub(crate) mod tests {
         let prior = UniformBoxPrior::new(MultiBounds::symmetric(1.0, 1));
         let model = EvolutionModel::new(prior, PtrFitness(quad_origin));
         let g = RealVector::new(vec![3.0]);
-        assert_eq!(model.log_boltzmann_target(&g), f64::NEG_INFINITY);
+        assert_eq!(model.log_boltzmann_target(&g), Ok(f64::NEG_INFINITY));
+    }
+
+    /// EV-N3: a `RealVector` shorter or longer than the prior's dimension is
+    /// an error, not a panic (short) or a silent truncation (long) — for
+    /// `score`, `log_boltzmann_target`, `to_weighted_trace` and
+    /// `EvolutionChain::init_from` alike.
+    #[test]
+    fn test_score_rejects_dimension_mismatch() {
+        let prior = GaussianPrior::new(0.0, 2.0, 3);
+        let model = EvolutionModel::new(prior, PtrFitness(quad_origin));
+        let short = RealVector::new(vec![0.5, -1.0]);
+        let long = RealVector::new(vec![0.5, -1.0, 0.0, 2.0]);
+        let mismatch = |expected, actual| GenomeError::DimensionMismatch { expected, actual };
+        assert_eq!(model.score(&short).map(|_| ()), Err(mismatch(3, 2)));
+        assert_eq!(model.score(&long).map(|_| ()), Err(mismatch(3, 4)));
+        assert_eq!(model.log_boltzmann_target(&short), Err(mismatch(3, 2)));
+        assert_eq!(
+            model.to_weighted_trace(&long).map(|_| ()),
+            Err(mismatch(3, 4))
+        );
+        let chain = crate::inference::mh::EvolutionChain::new(model.clone());
+        assert!(chain.init_from(&short).is_none());
+        assert_eq!(chain.try_init_from(&long).map(|_| ()), Err(mismatch(3, 4)));
+        // The right dimension still scores.
+        assert!(model.score(&RealVector::new(vec![0.5, -1.0, 0.0])).is_ok());
+    }
+
+    /// EV-N3: a likelihood with a latent nuisance site (`sigma`) cannot be
+    /// scored from the genome's encoding alone — `score` says which site is
+    /// missing instead of panicking, `init_from` returns `None`, and
+    /// `score_with_latents` / `init_from_with_latents` draw the site from its
+    /// prior and return a complete, fully scored state.
+    #[test]
+    fn test_latent_site_likelihood_is_an_error_not_a_panic() {
+        use crate::inference::likelihood::GenomeLikelihood;
+        use fugue::{addr, sample, Normal, Uniform};
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        #[derive(Clone)]
+        struct LatentNoise {
+            y: f64,
+        }
+        impl GenomeLikelihood<RealVector> for LatentNoise {
+            fn model(&self, g: &RealVector, beta: f64) -> Model<()> {
+                let (mu, y) = (g.genes()[0], self.y);
+                sample(addr!("sigma"), Uniform::new(0.1, 2.0).unwrap()).bind(move |sigma| {
+                    crate::inference::likelihood::tempered_observe(
+                        addr!("y"),
+                        Normal::new(mu, sigma).unwrap(),
+                        y,
+                        beta,
+                    )
+                })
+            }
+        }
+
+        let model = EvolutionModel::from_likelihood(
+            GaussianPrior::new(0.0, 2.0, 1),
+            LatentNoise { y: 0.4 },
+        );
+        let g = RealVector::new(vec![0.5]);
+        assert_eq!(
+            model.score(&g).map(|_| ()),
+            Err(GenomeError::MissingAddress("sigma".to_string()))
+        );
+        let chain = crate::inference::mh::EvolutionChain::new(model.clone());
+        assert!(chain.init_from(&g).is_none());
+
+        let mut rng = StdRng::seed_from_u64(1);
+        let (decoded, scored) = model
+            .score_with_latents(&mut rng, &g)
+            .expect("latent drawn");
+        assert_eq!(decoded.genes(), g.genes());
+        let sigma = scored.get_f64(&addr!("sigma")).expect("sigma site present");
+        assert!((0.1..2.0).contains(&sigma));
+        assert!(scored.total_log_weight().is_finite());
+        let analytic = fugue::Distribution::log_prob(&Normal::new(0.5, sigma).unwrap(), &0.4);
+        assert!((scored.log_likelihood - analytic).abs() < 1e-12);
+
+        // …and that state drives the chain.
+        let mut chain = chain;
+        let init = chain
+            .init_from_with_latents(&mut rng, &g)
+            .expect("latent drawn");
+        let mut current = init;
+        for _ in 0..50 {
+            let (_g, t) = chain.step(&mut rng, &current);
+            assert!(t.get_f64(&addr!("sigma")).is_some());
+            current = t;
+        }
     }
 
     #[test]
@@ -314,7 +486,7 @@ pub(crate) mod tests {
         };
         let model = EvolutionModel::from_likelihood(prior, data.clone());
         let g = RealVector::new(vec![0.5]);
-        let (_, scored) = model.score(&g);
+        let (_, scored) = model.score(&g).expect("no latent sites");
         let normal = Normal::new(0.5, 0.5).unwrap();
         let analytic: f64 = data
             .ys

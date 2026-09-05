@@ -17,8 +17,6 @@
 
 use std::marker::PhantomData;
 
-use fugue::runtime::handler::run;
-use fugue::runtime::interpreters::ScoreGivenTrace;
 use fugue::{
     adaptive_smc_with_kernel, decode_particle, score_given_trace_reconciled, Address, Model,
     NoKernel, Particle, PopulationKernel, ResamplingMethod, SMCConfig, Trace,
@@ -522,16 +520,15 @@ impl EvolutionSMC {
     }
 }
 
-/// Score a genome's canonical trace under an arbitrary model — convenience
-/// used by readouts and tests.
-pub fn score_genome<G: TraceGenome, A>(genome: &G, model: Model<A>) -> (A, Trace) {
-    run(
-        ScoreGivenTrace {
-            base: genome.to_trace(),
-            trace: Trace::default(),
-        },
-        model,
-    )
+/// Score a genome's canonical trace ([`TraceGenome::to_trace`]) under an
+/// arbitrary model — convenience used by readouts and tests. Errors instead of
+/// panicking when the model's address structure does not match the encoding
+/// (EV-N3); see [`EvolutionModel::score`] for the error cases.
+pub fn score_genome<G: TraceGenome, A>(
+    genome: &G,
+    model: Model<A>,
+) -> Result<(A, Trace), crate::error::GenomeError> {
+    super::model::score_complete(genome.to_trace(), model)
 }
 
 #[cfg(test)]
@@ -542,6 +539,8 @@ mod tests {
     use crate::genome::traits::RealValuedGenome;
     use crate::inference::model::tests::PtrFitness;
     use crate::inference::prior::GaussianPrior;
+    use fugue::runtime::handler::run;
+    use fugue::runtime::interpreters::ScoreGivenTrace;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 

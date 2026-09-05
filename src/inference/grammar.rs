@@ -34,10 +34,10 @@
 //!
 //! Note: tree genomes are decoded from particles by replay (the model returns
 //! the built [`TreeGenome`]); the flat [`TraceGenome`](crate::genome::trace_genome::TraceGenome) encoding of
-//! `TreeGenome` is unrelated to this grammar's address scheme, so
-//! `EvolutionModel::score`/`to_weighted_trace` (which replay `to_trace`) do
-//! not apply to grammar-driven trees — use the SMC/MH drivers, which never
-//! need them.
+//! `TreeGenome` is unrelated to this grammar's address scheme; the prior
+//! therefore overrides [`GenomePrior::trace_of`] with its own encoding, which
+//! is what `EvolutionModel::score` / `to_weighted_trace` /
+//! `EvolutionChain::init_from` replay.
 
 use fugue::{addr, sample, Address, Bernoulli, Categorical, Model, ModelExt, Normal, Trace};
 
@@ -510,7 +510,7 @@ mod tests {
             6,
         );
         let model = crate::inference::model::EvolutionModel::new(prior.clone(), Zero);
-        let (_g, scored) = model.score(&tree);
+        let (_g, scored) = model.score(&tree).expect("in-grammar tree");
 
         // Hand-computed PCFG log-prior:
         //   root: not-leaf (1-0.4) · func Add (1/4)
