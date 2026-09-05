@@ -8,7 +8,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fugue-evo = "0.1"
+fugue-evo = "0.4"
 rand = "0.8"
 ```
 
@@ -16,11 +16,11 @@ The `rand` crate is required for random number generation in evolutionary algori
 
 ## Feature Flags
 
-Fugue-evo provides several optional features:
+Fugue-evo is two layers behind two features, both on by default:
 
 ```toml
 [dependencies]
-fugue-evo = { version = "0.1", features = ["parallel", "checkpoint"] }
+fugue-evo = { version = "0.4", features = ["std", "ppl", "classic", "parallel", "checkpoint"] }
 ```
 
 ### Available Features
@@ -28,26 +28,35 @@ fugue-evo = { version = "0.1", features = ["parallel", "checkpoint"] }
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `std` | Yes | Standard library support |
-| `parallel` | Yes | Rayon-based parallel fitness evaluation |
-| `checkpoint` | Yes | Save/restore evolution state to files |
+| `ppl` | Yes | The inference layer: priors as programs, `EvolutionModel`, MH / tempered SMC, grammar GP (adds the `fugue-ppl` dependency) |
+| `classic` | Yes | The classic EC toolkit: SimpleGA, CMA-ES, NSGA-II, Island Model, operators, interactive GA, checkpointing (owns the `nalgebra`, `rand_chacha`, `serde_json` dependencies) |
+| `parallel` | Yes | Rayon-based parallel fitness evaluation (classic code paths) |
+| `checkpoint` | Yes | Save/restore evolution state to files (classic code paths) |
 
-### Minimal Installation
+The minimum supported Rust version is 1.87 (inherited from `fugue-ppl`).
 
-For embedded or no-std environments:
+### Inference layer only
 
-```toml
-[dependencies]
-fugue-evo = { version = "0.1", default-features = false }
-```
-
-### Full Installation
-
-To enable all features:
+The configuration a downstream probabilistic-programming user wants — no
+classic EC code and none of its dependencies (this is also the configuration
+to build for `wasm32-unknown-unknown`):
 
 ```toml
 [dependencies]
-fugue-evo = { version = "0.1", features = ["std", "parallel", "checkpoint"] }
+fugue-evo = { version = "0.4", default-features = false, features = ["std", "ppl"] }
 ```
+
+### Classic toolkit only
+
+The standalone EC toolkit with no probabilistic-programming dependency at all:
+
+```toml
+[dependencies]
+fugue-evo = { version = "0.4", default-features = false, features = ["std", "parallel", "checkpoint", "classic"] }
+```
+
+Both of these configurations are built and tested in CI alongside
+`--all-features`.
 
 ## WASM Support
 

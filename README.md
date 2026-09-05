@@ -23,7 +23,7 @@ fugue-evo runs evolution as inference. The prior over genomes is a user-written 
 - **`ArithmeticGrammarPrior`** — genetic programming over a probabilistic grammar: subtree mutation and crossover are generic trace moves. `examples/symbolic_regression_inference.rs` does symbolic regression as exact Bayesian inference.
 - **`ParetoScalarization`** — multi-objective optimization as inference: the scalarization weight is a latent model site, so the posterior marginal *traces the Pareto front* and each particle knows where on the front it lives.
 
-The **classic EC toolkit** (`classic` feature, on by default) — SimpleGA, CMA-ES, NSGA-II, Island Model, ES, EDA/UMDA, operators, checkpointing, the WASM surface — remains fully standalone: build with `--no-default-features --features std,parallel,checkpoint,classic` and there is no probabilistic-programming dependency at all. Conversely, `--features std,ppl` builds the inference layer with no classic EC code. CMA-ES and NSGA-II are deliberately *not* reframed as inference (CMA-ES is not a posterior sampler); they serve as baselines.
+The **classic EC toolkit** (`classic` feature, on by default) — SimpleGA, CMA-ES, NSGA-II, Island Model, ES, EDA/UMDA, operators, checkpointing, the WASM surface — remains fully standalone: build with `--no-default-features --features std,parallel,checkpoint,classic` and there is no probabilistic-programming dependency at all. Conversely, `--no-default-features --features std,ppl` builds the inference layer with no classic EC code — and none of the classic layer's dependencies: `nalgebra`, `rand_chacha` and `serde_json` are gated behind `classic`, so a `std,ppl` build (or its WASM bundle) does not compile `nalgebra` or `serde_json` at all (`rand_chacha` stays only as `rand`'s own `StdRng` backend). Both configurations are built and tested in CI (`make feature-matrix`: `std,ppl` natively and on `wasm32-unknown-unknown`, `std,parallel,checkpoint,classic` natively). The minimum supported Rust version is 1.87, inherited from `fugue-ppl`. CMA-ES and NSGA-II are deliberately *not* reframed as inference (CMA-ES is not a posterior sampler); they serve as baselines.
 
 ## Features
 
@@ -40,7 +40,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fugue-evo = "0.1"
+fugue-evo = "0.4"
 ```
 
 Basic optimization example:
