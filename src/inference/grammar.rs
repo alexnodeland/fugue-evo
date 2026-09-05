@@ -42,7 +42,8 @@
 use fugue::{addr, sample, Address, Bernoulli, Categorical, Model, ModelExt, Normal, Trace};
 
 /// The mask-closure type consumed by [`fugue::CrossoverKernel`].
-pub type CrossoverMaskFn = Box<dyn Fn(&Trace, &Trace, &mut dyn rand::RngCore) -> Vec<Address>>;
+pub type CrossoverMaskFn =
+    Box<dyn Fn(&Trace, &Trace, &mut dyn rand::RngCore) -> Vec<Address> + Send>;
 
 use super::prior::GenomePrior;
 use crate::genome::tree::{ArithmeticFunction, ArithmeticTerminal, Function, TreeGenome, TreeNode};

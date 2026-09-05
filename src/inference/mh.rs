@@ -173,6 +173,50 @@ mod tests {
         );
     }
 
+    /// Regression: FG-N1 downstream — the same truncated-exponential anchor on
+    /// `[-0.5, 0.5]`. Under the pre-fix fugue proposal selector a `Uniform`
+    /// site whose support excludes `-1` but contains negatives was put on a
+    /// log-space walk whenever its first draw was positive, so the chain
+    /// inherited the sign of its initial state and could never cross zero
+    /// (posterior mean ≈ +0.27 or ≈ −0.23 instead of the analytic
+    /// `a·coth(a) − 1 = 0.0820` for `ρ ∝ eˣ` on `[−a, a]`, `a = 1/2`). fugue
+    /// now selects the proposal from `Distribution::support()` (Reflect for a
+    /// bounded site), so the chain driven through `EvolutionChain::step`
+    /// visits both signs with the analytic mass `P(x > 0) = 0.6225`.
+    #[test]
+    fn test_mh_bounded_prior_containing_negatives_mixes_across_zero() {
+        let prior = UniformBoxPrior::new(MultiBounds::new(vec![Bounds::new(-0.5, 0.5)]));
+        let model = EvolutionModel::new(prior, PtrFitness(linear_x0)).with_beta(1.0);
+        let analytic_mean = 0.5 / (0.5f64).tanh() - 1.0;
+        let analytic_p_pos = (0.5f64.exp() - 1.0) / (0.5f64.exp() - (-0.5f64).exp());
+        for seed in [1u64, 2, 3, 20260710] {
+            let mut chain = EvolutionChain::new(model.clone());
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut current = chain.init(&mut rng);
+            let mut samples = Vec::new();
+            for i in 0..40_000 {
+                let (g, t) = chain.step(&mut rng, &current);
+                current = t;
+                let x = g.genes()[0];
+                assert!((-0.5..=0.5).contains(&x), "MH sample escaped bounds: {}", x);
+                if i >= 5_000 {
+                    samples.push(x);
+                }
+            }
+            let n = samples.len() as f64;
+            let mean = samples.iter().sum::<f64>() / n;
+            let p_pos = samples.iter().filter(|&&x| x > 0.0).count() as f64 / n;
+            assert!(
+                (mean - analytic_mean).abs() < 0.04,
+                "seed {seed}: posterior mean {mean} deviates from analytic {analytic_mean}"
+            );
+            assert!(
+                (p_pos - analytic_p_pos).abs() < 0.08,
+                "seed {seed}: P(x > 0) = {p_pos} vs analytic {analytic_p_pos} — chain stuck on one sign"
+            );
+        }
+    }
+
     /// New regression (dead-chain fix): a BitString chain must actually move.
     /// The old `EvolutionStep::propose` cloned every non-F64 choice unchanged,
     /// making this exact scenario a silent no-op forever.
