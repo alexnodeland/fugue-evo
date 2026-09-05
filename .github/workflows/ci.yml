@@ -121,13 +121,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `key` is the cache-key-safe spelling: actions/cache rejects keys
+          # containing commas, and every feature list here has one.
           - name: std,ppl
+            key: std-ppl
             features: std,ppl
             target: ""
           - name: std,ppl wasm32
+            key: std-ppl-wasm32
             features: std,ppl
             target: wasm32-unknown-unknown
           - name: std,parallel,checkpoint,classic
+            key: classic
             features: std,parallel,checkpoint,classic
             target: ""
     steps:
@@ -148,9 +153,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-features-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-features-${{ matrix.key }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-features-${{ matrix.name }}-
+            ${{ runner.os }}-cargo-features-${{ matrix.key }}-
 
       - name: Check (all targets)
         if: matrix.target == ''
