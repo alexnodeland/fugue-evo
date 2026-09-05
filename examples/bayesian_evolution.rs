@@ -90,8 +90,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let analytic_var = 1.0 / tau;
 
     for coord in 0..DIM {
-        let mean = result.weighted_mean(coord);
-        let var = result.weighted_variance(coord);
+        let mean = result
+            .weighted_mean(coord)
+            .expect("real coordinate present");
+        let var = result
+            .weighted_variance(coord)
+            .expect("real coordinate present");
         println!(
             "  coord {coord}: posterior mean {mean:7.4}  (analytic {analytic_mean:7.4})   \
              variance {var:6.4}  (analytic {analytic_var:6.4})"

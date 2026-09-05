@@ -132,12 +132,21 @@ where
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use fugue_evo::interactive::prelude::*;
+/// use fugue_evo::prelude::*;
+/// # fn get_user_feedback(_request: &EvaluationRequest<RealVector>) -> EvaluationResponse {
+/// #     unimplemented!("collect a person's feedback")
+/// # }
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
-/// let mut iga = InteractiveGABuilder::<MyGenome>::new()
+/// let mut iga = InteractiveGABuilder::<RealVector, (), (), ()>::new()
 ///     .population_size(12)
 ///     .evaluation_mode(EvaluationMode::BatchSelection)
+///     .bounds(MultiBounds::symmetric(1.0, 4))
+///     .selection(TournamentSelection::new(2))
+///     .crossover(SbxCrossover::new(15.0))
+///     .mutation(PolynomialMutation::new(20.0))
 ///     .build()?;
 ///
 /// let mut rng = rand::thread_rng();
@@ -157,6 +166,8 @@ where
 ///         }
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct InteractiveGA<G, S, C, M>
 where
@@ -835,10 +846,13 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// .selection_strategy(SelectionStrategy::UncertaintySampling {
-    ///     uncertainty_weight: 1.0,
-    /// })
+    /// ```rust
+    /// # use fugue_evo::interactive::prelude::*;
+    /// # use fugue_evo::prelude::RealVector;
+    /// let builder = InteractiveGABuilder::<RealVector, (), (), ()>::new()
+    ///     .selection_strategy(SelectionStrategy::UncertaintySampling {
+    ///         uncertainty_weight: 1.0,
+    ///     });
     /// ```
     pub fn selection_strategy(mut self, strategy: SelectionStrategy) -> Self {
         self.config.selection_strategy = strategy;

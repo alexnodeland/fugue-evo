@@ -57,8 +57,10 @@ fn e_integration_smc_targets_conjugate_posterior() {
     let analytic_mean = center / tau;
     let analytic_var = 1.0 / tau;
 
-    let mean = result.weighted_mean(0);
-    let var = result.weighted_variance(0);
+    let mean = result.weighted_mean(0).expect("real coordinate present");
+    let var = result
+        .weighted_variance(0)
+        .expect("real coordinate present");
 
     assert!(
         (mean - analytic_mean).abs() < 0.2,
@@ -85,7 +87,9 @@ fn e_integration_weighted_trace_is_boltzmann_weight() {
         EvolutionModel::new(UniformBoxPrior::new(bounds), Quadratic { center: 0.0 }).with_beta(1.5);
     let g = RealVector::new(vec![1.0, 0.0, -2.0]);
     let f = model.fitness_value(&g);
-    let trace = model.to_weighted_trace(&g);
+    let trace = model
+        .to_weighted_trace(&g)
+        .expect("genome matches the prior's dimension");
     assert!((trace.total_log_weight() - 1.5 * f).abs() < 1e-9);
 }
 

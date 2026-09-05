@@ -15,6 +15,7 @@
 
 use fugue::{addr, plate, sample, Bernoulli, Categorical, Model, ModelExt, Normal, Uniform};
 
+use crate::error::GenomeError;
 use crate::genome::bit_string::BitString;
 use crate::genome::bounds::MultiBounds;
 use crate::genome::permutation::Permutation;
@@ -48,6 +49,29 @@ pub trait GenomePrior: Clone + Send + Sync + 'static {
     /// chain warm-starts work for any genome the prior can express.
     fn trace_of(&self, genome: &Self::Genome) -> fugue::Trace {
         genome.to_trace()
+    }
+
+    /// Check that `genome` has the shape this prior generates, **before** its
+    /// encoding is replayed through a program. The vector priors here report
+    /// [`GenomeError::DimensionMismatch`] for a genome whose length differs
+    /// from the prior's dimension — a shorter one would leave the program
+    /// visiting sites the encoding lacks, a longer one would carry sites the
+    /// program never visits (previously replay panicked on the former and
+    /// silently truncated the latter). The default accepts everything; priors
+    /// whose `trace_of` is total over their genome type (the grammar prior)
+    /// need nothing more, because structural mismatches are caught by the
+    /// replay itself in [`EvolutionModel::score`](super::model::EvolutionModel::score).
+    fn validate(&self, genome: &Self::Genome) -> Result<(), GenomeError> {
+        let _ = genome;
+        Ok(())
+    }
+}
+
+fn check_dimension(expected: usize, actual: usize) -> Result<(), GenomeError> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(GenomeError::DimensionMismatch { expected, actual })
     }
 }
 
@@ -89,6 +113,10 @@ impl GenomePrior for UniformBoxPrior {
         })
         .map(|genes| RealVector::from_genes(genes).expect("plate produced genes"))
     }
+
+    fn validate(&self, genome: &RealVector) -> Result<(), GenomeError> {
+        check_dimension(self.bounds.dimension().max(1), genome.genes().len())
+    }
 }
 
 /// Independent Gaussian `N(mean, std²)` prior on every real coordinate.
@@ -117,6 +145,10 @@ impl GenomePrior for GaussianPrior {
             sample(addr!("gene", i), Normal::new(mean, std).expect("valid Gaussian prior"))
         })
         .map(|genes| RealVector::from_genes(genes).expect("plate produced genes"))
+    }
+
+    fn validate(&self, genome: &RealVector) -> Result<(), GenomeError> {
+        check_dimension(self.dim.max(1), genome.genes().len())
     }
 }
 
@@ -153,6 +185,10 @@ impl GenomePrior for BitStringPrior {
             sample(addr!("bit", i), Bernoulli::new(p).expect("valid Bernoulli prior"))
         })
         .map(|bits| BitString::from_bits(bits).expect("plate produced bits"))
+    }
+
+    fn validate(&self, genome: &BitString) -> Result<(), GenomeError> {
+        check_dimension(self.len.max(1), genome.bits().len())
     }
 }
 
@@ -210,6 +246,10 @@ impl GenomePrior for PermutationPrior {
             let perm: Vec<usize> = ranks.into_iter().map(|r| available.remove(r)).collect();
             Permutation::from_permutation(perm).expect("Lehmer decode produced a permutation")
         })
+    }
+
+    fn validate(&self, genome: &Permutation) -> Result<(), GenomeError> {
+        check_dimension(self.n, genome.permutation().len())
     }
 }
 
@@ -279,6 +319,35 @@ mod tests {
             prior.model(),
         );
         assert_eq!(scored.log_prior, f64::NEG_INFINITY);
+    }
+
+    /// EV-N3: the vector priors reject genomes of the wrong dimension before
+    /// any replay, with the exact expected/actual pair.
+    #[test]
+    fn test_vector_priors_validate_dimension() {
+        let g = GaussianPrior::new(0.0, 1.0, 3);
+        assert_eq!(g.validate(&RealVector::new(vec![0.0; 3])), Ok(()));
+        assert_eq!(
+            g.validate(&RealVector::new(vec![0.0; 2])),
+            Err(GenomeError::DimensionMismatch {
+                expected: 3,
+                actual: 2
+            })
+        );
+        let u = UniformBoxPrior::new(MultiBounds::symmetric(1.0, 2));
+        assert_eq!(
+            u.validate(&RealVector::new(vec![0.0; 5])),
+            Err(GenomeError::DimensionMismatch {
+                expected: 2,
+                actual: 5
+            })
+        );
+        let b = BitStringPrior::uniform(4);
+        assert!(b.validate(&BitString::new(vec![true; 4])).is_ok());
+        assert!(b.validate(&BitString::new(vec![true; 3])).is_err());
+        let p = PermutationPrior::new(4);
+        assert!(p.validate(&Permutation::new(vec![0, 1, 2, 3])).is_ok());
+        assert!(p.validate(&Permutation::new(vec![0, 1, 2])).is_err());
     }
 
     #[test]

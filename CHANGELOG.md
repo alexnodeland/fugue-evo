@@ -7,6 +7,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-05
+
+**Audit follow-up (AUDIT-2026-09: EV-N1 … EV-N5, X-3, X-5).** Requires the
+unreleased fugue-ppl 0.2.3 (the sibling `../fugue` checkout at or after its
+FG-N1 … FG-N9 / X-5 fixes): this crate now calls
+`adaptive_single_site_mh_cached`, `score_given_trace_reconciled`,
+`PopulationKernel::is_identity`, `NoKernel`, and relies on the
+support-based `f64` proposal selection. The path dependency's `version`
+requirement stays at `0.2.1` because fugue's manifest has not been bumped
+yet; a published `fugue-ppl 0.2.2` does **not** have these APIs.
+
+### Breaking
+
+- **`CrossoverMaskFn` is `Box<dyn Fn(..) -> Vec<Address> + Send>`**,
+  matching fugue's `CrossoverKernel::mask`. Closures that capture only
+  `Send` state — every mask in this crate — already satisfy it.
+- **`EvolutionModel::score`, `log_boltzmann_target`, `to_weighted_trace`
+  and `smc::score_genome` return `Result<_, GenomeError>`** (EV-N3, below).
+- **`EvolutionPosterior::weighted_mean` / `weighted_variance` return
+  `Option<f64>`**: `None` when no particle carries the real coordinate
+  `<prefix>#coord` — a tree genome, a coordinate past the genome's
+  dimension, an empty population — where they used to return a silent
+  `0.0` (EV-N5).
+- **`nalgebra`, `rand_chacha` and `serde_json` are optional, gated behind
+  `classic`** (`classic = ["dep:nalgebra", "dep:rand_chacha",
+  "dep:serde_json"]`). A `--no-default-features --features std,ppl` build —
+  auracle's configuration, and its WASM bundle — no longer compiles
+  `nalgebra` or `serde_json` at all (`rand_chacha` remains in that graph only
+  as `rand`'s own `StdRng` backend, which is not this crate's to gate).
+  Nothing changes for default-feature users; a downstream crate that
+  used one of these through fugue-evo's dependency graph without depending
+  on it must add it (EV-N4 / X-3).
+- **`EvolutionModel::with_beta` panics on a non-finite `β` and
+  `with_temperature` on `T ≤ 0` or non-finite `T`.** `T = 0` used to set
+  `β = ∞`, building `factor(∞·f(x))` — `NaN` wherever `f = 0` — a target no
+  sampler can move on. Negative `β` still clamps to `0` (the prior).
+  Optimizer mode is `EvolutionSMC::anneal` with a large finite `beta_max`
+  (EV-N5).
+- **`rust-version = "1.87"`** is declared (fugue-ppl requires it); the
+  crate never built on older toolchains, it just did not say so (X-2).
+
+### Fixed
+
+- **`EvoSmcConfig::default()` no longer panics on variable-structure priors,
+  and grammar priors can be annealed (EV-N1).** The generic crossover mask
+  was a random subset of the *first* parent's addresses; on the grammar
+  prior `swap_block` could move a site the partner lacks out of a child,
+  and fugue's `ScoreGivenTrace` re-score panicked on it — so every grammar
+  test and example passed `crossover: None`, and `anneal` (which had no
+  `_with_kernel` variant) could not be used on trees at all.
+
+  Address-set intersection is not enough: exchanging a structural site
+  whose value differs between the parents (`node#leaf` on a leaf-rooted vs
+  a function-rooted tree) opens a branch the child has no choices for. The
+  new `SharedSiteCrossover` kernel (a `fugue::PopulationKernel`, what
+  `EvoSmcConfig::crossover` now builds) swaps a coin-flipped subset of the
+  addresses present in **both** parents with the same value type —
+  value-independent and pair-symmetric — and re-scores each child with
+  `score_given_trace_reconciled`, accepting the pair only when neither
+  report lists a fresh or a vanished site. An accepted pair therefore has
+  exactly the parents' address sets, the swap is an involution, and the
+  rejected proposals are self-loops: the move is symmetric and leaves the
+  product of tempered targets invariant. On a fixed-structure prior it is
+  exactly fugue's `CrossoverKernel`; on a variable-structure prior it
+  exchanges constants, variable indices and same-arity function choices,
+  never structure — documented on `CrossoverConfig`. Subtree grafts remain
+  the model-aware `subtree_crossover_mask` through `run_with_kernel` and
+  the new **`EvolutionSMC::anneal_with_kernel`**. `shared_site_crossover_mask`
+  is exported for callers building fugue's kernel on a fixed-structure model.
+
+  The reconciling scorer is used instead of the strict one deliberately:
+  `StrictScoreGivenTrace` hands the program `Default::default()` after
+  recording a missing site, and the grammar reads a missing `#leaf` as
+  `false` ("function node") and recurses without bound — a stack overflow
+  reproduced while building this fix. Pinned by
+  `test_default_config_runs_on_grammar_prior`, `test_anneal_runs_on_grammar_prior`
+  and `test_shared_site_crossover_rejects_structural_mismatch`; the
+  fixed-structure crossover anchor still reproduces the conjugate posterior.
+- **`EvolutionChain::step` honours `override_site` and costs one model
+  execution (EV-N2 / X-5).** `step` ran `adaptive_single_site_mh`, which
+  ignored the chain's override table (only `run_chain` passed it through)
+  and re-scored `current` on every call — two program executions, hence two
+  fitness evaluations, per transition. It now delegates to the new
+  **`step_scored`** — one call into fugue's
+  `adaptive_single_site_mh_cached` with the overrides; `None` on rejection —
+  and on rejection decodes the genome by replaying the **prior program
+  only** (**`decode`**), so the fitness is evaluated exactly once per step.
+  `step`'s `(genome, trace)` signature is unchanged. The contract is now
+  stated on `step`: `current` must come from `init`, `init_from` or a
+  previous `step`/`step_scored`; a `to_trace`/`trace_of` trace (per-site
+  `logp = 0`) fed straight to `step` over-accepts structure-shrinking moves
+  until the first acceptance. Bounded `Uniform` sites need no override:
+  fugue selects the reflected walk from `Distribution::support()`, so
+  `UniformBoxPrior` mixes through `step()` out of the box — pinned by the
+  EV-90 anchor re-run on `[-0.5, 0.5]` over four seeds
+  (`test_mh_bounded_prior_containing_negatives_mixes_across_zero`: analytic
+  mean `a·coth(a) − 1 = 0.0820`, `P(x > 0) = 0.6225`; the pre-fix fugue
+  selector confined this chain to the sign of its first state). Also
+  pinned by `test_step_honours_override_site` and
+  `test_step_costs_one_fitness_evaluation`.
+- **`score` / `init_from` / `to_weighted_trace` return errors instead of
+  panicking on a structural mismatch (EV-N3).** A `RealVector` shorter than
+  the prior's dimension panicked, a longer one was silently truncated, and
+  any likelihood with a latent nuisance site (`NoiseSpec::Infer`, a Pareto
+  weight) made `init_from` panic on every genome. `GenomePrior` gains
+  `validate(&genome) -> Result<(), GenomeError>` (the vector priors return
+  `DimensionMismatch { expected, actual }`); `score` reports
+  `MissingAddress(site)` for a site the program visits that the encoding
+  lacks (a latent site) and `InvalidStructure` for sites the program never
+  visits; out-of-support still scores `−∞`. New: `score_with_latents(rng,
+  genome)` draws the latent sites from their priors and returns a complete
+  scored state; `EvolutionChain::try_init_from` gives the reason
+  `init_from` (still `Option`) returns `None`; `init_from_with_latents(rng,
+  genome)` warm-starts a chain whose likelihood has latent sites. Pinned by
+  `test_score_rejects_dimension_mismatch`,
+  `test_latent_site_likelihood_is_an_error_not_a_panic`,
+  `test_vector_priors_validate_dimension`.
+- **CI builds the two feature configurations `CLAUDE.md` calls CI-relevant
+  (EV-N4 / X-3).** A `features` matrix job checks and tests
+  `--no-default-features --features std,ppl` natively, checks it on
+  `wasm32-unknown-unknown`, and checks and tests
+  `std,parallel,checkpoint,classic`; `make feature-matrix` runs the same
+  locally and is part of `make ci`. Nothing built either before; an ungated
+  reference across the classic/ppl boundary would have broken downstream
+  builds without failing `--all-features`.
+- **`EvolutionSMC::anneal` keeps one proposal-scale adaptation across all
+  annealing rungs (EV-N5).** fugue's `rejuvenate_particles` starts a fresh
+  `DiminishingAdaptation` on every call, so each rung re-learned its scales
+  from the default. Rejuvenation at rung `β` now runs
+  `adaptive_single_site_mh_cached` against the model's own fixed-`β`
+  program (`target_model()` at `β` — exactly fugue's tempered density
+  whenever the likelihood tempers linearly, which `FactorFitness` and
+  `tempered_observe` do) from a single adaptation shared by every rung and
+  particle, re-scoring under the `β = 1` program afterwards for the next
+  reweight; per particle and rung this is `steps + 2` executions instead of
+  `2·steps`. `anneal` with `rejuvenation_steps == 0` and no kernel only
+  reweights and resamples past `β = 1` (duplicates of the fittest
+  particles); the docs now say so.
+- **`BayesianAdaptiveGA` children never leave the prior's support
+  (EV-N5).** A mutant outside the prior's support (a `UniformBoxPrior`'s
+  box, a grammar's depth limit) is discarded before evaluation and the
+  parent keeps its slot, counted as a failed trial. The docs now state what
+  the prior is used for: initial population and feasible region — its
+  density does not enter selection; this is a GA with Bayesian
+  operator-selection, not a posterior sampler. Pinned by
+  `test_children_stay_inside_prior_support`.
+- **Doctests are compiled again (EV-N5).** The `interactive` module's six
+  examples and the two crate-level quick starts were `ignore`d; they now
+  compile (the interactive loops as `no_run`, the quick starts run under
+  their feature via `cfg_attr`), so the inference-API example in `lib.rs`
+  is checked against the real API on every `cargo test`.
+- **`test_subtree_crossover_swaps_prefix_range` asserts the swap happened
+  (EV-N5)**: grafting two subtrees rooted at the same path conserves the
+  pair's prior mass, so under the prior-only target every non-trivial
+  proposal is accepted and at least two particles must differ from their
+  prior draws — previously the test ended in `let _ = (before, after)`.
+- **The `Fitness` / `MultiObjectiveFitness` `Send + Sync` split is
+  documented as a deliberate, known non-additive feature (EV-N5).** With
+  `parallel` the traits have `Send + Sync` supertraits (rayon), without it
+  they do not, so a crate built without `parallel` can implement `Fitness`
+  for a `!Send` type and break when another crate enables the feature.
+  Requiring the bound unconditionally was implemented and then reverted:
+  the crate's own WASM bindings (`fugue-evo-wasm`, built with `std,classic,ppl`
+  and no `parallel`) implement `Fitness` over closures that capture a
+  `js_sys::Function`, which is `!Send`, and any browser consumer is in the
+  same position; the unconditional bound would have forced them into
+  `unsafe impl Send` wrappers. The trait docs now state the split, the
+  rationale, and the advice (make the fitness `Send + Sync` if the crate must
+  build both ways; the inference layer requires that independently).
+- **Docs**: `SPEC.md` and `docs/src/api-docs.md` no longer describe
+  `fugue_integration::{EvolutionarySMC, EvolutionStep}` (deleted in
+  0.2.0); they name `inference::{EvolutionSMC, EvolutionChain}` and the
+  real `src/inference/` layout. The installation page documents the `ppl`
+  / `classic` features, the two supported reduced configurations and the
+  MSRV; the README's feature paragraph states what CI actually builds.
+
+### Added
+
+- `EvolutionSMC::anneal_with_kernel`, `SharedSiteCrossover`,
+  `shared_site_crossover_mask` (EV-N1).
+- `EvolutionChain::{step_scored, decode, overrides, try_init_from,
+  init_from_with_latents}` (EV-N2, EV-N3).
+- `EvolutionModel::score_with_latents`, `GenomePrior::validate` (EV-N3).
+- `make feature-matrix` / `test-ppl` / `check-ppl-wasm` / `test-classic`
+  (EV-N4).
+
 ## [0.3.1] - 2026-07-28
 
 ### Added

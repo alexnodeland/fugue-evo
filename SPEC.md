@@ -18,8 +18,9 @@
 > sampling multi-armed bandit over conjugate `Beta`/`Gamma` posteriors,
 > opt-in via `SimpleGABuilder::adaptive_operators`), not the
 > `BayesianHyperparameterLearner` sketch in §4 below; the SMC-as-evolution
-> idea in `fugue_integration::evolution_model::EvolutionarySMC` is
-> implemented and demonstrated end-to-end in `examples/bayesian_evolution.rs`;
+> idea shipped as `inference::smc::EvolutionSMC` (fugue's tempered SMC over
+> the Boltzmann posterior, with `inference::mh::EvolutionChain` for MH) and
+> is demonstrated end-to-end in `examples/bayesian_evolution.rs`;
 > and checkpointing (§ Checkpointing) supports bit-identical resume for the
 > ChaCha RNG family via `checkpoint::rng::SnapshotRng`. See README.md and
 > CHANGELOG.md for the current, verified feature set.
@@ -30,11 +31,11 @@
 
 **fugue-evo** is a broad Rust evolutionary-computation library with an *optional* probabilistic-programming bridge to the [Fugue PPL](https://github.com/alexnodeland/fugue).
 
-> **Scope note (EV-17):** the "evolution as Bayesian inference over solution spaces" framing below describes the `fugue_integration` module specifically — `EvolutionarySMC` (tempered SMC over a Boltzmann posterior), `EvolutionStep`, and `BayesianAdaptiveGA`, which are the only paths that construct a Fugue `Model` and drive its `factor`/inference machinery (see `examples/bayesian_evolution.rs`). The default flagship algorithms (SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState) are standalone evolutionary computation that use Fugue's `Trace` only as an address→value data container, not for inference. Read the design goals below with that distinction in mind.
+> **Scope note (EV-17):** the "evolution as Bayesian inference over solution spaces" framing below describes the `inference` module specifically (`ppl` feature; `fugue_integration` until 0.2.0) — `EvolutionSMC` (tempered SMC over a Boltzmann posterior), `EvolutionChain` (Metropolis–Hastings), and `BayesianAdaptiveGA`, which are the only paths that construct a Fugue `Model` and drive its `factor`/inference machinery (see `examples/bayesian_evolution.rs`). The default flagship algorithms (SimpleGA, CMA-ES, NSGA-II, Island Model, Evolution Strategy, EDA/UMDA, SteadyState) are standalone evolutionary computation that use Fugue's `Trace` only as an address→value data container, not for inference. Read the design goals below with that distinction in mind.
 
-By treating evolution as Bayesian inference over solution spaces, the `fugue_integration` module provides principled, inference-backed approaches to selection/rejuvenation while enabling automatic hyperparameter learning through probabilistic inference; the default algorithms provide the same evolutionary operators as conventional EC.
+By treating evolution as Bayesian inference over solution spaces, the `inference` module provides principled, inference-backed approaches to selection/rejuvenation while enabling automatic hyperparameter learning through probabilistic inference; the default algorithms provide the same evolutionary operators as conventional EC.
 
-The library supports customizable genome representations, hierarchical Bayesian genetic algorithms (HBGA), and learnable genetic operators—bridging the gap between evolutionary computation and modern probabilistic machine learning where the `fugue_integration` module is used.
+The library supports customizable genome representations, hierarchical Bayesian genetic algorithms (HBGA), and learnable genetic operators—bridging the gap between evolutionary computation and modern probabilistic machine learning where the `inference` module is used.
 
 ### Core Insight: Fitness as Likelihood
 
@@ -951,12 +952,18 @@ fugue-evo/
 │   │   ├── operator_stats.rs  # Operator success tracking
 │   │   └── trace_analysis.rs  # Fugue trace diagnostics
 │   │
-│   └── fugue_integration/
+│   └── inference/             # `ppl` feature (was fugue_integration/ before 0.2.0)
 │       ├── mod.rs
-│       ├── trace_genome.rs    # Trace ↔ Genome conversions
-│       ├── effect_handlers.rs # Mutation/crossover as handlers
-│       ├── models.rs          # Evolution as Fugue Model
-│       └── inference.rs       # SMC/MCMC/VI for evolution
+│       ├── prior.rs           # GenomePrior: priors as programs
+│       ├── likelihood.rs      # GenomeLikelihood: observation programs, FactorFitness
+│       ├── model.rs           # EvolutionModel: the Boltzmann target as a fugue Model
+│       ├── mh.rs              # EvolutionChain: Metropolis–Hastings
+│       ├── smc.rs             # EvolutionSMC: tempered SMC, crossover kernel, anneal
+│       ├── grammar.rs         # ArithmeticGrammarPrior: GP over a probabilistic grammar
+│       ├── pareto.rs          # Pareto / Chebyshev scalarization posteriors
+│       ├── bayesian_ga.rs     # BayesianAdaptiveGA: Thompson-sampled operators
+│       ├── effect_handlers.rs # fugue Handler implementations
+│       └── trace_operators.rs # Value-level trace operators
 │
 ├── examples/
 │   ├── sphere_optimization.rs

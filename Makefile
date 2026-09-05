@@ -1,5 +1,6 @@
 .PHONY: all build check test lint fmt clippy doc clean ci help deps-check \
-       mdbook mdbook-serve mdbook-clean mdbook-test doc-all doc-serve clean-all
+       mdbook mdbook-serve mdbook-clean mdbook-test doc-all doc-serve clean-all \
+       test-ppl check-ppl-wasm test-classic feature-matrix
 
 # Default target
 all: check
@@ -23,6 +24,22 @@ test:
 # Run tests with output
 test-verbose:
 	cargo test --all-features -- --nocapture
+
+# Feature-matrix configs (EV-N4 / X-3). `std,ppl` is auracle's exact
+# configuration; `std,parallel,checkpoint,classic` is the fugue-free classic
+# toolkit. Both are CI jobs; `--all-features` alone would not catch an ungated
+# reference across the classic/ppl boundary.
+test-ppl:
+	cargo test --no-default-features --features std,ppl
+
+check-ppl-wasm:
+	cargo check --no-default-features --features std,ppl --target wasm32-unknown-unknown
+
+test-classic:
+	cargo test --no-default-features --features std,parallel,checkpoint,classic
+
+feature-matrix: test-ppl check-ppl-wasm test-classic
+	@echo "Feature matrix passed!"
 
 # Run formatting check
 fmt:
@@ -99,7 +116,7 @@ deps-check:
 	fi
 
 # Run the full CI pipeline (same as GitHub Actions)
-ci: fmt clippy check test deps-check doc mdbook
+ci: fmt clippy check test feature-matrix deps-check doc mdbook
 	@echo "CI pipeline completed successfully!"
 
 # Run quick checks (for development)
@@ -135,6 +152,7 @@ help:
 	@echo "  check        - Run cargo check (type checking)"
 	@echo "  test         - Run all tests"
 	@echo "  test-verbose - Run tests with output"
+	@echo "  feature-matrix - Build/test the std,ppl (native + wasm32) and classic-only configs (EV-N4)"
 	@echo "  fmt          - Check code formatting"
 	@echo "  fmt-fix      - Fix code formatting"
 	@echo "  clippy       - Run clippy linter"

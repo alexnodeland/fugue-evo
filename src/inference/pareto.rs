@@ -384,7 +384,7 @@ mod tests {
                 .with_weight(vec![0.5, 0.5]),
         );
         let ch = EvolutionSMC::anneal(&mut rng, &ch_model, cfg(), 8.0, 8);
-        let mean = ch.weighted_mean(0);
+        let mean = ch.weighted_mean(0).expect("real coordinate present");
         assert!(
             (mean - x_star).abs() < 0.08,
             "fixed-w Chebyshev posterior mean {mean:.3} should sit at the interior front point {x_star:.3}"
@@ -408,7 +408,7 @@ mod tests {
                     .with_weight(vec![w, 1.0 - w]),
             );
             let r = EvolutionSMC::anneal(&mut rng, &m, cfg(), 8.0, 8);
-            let mean = r.weighted_mean(0);
+            let mean = r.weighted_mean(0).expect("real coordinate present");
             assert!(
                 (lo..=hi).contains(&mean),
                 "weight {w}: front point {mean:.3} outside expected band [{lo}, {hi}]"

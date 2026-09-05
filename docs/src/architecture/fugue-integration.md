@@ -83,7 +83,14 @@ exactly once.
   population-coupled **crossover kernel** (a product-target Metropolis move
   that swaps an address block between two particles), and an unbiased
   **log-evidence** estimate — a genuine Bayesian model score. Genomes are
-  recovered from bare particle traces by decode-replay.
+  recovered from bare particle traces by decode-replay. The kernel that
+  `EvoSmcConfig::crossover` builds (`SharedSiteCrossover`) swaps only sites
+  present in *both* parents and rejects any child that does not re-score as
+  a complete execution over its own address set, so `run` and `anneal` with
+  the default config are safe on every prior — on a variable-structure prior
+  it exchanges constants, indices and same-arity function choices, never
+  structure. Subtree grafts use the model-aware `subtree_crossover_mask`
+  through `run_with_kernel` / `anneal_with_kernel`.
 
 ## Genetic programming as exact inference
 

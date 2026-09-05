@@ -25,7 +25,7 @@ Add dependencies to `Cargo.toml`:
 
 ```toml
 [dependencies]
-fugue-evo = "0.1"
+fugue-evo = "0.4"
 rand = "0.8"
 ```
 

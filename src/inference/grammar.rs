@@ -34,15 +34,16 @@
 //!
 //! Note: tree genomes are decoded from particles by replay (the model returns
 //! the built [`TreeGenome`]); the flat [`TraceGenome`](crate::genome::trace_genome::TraceGenome) encoding of
-//! `TreeGenome` is unrelated to this grammar's address scheme, so
-//! `EvolutionModel::score`/`to_weighted_trace` (which replay `to_trace`) do
-//! not apply to grammar-driven trees — use the SMC/MH drivers, which never
-//! need them.
+//! `TreeGenome` is unrelated to this grammar's address scheme; the prior
+//! therefore overrides [`GenomePrior::trace_of`] with its own encoding, which
+//! is what `EvolutionModel::score` / `to_weighted_trace` /
+//! `EvolutionChain::init_from` replay.
 
 use fugue::{addr, sample, Address, Bernoulli, Categorical, Model, ModelExt, Normal, Trace};
 
 /// The mask-closure type consumed by [`fugue::CrossoverKernel`].
-pub type CrossoverMaskFn = Box<dyn Fn(&Trace, &Trace, &mut dyn rand::RngCore) -> Vec<Address>>;
+pub type CrossoverMaskFn =
+    Box<dyn Fn(&Trace, &Trace, &mut dyn rand::RngCore) -> Vec<Address> + Send>;
 
 use super::prior::GenomePrior;
 use crate::genome::tree::{ArithmeticFunction, ArithmeticTerminal, Function, TreeGenome, TreeNode};
@@ -409,9 +410,19 @@ mod tests {
         }
 
         // Build a small particle population from the prior.
-        let particles_res = fugue::smc_prior_particles(&mut rng, 12, model_fn);
-        let mut particles = particles_res;
-        let before_sets: Vec<usize> = particles.iter().map(|p| p.trace.choices.len()).collect();
+        let mut particles = fugue::smc_prior_particles(&mut rng, 12, model_fn);
+        let snapshot = |ps: &[fugue::Particle]| -> Vec<Vec<(Address, fugue::ChoiceValue)>> {
+            ps.iter()
+                .map(|p| {
+                    p.trace
+                        .choices
+                        .iter()
+                        .map(|(a, c)| (a.clone(), c.value.clone()))
+                        .collect()
+                })
+                .collect()
+        };
+        let before = snapshot(&particles);
 
         let mut kernel = CrossoverKernel {
             n_pairs: 40,
@@ -432,10 +443,17 @@ mod tests {
             assert!(tree.size() >= 1);
             assert!(p.trace.log_prior.is_finite());
         }
-        // Structure genuinely moved for at least one particle (subtree swap
-        // changes address-set sizes unless every accepted swap was congruent).
-        let after_sets: Vec<usize> = particles.iter().map(|p| p.trace.choices.len()).collect();
-        let _ = (before_sets, after_sets); // sizes may or may not differ; decode is the contract
+        // The swap genuinely happened (EV-N5): grafting two subtrees rooted at
+        // the same path conserves the pair's total prior mass (the PCFG is
+        // depth-indexed, and both grafts land at the same depth), so under
+        // the prior-only target every non-trivial proposal is accepted — at
+        // least one particle's choices must differ from its prior draw.
+        let after = snapshot(&particles);
+        let changed = before.iter().zip(&after).filter(|(b, a)| b != a).count();
+        assert!(
+            changed >= 2,
+            "subtree crossover accepted no swap over 40 pair proposals ({changed} changed)"
+        );
     }
 
     /// The grammar encoding is the exact inverse of the generative program:
@@ -509,7 +527,7 @@ mod tests {
             6,
         );
         let model = crate::inference::model::EvolutionModel::new(prior.clone(), Zero);
-        let (_g, scored) = model.score(&tree);
+        let (_g, scored) = model.score(&tree).expect("in-grammar tree");
 
         // Hand-computed PCFG log-prior:
         //   root: not-leaf (1-0.4) · func Add (1/4)

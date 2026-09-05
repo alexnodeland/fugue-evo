@@ -62,7 +62,8 @@
 //!
 //! ## Quick Start (classic optimization)
 //!
-//! ```rust,ignore
+#![cfg_attr(feature = "classic", doc = "```rust")]
+#![cfg_attr(not(feature = "classic"), doc = "```rust,ignore")]
 //! use fugue_evo::prelude::*;
 //! use rand::rngs::StdRng;
 //! use rand::SeedableRng;
@@ -84,14 +85,30 @@
 //!
 //! ## Quick Start (evolution as inference, `ppl`)
 //!
-//! ```rust,ignore
+#![cfg_attr(feature = "ppl", doc = "```rust")]
+#![cfg_attr(not(feature = "ppl"), doc = "```rust,ignore")]
 //! use fugue_evo::prelude::*;
+//! # use rand::SeedableRng;
+//! # #[derive(Clone)]
+//! # struct Quadratic;
+//! # impl Fitness for Quadratic {
+//! #     type Genome = RealVector;
+//! #     type Value = f64;
+//! #     fn evaluate(&self, g: &RealVector) -> f64 {
+//! #         -0.5 * g.genes().iter().map(|x| (x - 1.0).powi(2)).sum::<f64>()
+//! #     }
+//! # }
+//! # const DIM: usize = 2;
+//! # let fitness = Quadratic;
+//! # let mut rng = rand::rngs::StdRng::seed_from_u64(1);
 //!
 //! // Prior as a program; fitness as a likelihood factor; posterior by SMC.
 //! let model = EvolutionModel::new(GaussianPrior::new(0.0, 2.0, DIM), fitness);
 //! let posterior = EvolutionSMC::run(&mut rng, &model, EvoSmcConfig::default());
-//! println!("posterior mean: {}", posterior.weighted_mean(0));
+//! let mean = posterior.weighted_mean(0).expect("gene#0 is a real coordinate");
+//! println!("posterior mean: {mean}");
 //! println!("log evidence:   {}", posterior.log_evidence);
+//! # assert!((mean - 0.8).abs() < 0.3); // conjugate: τ = 1/4 + 1, mean = 1/τ = 0.8
 //! ```
 //!
 //! ## Module Overview

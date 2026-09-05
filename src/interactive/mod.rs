@@ -20,11 +20,18 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use fugue_evo::interactive::prelude::*;
 //! use fugue_evo::prelude::*;
+//! # use rand::SeedableRng;
+//! # fn present_to_user(_request: &EvaluationRequest<RealVector>) -> EvaluationResponse {
+//! #     unimplemented!("show the candidates to a person and collect their choice")
+//! # }
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+//! # let bounds = MultiBounds::symmetric(1.0, 4);
 //!
-//! let mut iga = InteractiveGABuilder::<RealVector>::new()
+//! let mut iga = InteractiveGABuilder::<RealVector, (), (), ()>::new()
 //!     .population_size(12)
 //!     .evaluation_mode(EvaluationMode::BatchSelection)
 //!     .batch_size(6)
@@ -43,9 +50,14 @@
 //!         StepResult::GenerationComplete { generation, .. } => {
 //!             println!("Generation {} complete", generation);
 //!         }
-//!         StepResult::Complete(result) => break,
+//!         StepResult::Complete(result) => {
+//!             println!("Done: {}", result.termination_reason);
+//!             break;
+//!         }
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod aggregation;

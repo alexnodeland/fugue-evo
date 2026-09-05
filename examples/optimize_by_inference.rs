@@ -60,7 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  population spread at β=500: {:.4} (posterior-style uncertainty, not a point)",
         (0..DIM)
-            .map(|i| annealed.weighted_variance(i))
+            .map(|i| annealed
+                .weighted_variance(i)
+                .expect("real coordinate present"))
             .sum::<f64>()
             .sqrt()
     );
