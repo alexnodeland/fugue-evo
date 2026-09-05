@@ -152,6 +152,19 @@ impl OperatorArm {
 /// See the [module docs](self) for the model. Operator step sizes are selected
 /// by Thompson sampling over per-operator `Beta` success posteriors, which are
 /// updated by conjugate Bayesian updates from observed improvement events.
+///
+/// # What the prior is used for
+///
+/// This is a genetic algorithm, not a posterior sampler: the
+/// [`GenomePrior`] draws the **initial population** and defines the
+/// **feasible region** — a child whose encoding falls outside the prior's
+/// support (a [`UniformBoxPrior`](super::prior::UniformBoxPrior)'s box, a
+/// grammar's depth limit) is discarded before evaluation and its parent
+/// keeps the slot, counted as a failed trial. The prior's *density* does not
+/// otherwise enter selection; the Bayesian content is the conjugate
+/// operator-selection model. For the Boltzmann posterior itself use
+/// [`EvolutionChain`](super::mh::EvolutionChain) or
+/// [`EvolutionSMC`](super::smc::EvolutionSMC).
 pub struct BayesianAdaptiveGA<P, F>
 where
     P: GenomePrior,
@@ -263,8 +276,17 @@ where
                 let parent = &population[parent_idx];
                 let parent_fitness = fitnesses[parent_idx];
 
-                let child = gaussian_trace_mutation(parent, self.mutation_rate, sigma, rng);
-                let child_fitness = self.model.fitness_value(&child);
+                let mutant = gaussian_trace_mutation(parent, self.mutation_rate, sigma, rng);
+                // The prior defines the feasible region: a mutant that leaves
+                // its support (a `UniformBoxPrior`'s box, a grammar's depth
+                // limit) is discarded before any fitness evaluation and the
+                // parent keeps its slot, counted as a failed trial (EV-N5).
+                let (child, child_fitness) = if self.in_prior_support(&mutant) {
+                    let f = self.model.fitness_value(&mutant);
+                    (mutant, f)
+                } else {
+                    (parent.clone(), parent_fitness)
+                };
 
                 if child_fitness > parent_fitness {
                     successes += 1;
@@ -300,6 +322,17 @@ where
             operator_posteriors: self.arms.clone(),
             improvement_rate: self.improvement_rate,
         }
+    }
+
+    /// Whether `genome` has positive density under the prior program: its
+    /// encoding has the prior's shape ([`GenomePrior::validate`]) and replays
+    /// through [`GenomePrior::model`] with a finite `log_prior`.
+    fn in_prior_support(&self, genome: &P::Genome) -> bool {
+        let prior = self.model.prior();
+        prior.validate(genome).is_ok()
+            && super::model::score_complete(prior.trace_of(genome), prior.model())
+                .map(|(_g, t)| t.log_prior.is_finite())
+                .unwrap_or(false)
     }
 
     fn tournament<R: Rng>(&self, fitnesses: &[f64], rng: &mut R) -> usize {
@@ -448,6 +481,43 @@ mod tests {
         assert!(
             result.best_fitness > -1.0,
             "best fitness {} did not converge",
+            result.best_fitness
+        );
+    }
+
+    /// EV-N5: children never leave the prior's support. With a fitness that
+    /// rewards running away from the origin, an unconstrained mutation walk
+    /// would leave the `[-0.5, 0.5]²` box within a few generations; the GA
+    /// must keep its best (and every evaluated child) inside it.
+    #[test]
+    fn test_children_stay_inside_prior_support() {
+        use crate::genome::real_vector::RealVector;
+        use crate::genome::traits::RealValuedGenome;
+        #[derive(Clone, Copy)]
+        struct Outward;
+        impl Fitness for Outward {
+            type Genome = RealVector;
+            type Value = f64;
+            fn evaluate(&self, g: &RealVector) -> f64 {
+                g.genes().iter().sum()
+            }
+        }
+        let bounds = MultiBounds::symmetric(0.5, 2);
+        let mut ga = BayesianAdaptiveGA::new(UniformBoxPrior::new(bounds), Outward, 30, 40)
+            .with_step_sizes(vec![0.3]);
+        let mut rng = StdRng::seed_from_u64(3);
+        let result = ga.run(&mut rng);
+        for x in result.best_genome.genes() {
+            assert!(
+                (-0.5..=0.5).contains(x),
+                "best genome left the prior's box: {x}"
+            );
+        }
+        // The optimum of x0 + x1 over the box is the corner (0.5, 0.5).
+        assert!(result.best_fitness <= 1.0 + 1e-12);
+        assert!(
+            result.best_fitness > 0.8,
+            "did not approach the box corner: {}",
             result.best_fitness
         );
     }

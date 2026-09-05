@@ -154,20 +154,37 @@ where
         }
     }
 
-    /// Set the inverse temperature `β` directly (`β ≥ 0`).
+    /// Set the inverse temperature `β` directly (`β ≥ 0`; negative values
+    /// clamp to `0`, the prior).
+    ///
+    /// # Panics
+    ///
+    /// If `beta` is not finite. `β = ∞` would make the fitness factor
+    /// `∞ · f(x)` — `NaN` wherever `f = 0`, `±∞` elsewhere — a target on
+    /// which no sampler can move (EV-N5). Optimizer mode is
+    /// [`EvolutionSMC::anneal`](super::smc::EvolutionSMC::anneal) with a
+    /// large *finite* `beta_max`.
     pub fn with_beta(mut self, beta: f64) -> Self {
+        assert!(
+            beta.is_finite(),
+            "EvolutionModel::with_beta: β must be finite (got {beta}); anneal toward a large finite β instead"
+        );
         self.beta = beta.max(0.0);
         self
     }
 
-    /// Set the temperature `T`; equivalent to `β = 1/T`.
-    pub fn with_temperature(mut self, temperature: f64) -> Self {
-        self.beta = if temperature > 0.0 {
-            1.0 / temperature
-        } else {
-            f64::INFINITY
-        };
-        self
+    /// Set the temperature `T > 0`; equivalent to `β = 1/T`.
+    ///
+    /// # Panics
+    ///
+    /// If `temperature` is not a finite, strictly positive number: `T = 0`
+    /// is `β = ∞`, see [`Self::with_beta`].
+    pub fn with_temperature(self, temperature: f64) -> Self {
+        assert!(
+            temperature.is_finite() && temperature > 0.0,
+            "EvolutionModel::with_temperature: T must be finite and > 0 (got {temperature})"
+        );
+        self.with_beta(1.0 / temperature)
     }
 
     /// Current inverse temperature `β`.
@@ -439,6 +456,32 @@ pub(crate) mod tests {
             assert!(t.get_f64(&addr!("sigma")).is_some());
             current = t;
         }
+    }
+
+    /// EV-N5: `T = 0` / `β = ∞` used to build `factor(∞·f)` — `NaN` at
+    /// `f = 0` — a chain that never moves. Both are rejected up front.
+    #[test]
+    #[should_panic(expected = "must be finite and > 0")]
+    fn test_with_temperature_zero_is_rejected() {
+        let prior = UniformBoxPrior::new(MultiBounds::symmetric(1.0, 1));
+        let _ = EvolutionModel::new(prior, PtrFitness(quad_origin)).with_temperature(0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be finite")]
+    fn test_with_beta_infinite_is_rejected() {
+        let prior = UniformBoxPrior::new(MultiBounds::symmetric(1.0, 1));
+        let _ = EvolutionModel::new(prior, PtrFitness(quad_origin)).with_beta(f64::INFINITY);
+    }
+
+    #[test]
+    fn test_with_temperature_positive_sets_beta() {
+        let prior = UniformBoxPrior::new(MultiBounds::symmetric(1.0, 1));
+        let m = EvolutionModel::new(prior, PtrFitness(quad_origin)).with_temperature(4.0);
+        assert!((m.beta() - 0.25).abs() < 1e-12);
+        assert!((m.temperature() - 4.0).abs() < 1e-12);
+        // Negative β clamps to the prior, as documented.
+        assert_eq!(m.with_beta(-3.0).beta(), 0.0);
     }
 
     #[test]

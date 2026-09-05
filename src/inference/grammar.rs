@@ -410,9 +410,19 @@ mod tests {
         }
 
         // Build a small particle population from the prior.
-        let particles_res = fugue::smc_prior_particles(&mut rng, 12, model_fn);
-        let mut particles = particles_res;
-        let before_sets: Vec<usize> = particles.iter().map(|p| p.trace.choices.len()).collect();
+        let mut particles = fugue::smc_prior_particles(&mut rng, 12, model_fn);
+        let snapshot = |ps: &[fugue::Particle]| -> Vec<Vec<(Address, fugue::ChoiceValue)>> {
+            ps.iter()
+                .map(|p| {
+                    p.trace
+                        .choices
+                        .iter()
+                        .map(|(a, c)| (a.clone(), c.value.clone()))
+                        .collect()
+                })
+                .collect()
+        };
+        let before = snapshot(&particles);
 
         let mut kernel = CrossoverKernel {
             n_pairs: 40,
@@ -433,10 +443,17 @@ mod tests {
             assert!(tree.size() >= 1);
             assert!(p.trace.log_prior.is_finite());
         }
-        // Structure genuinely moved for at least one particle (subtree swap
-        // changes address-set sizes unless every accepted swap was congruent).
-        let after_sets: Vec<usize> = particles.iter().map(|p| p.trace.choices.len()).collect();
-        let _ = (before_sets, after_sets); // sizes may or may not differ; decode is the contract
+        // The swap genuinely happened (EV-N5): grafting two subtrees rooted at
+        // the same path conserves the pair's total prior mass (the PCFG is
+        // depth-indexed, and both grafts land at the same depth), so under
+        // the prior-only target every non-trivial proposal is accepted — at
+        // least one particle's choices must differ from its prior draw.
+        let after = snapshot(&particles);
+        let changed = before.iter().zip(&after).filter(|(b, a)| b != a).count();
+        assert!(
+            changed >= 2,
+            "subtree crossover accepted no swap over 40 pair proposals ({changed} changed)"
+        );
     }
 
     /// The grammar encoding is the exact inverse of the generative program:

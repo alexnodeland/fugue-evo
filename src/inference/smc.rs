@@ -11,12 +11,14 @@
 //! ladder, applies it exactly once, and returns an unbiased log-evidence
 //! estimate for free.
 //!
-//! Crossover is fugue's [`CrossoverKernel`] — a population-coupled Metropolis
+//! Crossover is fugue's [`fugue::CrossoverKernel`] — a population-coupled Metropolis
 //! move on the product target — driven by an address mask supplied here
 //! (genome knowledge stays downstream; trace-space mechanics live upstream).
 
 use std::marker::PhantomData;
 
+use fugue::runtime::handler::run;
+use fugue::runtime::interpreters::ScoreGivenTrace;
 use fugue::{
     adaptive_smc_with_kernel, decode_particle, score_given_trace_reconciled, Address, Model,
     NoKernel, Particle, PopulationKernel, ResamplingMethod, SMCConfig, Trace,
@@ -287,8 +289,15 @@ impl<G: TraceGenome> EvolutionPosterior<G> {
             .collect()
     }
 
-    /// Self-normalised weighted posterior mean of coordinate `gene#coord`.
-    pub fn weighted_mean(&self, coord: usize) -> f64 {
+    /// Self-normalised weighted posterior mean of the real coordinate at the
+    /// canonical address `<prefix>#coord` (`gene#coord` for `RealVector`).
+    ///
+    /// `None` when no particle with positive weight carries that site — a
+    /// tree genome (whose grammar addresses are `node/…#const`, not
+    /// `gene#i`), a coordinate beyond the genome's dimension, or an empty
+    /// population — instead of a silent `0.0` (EV-N5). Non-real genomes have
+    /// no coordinate mean; decode them with [`Self::genomes`].
+    pub fn weighted_mean(&self, coord: usize) -> Option<f64> {
         let addr = gene_address(G::trace_prefix(), coord);
         let mut total_w = 0.0;
         let mut mean = 0.0;
@@ -298,17 +307,15 @@ impl<G: TraceGenome> EvolutionPosterior<G> {
                 total_w += p.weight;
             }
         }
-        if total_w > 0.0 {
-            mean / total_w
-        } else {
-            0.0
-        }
+        (total_w > 0.0).then(|| mean / total_w)
     }
 
-    /// Self-normalised weighted posterior variance of coordinate `gene#coord`.
-    pub fn weighted_variance(&self, coord: usize) -> f64 {
+    /// Self-normalised weighted posterior variance of the real coordinate at
+    /// `<prefix>#coord`; `None` under the same conditions as
+    /// [`Self::weighted_mean`].
+    pub fn weighted_variance(&self, coord: usize) -> Option<f64> {
         let addr = gene_address(G::trace_prefix(), coord);
-        let mean = self.weighted_mean(coord);
+        let mean = self.weighted_mean(coord)?;
         let mut total_w = 0.0;
         let mut var = 0.0;
         for p in &self.particles {
@@ -317,11 +324,7 @@ impl<G: TraceGenome> EvolutionPosterior<G> {
                 total_w += p.weight;
             }
         }
-        if total_w > 0.0 {
-            var / total_w
-        } else {
-            0.0
-        }
+        (total_w > 0.0).then(|| var / total_w)
     }
 
     /// The decoded genome with the highest fitness, and that fitness —
@@ -371,7 +374,7 @@ impl EvolutionSMC {
 
 impl EvolutionSMC {
     /// Like [`EvolutionSMC::run`], but with an explicit population kernel
-    /// (e.g. a [`CrossoverKernel`] with a
+    /// (e.g. a [`fugue::CrossoverKernel`] with a
     /// [`subtree_crossover_mask`](super::grammar::subtree_crossover_mask) for
     /// grammar-driven tree genomes). `cfg.crossover` is ignored.
     pub fn run_with_kernel<P, L, R, K>(
@@ -470,7 +473,9 @@ impl EvolutionSMC {
         R: Rng,
         K: PopulationKernel<P::Genome>,
     {
-        use fugue::{normalize_particles, rejuvenate_particles, resample_particles};
+        use fugue::inference::mcmc_utils::DiminishingAdaptation;
+        use fugue::{adaptive_single_site_mh_cached, normalize_particles, resample_particles};
+        use std::collections::HashMap;
 
         let rejuvenation_steps = cfg.rejuvenation_steps;
         let resampling = cfg.resampling;
@@ -481,6 +486,16 @@ impl EvolutionSMC {
 
         let model_fn = model.smc_model();
         let loglik = |t: &Trace| t.log_likelihood + t.log_factors;
+        // One proposal-scale adaptation for the whole annealing continuation
+        // (EV-N5): fugue's `rejuvenate_particles` starts a fresh
+        // `DiminishingAdaptation` on every call, so each rung re-learned its
+        // scales from the default. The rejuvenation target at rung β is the
+        // model's own fixed-β program (`target_model()` at β), which is
+        // exactly fugue's tempered density `log_prior + β·(log_likelihood +
+        // log_factors)` whenever the likelihood tempers linearly —
+        // `FactorFitness` and `tempered_observe` do.
+        let mut adaptation = DiminishingAdaptation::new(0.44, 0.7);
+        let no_overrides: HashMap<fugue::Address, fugue::SiteProposal> = HashMap::new();
 
         let ln_bmax = beta_max.ln();
         let mut prev_beta = 1.0;
@@ -498,13 +513,43 @@ impl EvolutionSMC {
             result.particles = resample_particles(rng, &result.particles, resampling);
 
             // (3) π_β-invariant rejuvenation (+ optional population kernel).
-            rejuvenate_particles(
-                rng,
-                &mut result.particles,
-                &model_fn,
-                beta,
-                rejuvenation_steps,
-            );
+            if rejuvenation_steps > 0 {
+                let tempered = model.clone().with_beta(beta);
+                let tempered_fn = tempered.target_model();
+                for p in &mut result.particles {
+                    // Score the particle under the β program once (the cached
+                    // step reads the tempered log-density from the trace) ...
+                    let (_g, mut cur) = run(
+                        ScoreGivenTrace {
+                            base: std::mem::take(&mut p.trace),
+                            trace: Trace::default(),
+                        },
+                        tempered_fn(),
+                    );
+                    for _ in 0..rejuvenation_steps {
+                        if let Some((_g, t, _lw)) = adaptive_single_site_mh_cached(
+                            rng,
+                            &tempered_fn,
+                            &cur,
+                            &mut adaptation,
+                            &no_overrides,
+                            true,
+                        ) {
+                            cur = t;
+                        }
+                    }
+                    // ... and back under the β = 1 program, whose accumulators
+                    // the next rung's reweight and the kernel sweep read.
+                    let (_g, back) = run(
+                        ScoreGivenTrace {
+                            base: cur,
+                            trace: Trace::default(),
+                        },
+                        model_fn(),
+                    );
+                    p.trace = back;
+                }
+            }
             if !kernel.is_identity() {
                 kernel.sweep(
                     rng as &mut dyn rand::RngCore,
@@ -539,8 +584,6 @@ mod tests {
     use crate::genome::traits::RealValuedGenome;
     use crate::inference::model::tests::PtrFitness;
     use crate::inference::prior::GaussianPrior;
-    use fugue::runtime::handler::run;
-    use fugue::runtime::interpreters::ScoreGivenTrace;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -573,8 +616,10 @@ mod tests {
             },
         );
 
-        let mean = result.weighted_mean(0);
-        let var = result.weighted_variance(0);
+        let mean = result.weighted_mean(0).expect("real coordinate present");
+        let var = result
+            .weighted_variance(0)
+            .expect("real coordinate present");
         assert!(
             (mean - 2.4).abs() < 0.15,
             "posterior mean {} vs analytic 2.4",
@@ -625,8 +670,12 @@ mod tests {
             },
         );
         for coord in 0..2 {
-            let mean = result.weighted_mean(coord);
-            let var = result.weighted_variance(coord);
+            let mean = result
+                .weighted_mean(coord)
+                .expect("real coordinate present");
+            let var = result
+                .weighted_variance(coord)
+                .expect("real coordinate present");
             assert!(
                 (mean - 2.4).abs() < 0.15,
                 "coord {} posterior mean {} vs 2.4",
@@ -690,7 +739,9 @@ mod tests {
         let annealed = EvolutionSMC::anneal(&mut rng, &model, cfg(), 200.0, 12);
 
         let spread = |r: &EvolutionPosterior<RealVector>| {
-            (r.weighted_variance(0) + r.weighted_variance(1)).sqrt()
+            (r.weighted_variance(0).expect("real coordinate present")
+                + r.weighted_variance(1).expect("real coordinate present"))
+            .sqrt()
         };
         assert!(
             spread(&annealed) < 0.35 * spread(&posterior),
@@ -940,6 +991,48 @@ mod tests {
                 .is_some_and(|c| c != 1.0)
         }) || consts[0] != 0.5;
         assert!(moved, "no structure-preserving swap was ever accepted");
+    }
+
+    /// EV-N5: a tree posterior has no `gene#i` coordinate; the readout says
+    /// so instead of returning 0.0.
+    #[test]
+    fn test_weighted_mean_is_none_without_the_coordinate() {
+        use crate::inference::grammar::ArithmeticGrammarPrior;
+        use crate::inference::likelihood::NoLikelihood;
+        let model = EvolutionModel::from_likelihood(
+            ArithmeticGrammarPrior {
+                max_depth: 2,
+                ..Default::default()
+            },
+            NoLikelihood,
+        );
+        let mut rng = StdRng::seed_from_u64(4);
+        let result = EvolutionSMC::run(
+            &mut rng,
+            &model,
+            EvoSmcConfig {
+                num_particles: 20,
+                rejuvenation_steps: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.weighted_mean(0), None);
+        assert_eq!(result.weighted_variance(0), None);
+        // A real-vector posterior beyond its dimension is `None` too.
+        let prior = GaussianPrior::new(0.0, 1.0, 1);
+        let model = EvolutionModel::new(prior, PtrFitness(quad_k1_c3));
+        let result = EvolutionSMC::run(
+            &mut rng,
+            &model,
+            EvoSmcConfig {
+                num_particles: 20,
+                rejuvenation_steps: 1,
+                crossover: None,
+                ..Default::default()
+            },
+        );
+        assert!(result.weighted_mean(0).is_some());
+        assert_eq!(result.weighted_mean(1), None);
     }
 
     pub(super) fn quad_origin_local(g: &RealVector) -> f64 {

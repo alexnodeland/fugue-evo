@@ -6,6 +6,11 @@
 //! the always-available core rather than in either layer.
 
 /// Multi-objective fitness function trait
+///
+/// `Send + Sync` only with the `parallel` feature, for the same reason and
+/// with the same caveat as [`Fitness`](crate::fitness::traits::Fitness): a
+/// deliberate, known non-additive feature that keeps `!Send` (JavaScript
+/// callback) fitnesses valid in single-threaded WASM builds.
 #[cfg(feature = "parallel")]
 pub trait MultiObjectiveFitness<G>: Send + Sync {
     /// Number of objectives
@@ -15,7 +20,8 @@ pub trait MultiObjectiveFitness<G>: Send + Sync {
     fn evaluate(&self, genome: &G) -> Vec<f64>;
 }
 
-/// Multi-objective fitness function trait
+/// Multi-objective fitness function trait (non-parallel version; no
+/// `Send + Sync` supertrait — see the `parallel` variant).
 #[cfg(not(feature = "parallel"))]
 pub trait MultiObjectiveFitness<G> {
     /// Number of objectives

@@ -185,6 +185,22 @@ impl FitnessValue for ParetoFitness {
 /// Fitness evaluation trait
 ///
 /// Defines how to evaluate the fitness of a genome.
+///
+/// # `Send + Sync` and the `parallel` feature
+///
+/// With the `parallel` feature this trait has `Send + Sync` as supertraits
+/// (rayon evaluates a population from several threads); without it there is
+/// no such bound, so a fitness that holds a `!Send` value — a `js_sys::Function`
+/// in the crate's own WASM bindings, an `Rc` — is a valid implementor. This
+/// is a deliberate, **known non-additive feature** (EV-N5): a crate that
+/// compiles without `parallel` can implement `Fitness` for a `!Send` type
+/// and fail to build the moment any crate in its dependency graph enables
+/// `parallel`. Requiring the bound unconditionally was considered and
+/// rejected because it would force single-threaded WASM consumers into
+/// `unsafe impl Send` wrappers for their JavaScript callbacks. If your crate
+/// must build with and without `parallel`, make your fitness `Send + Sync`;
+/// the inference layer (`ppl`) requires that independently through
+/// `FactorFitness`, `GenomePrior` and `GenomeLikelihood`.
 #[cfg(feature = "parallel")]
 pub trait Fitness: Send + Sync {
     /// The genome type being evaluated
@@ -212,7 +228,11 @@ pub trait Fitness: Send + Sync {
 
 /// Fitness evaluation trait (non-parallel version)
 ///
-/// Defines how to evaluate the fitness of a genome.
+/// Defines how to evaluate the fitness of a genome. Without the `parallel`
+/// feature there is no `Send + Sync` supertrait, so `!Send` fitnesses (a
+/// JavaScript callback in a WASM build) are valid implementors; see the
+/// `parallel` variant's documentation for why this split is deliberate and
+/// what it means for crates that build both ways.
 #[cfg(not(feature = "parallel"))]
 pub trait Fitness {
     /// The genome type being evaluated

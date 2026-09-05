@@ -57,8 +57,10 @@ fn e_integration_smc_targets_conjugate_posterior() {
     let analytic_mean = center / tau;
     let analytic_var = 1.0 / tau;
 
-    let mean = result.weighted_mean(0);
-    let var = result.weighted_variance(0);
+    let mean = result.weighted_mean(0).expect("real coordinate present");
+    let var = result
+        .weighted_variance(0)
+        .expect("real coordinate present");
 
     assert!(
         (mean - analytic_mean).abs() < 0.2,
