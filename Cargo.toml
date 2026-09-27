@@ -72,7 +72,7 @@ thiserror = "2.0"
 tracing = "0.1"
 
 # Probabilistic-programming bridge (optional; enabled by the `ppl` feature)
-fugue-ppl = { path = "../fugue", version = "0.2.1", optional = true }
+fugue-ppl = { path = "../fugue", version = "0.2.3", optional = true }
 
 # WASM support (enabled via getrandom js feature when targeting wasm32)
 [target.'cfg(target_arch = "wasm32")'.dependencies]

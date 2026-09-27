@@ -32,12 +32,28 @@ jobs:
           echo "Checking if fugue-evo version $PACKAGE_VERSION can be published..."
 
           # Use cargo publish --dry-run to check if we can publish this version
-          # This is the most reliable method as it uses the same logic as actual publish
+          # This is the most reliable method as it uses the same logic as actual publish.
+          #
+          # Three outcomes, and they must stay distinct: "already exists" is the
+          # normal skip on a non-release push to main; a clean dry run means
+          # publish; any OTHER failure (typically: the crates.io copy of a
+          # dependency lacks an API this version needs, because the dependency's
+          # own release has not landed yet) must fail the job WITH its output.
+          # Under `bash -e` a bare `$(...)` assignment used to abort the step
+          # silently at this line, which is how the first 0.4.0 publish attempt
+          # failed with no diagnostic.
+          set +e
           DRY_RUN_OUTPUT=$(cargo publish --dry-run --allow-dirty -p fugue-evo 2>&1)
+          DRY_RUN_STATUS=$?
+          set -e
 
           if echo "$DRY_RUN_OUTPUT" | grep -q "already exists on crates.io index"; then
             echo "Version $PACKAGE_VERSION of fugue-evo already exists on crates.io. Skipping publish."
             echo "should_publish=false" >> $GITHUB_OUTPUT
+          elif [ "$DRY_RUN_STATUS" -ne 0 ]; then
+            echo "$DRY_RUN_OUTPUT"
+            echo "::error::cargo publish --dry-run failed for fugue-evo $PACKAGE_VERSION (see output above); not publishing"
+            exit "$DRY_RUN_STATUS"
           else
             echo "Version $PACKAGE_VERSION of fugue-evo can be published. Proceeding with publish."
             echo "should_publish=true" >> $GITHUB_OUTPUT
