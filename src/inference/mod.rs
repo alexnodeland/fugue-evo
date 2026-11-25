@@ -21,6 +21,14 @@
 //!   adaptive likelihood-tempering (β applied exactly once), ESS-driven
 //!   resampling, per-particle MH rejuvenation, an optional population-coupled
 //!   crossover kernel, and an unbiased log-evidence estimate.
+//! - [`sequence::SequenceGrammarPrior`] is a grammar prior over
+//!   variable-length **typed sequences** (the symbols available next depend
+//!   on the prefix), searched by the same MH and SMC moves, with
+//!   [`sequence::PrefixKeyedSuffixCrossover`] as its crossover kernel.
+//! - [`likelihood::MemoizedFactor`] caches a deterministic likelihood factor
+//!   by a user-supplied key, and
+//!   [`EvolutionPosterior`](smc::EvolutionPosterior) summarises decoded
+//!   genomes (`expectation`, `distinct`, `marginal_inclusion`).
 //! - [`bayesian_ga::BayesianAdaptiveGA`] keeps the Thompson-sampling operator
 //!   selection (conjugate Beta/Gamma posteriors, now backed by `rand_distr`).
 //!
@@ -38,6 +46,7 @@ pub mod mh;
 pub mod model;
 pub mod pareto;
 pub mod prior;
+pub mod sequence;
 pub mod smc;
 pub mod trace_operators;
 
@@ -50,6 +59,7 @@ pub mod prelude {
     pub use super::model::*;
     pub use super::pareto::*;
     pub use super::prior::*;
+    pub use super::sequence::*;
     pub use super::smc::*;
     pub use super::trace_operators::*;
 }

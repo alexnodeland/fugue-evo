@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Additive: no existing signature, default or behaviour changes.
+
+### Added
+
+- **`SequenceGrammarPrior`: a grammar prior over variable-length typed
+  sequences** (`inference::sequence`). The language is a user-supplied
+  `SequenceGrammar`: a state type, the initial state, the choices available
+  in a state (`ChoiceKind`: kinds with arguments, optionally weighted), a
+  transition and a stop probability, so the support of each choice depends
+  on the prefix. The prior is a fugue program with sites `seq/<i>#stop`,
+  `seq/<i>#kind`, `seq/<i>#arg` (a choice with a single outcome emits no
+  site), it implements `GenomePrior` for the new `SequenceGenome<S>` with
+  `trace_of` and `validate`, and its log-density is the description length
+  of the sequence (`log_prior`, `description_length`, both by replay). It
+  runs under `EvolutionChain` and `EvolutionSMC` unchanged: extending and
+  truncating a sequence are single-site moves on `#stop` with fugue's own
+  reversible-jump correction. Tests check prior recovery under a flat
+  likelihood, posterior recovery, and the SMC evidence against exact
+  enumeration of a small grammar.
+- **`PrefixKeyedSuffixCrossover`**, a `fugue::PopulationKernel` for those
+  sequences: it exchanges the tails of two particles at cut points whose
+  prefix states have equal user-supplied keys, re-scores both children, and
+  accepts with the product-target ratio times `n(parents)/n(children)`, the
+  ratio of the numbers of admissible cut pairs. It is exact for any key; an
+  exact detailed-balance test covers a state key and an uninformative one.
+- **`ReplayGenome`** (`genome::trace_genome`): a marker for genomes that
+  exist only as the return value of a prior program. Blanket impls supply
+  `EvolutionaryGenome` and `TraceGenome`, so such a genome writes none of
+  the classical surface. `generate` and `distance`, which only the classic
+  layer calls, panic for it; `try_distance` and `from_trace` return errors;
+  `to_trace` is the empty trace, which replay scoring rejects with
+  `MissingAddress`. The `Serialize + DeserializeOwned` bound remains: it is
+  a supertrait of `EvolutionaryGenome`.
+- **`MemoizedFactor`**, with `DeterministicFactor` and `FactorInput`
+  (`inference::likelihood`): memoisation for likelihood programs that are a
+  deterministic factor of the decoded genome. The key is supplied by the
+  user (genomes decoding to the same object share one evaluation), the
+  untempered value is cached (one cache serves every `β`), and
+  `FactorInput::Invalid` enters as `factor(−∞)` at every `β` without being
+  scored or cached. `evaluations()`, `hits()`, `invalid()`, `cache_len()`.
+- **Decoded-genome summaries on `EvolutionPosterior`**: `expectation`,
+  `probability`, `distinct` and `distinct_by` (aggregated weights, heaviest
+  first), and `marginal_inclusion`. They work for any genome, including
+  variable-structure ones, and return `None` or an empty table for a
+  population with no positive weight.
+
+### Documentation
+
+- README: how a downstream crate keeps a single `fugue-ppl` package in its
+  graph when it uses its own Fugue checkout.
+
 ## [0.4.0] - 2026-09-05
 
 **Audit follow-up (AUDIT-2026-09: EV-N1 … EV-N5, X-3, X-5).** Requires

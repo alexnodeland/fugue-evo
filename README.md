@@ -21,6 +21,7 @@ fugue-evo runs evolution as inference. The prior over genomes is a user-written 
 - **`EvolutionChain`** — typed single-site MH (every site kind moves: reals, bits, permutation ranks, tree structure with automatic reversible-jump corrections), warm-startable from any genome via `init_from`.
 - **`EvolutionSMC`** — adaptive tempered SMC with a population-coupled crossover kernel, decode-replay genome recovery, and an unbiased **log-evidence** estimate for Bayesian model comparison. `EvolutionSMC::anneal` keeps tempering past β = 1 for **optimizer mode** — a principled single-objective optimizer with uncertainty attached.
 - **`ArithmeticGrammarPrior`** — genetic programming over a probabilistic grammar: subtree mutation and crossover are generic trace moves. `examples/symbolic_regression_inference.rs` does symbolic regression as exact Bayesian inference.
+- **`SequenceGrammarPrior`** — structure search over variable-length *typed sequences*: you supply a state, the choices available in a state, a transition and a stop rule; the prior is a program whose log-density is the description length of the sequence, the ordinary MH and SMC moves edit, extend and truncate it, and `PrefixKeyedSuffixCrossover` swaps tails between prefixes of equal type. `MemoizedFactor` scores each distinct decoded object once, and `EvolutionPosterior::{expectation, distinct, marginal_inclusion}` summarise the result.
 - **`ParetoScalarization`** — multi-objective optimization as inference: the scalarization weight is a latent model site, so the posterior marginal *traces the Pareto front* and each particle knows where on the front it lives.
 
 The **classic EC toolkit** (`classic` feature, on by default) — SimpleGA, CMA-ES, NSGA-II, Island Model, ES, EDA/UMDA, operators, checkpointing, the WASM surface — remains fully standalone: build with `--no-default-features --features std,parallel,checkpoint,classic` and there is no probabilistic-programming dependency at all. Conversely, `--no-default-features --features std,ppl` builds the inference layer with no classic EC code — and none of the classic layer's dependencies: `nalgebra`, `rand_chacha` and `serde_json` are gated behind `classic`, so a `std,ppl` build (or its WASM bundle) does not compile `nalgebra` or `serde_json` at all (`rand_chacha` stays only as `rand`'s own `StdRng` backend). Both configurations are built and tested in CI (`make feature-matrix`: `std,ppl` natively and on `wasm32-unknown-unknown`, `std,parallel,checkpoint,classic` natively). The minimum supported Rust version is 1.87, inherited from `fugue-ppl`. CMA-ES and NSGA-II are deliberately *not* reframed as inference (CMA-ES is not a posterior sampler); they serve as baselines.
@@ -192,6 +193,22 @@ fugue-ppl = "0.2.0"
 
 Run `cargo check` after switching either way to confirm the resolved `fugue`
 version actually satisfies `fugue-evo`'s usage.
+
+### Using fugue-evo with your own Fugue checkout
+
+A downstream crate that uses both `fugue-evo` and `fugue-ppl` needs them to
+agree on **one** `fugue-ppl` package: cargo treats a path checkout and a
+registry release as different packages, and a `fugue::Model` of one is not a
+`fugue::Model` of the other.
+
+- `fugue-evo` from crates.io: its `fugue-ppl` comes from crates.io too.
+  Depend on `fugue-ppl` by version, and to substitute a checkout add
+  `[patch.crates-io] fugue-ppl = { path = "…" }` to your workspace root; the
+  patch applies to `fugue-evo`'s dependency as well.
+- `fugue-evo` by path (a sibling or vendored checkout): its `fugue-ppl` is
+  the directory `../fugue` next to it, and `[patch]` does not reach a path
+  dependency. Put your Fugue checkout (or a symlink to it) there and point
+  your own `fugue-ppl` dependency at the same directory.
 
 ## License
 
