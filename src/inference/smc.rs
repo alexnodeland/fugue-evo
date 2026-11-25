@@ -127,7 +127,7 @@ fn swap_block(a: &Trace, b: &Trace, swap: &[Address]) -> (Trace, Trace) {
 /// prior instead, so the replay always terminates, and its report tells us
 /// exactly whether the child was complete: no fresh and no vanished sites.
 /// The draws consume `rng` only on proposals that are rejected anyway.
-fn rescore_complete<A>(
+pub(super) fn rescore_complete<A>(
     base: &Trace,
     rng: &mut dyn rand::RngCore,
     model_fn: &dyn Fn() -> Model<A>,
@@ -342,6 +342,194 @@ impl<G: TraceGenome> EvolutionPosterior<G> {
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     }
+}
+
+/// Posterior summaries over **decoded genomes**.
+///
+/// [`EvolutionPosterior::weighted_mean`] and
+/// [`weighted_variance`](EvolutionPosterior::weighted_variance) read one
+/// real coordinate off the traces; the methods here work for any genome,
+/// including variable-structure ones (trees, sequences), by decoding every
+/// particle (one replay of `model_fn` each, as
+/// [`genomes`](EvolutionPosterior::genomes)) and weighting by the
+/// self-normalised particle weights. Particles of weight zero are skipped.
+/// For several summaries of one population over an expensive model, decode
+/// once with `genomes` and reduce the pairs directly.
+///
+/// ```rust
+/// use fugue_evo::prelude::*;
+/// use rand::{rngs::StdRng, SeedableRng};
+///
+/// #[derive(Clone)]
+/// struct CountOnes;
+/// impl Fitness for CountOnes {
+///     type Genome = BitString;
+///     type Value = f64;
+///     fn evaluate(&self, g: &BitString) -> f64 {
+///         2.0 * g.count_ones() as f64
+///     }
+/// }
+///
+/// let model = EvolutionModel::new(BitStringPrior::uniform(3), CountOnes);
+/// let mut rng = StdRng::seed_from_u64(3);
+/// let cfg = EvoSmcConfig { num_particles: 2000, ..EvoSmcConfig::default() };
+/// let posterior = EvolutionSMC::run(&mut rng, &model, cfg);
+/// let model_fn = model.smc_model();
+///
+/// // Each bit is on with posterior probability e²/(1 + e²) ≈ 0.881.
+/// let p = 2.0f64.exp() / (1.0 + 2.0f64.exp());
+/// let ones = posterior
+///     .expectation(&model_fn, |g| g.count_ones() as f64)
+///     .unwrap();
+/// assert!((ones - 3.0 * p).abs() < 0.1);
+///
+/// // Marginal inclusion probability of every set bit index.
+/// let inclusion = posterior.marginal_inclusion(&model_fn, |g| {
+///     (0..3).filter(|&i| g.bits()[i]).collect::<Vec<usize>>()
+/// });
+/// assert_eq!(inclusion.len(), 3);
+/// assert!(inclusion.iter().all(|(_bit, q)| (q - p).abs() < 0.05));
+///
+/// // The distinct genomes with their total posterior mass, heaviest first.
+/// let distinct = posterior.distinct(&model_fn);
+/// assert!(distinct.len() <= 8);
+/// assert_eq!(distinct[0].0.count_ones(), 3);
+/// let total: f64 = distinct.iter().map(|(_g, w)| w).sum();
+/// assert!((total - 1.0).abs() < 1e-9);
+///
+/// // The probability of an event.
+/// let all_on = posterior.probability(&model_fn, |g| g.count_ones() == 3).unwrap();
+/// assert!((all_on - distinct[0].1).abs() < 1e-9);
+/// ```
+impl<G: TraceGenome> EvolutionPosterior<G> {
+    /// Decoded genomes of the particles with positive weight, with weights
+    /// renormalised to sum to 1. Empty when no particle has positive weight.
+    fn weighted_genomes(&self, model_fn: &impl Fn() -> Model<G>) -> Vec<(G, f64)> {
+        let total: f64 = self
+            .particles
+            .iter()
+            .map(|p| p.weight)
+            .filter(|w| *w > 0.0)
+            .sum();
+        self.particles
+            .iter()
+            .filter(|p| p.weight > 0.0)
+            .map(|p| (decode_particle(p, model_fn), p.weight / total))
+            .collect()
+    }
+
+    /// Posterior expectation `E[f(g)]` of a function of the decoded genome.
+    ///
+    /// `None` when no particle has positive weight (an empty population),
+    /// rather than a silent `0.0`.
+    pub fn expectation(
+        &self,
+        model_fn: &impl Fn() -> Model<G>,
+        f: impl Fn(&G) -> f64,
+    ) -> Option<f64> {
+        let genomes = self.weighted_genomes(model_fn);
+        (!genomes.is_empty()).then(|| genomes.iter().map(|(g, w)| w * f(g)).sum())
+    }
+
+    /// Posterior probability of an event on the decoded genome: the
+    /// inclusion probability of one feature. `None` as
+    /// [`Self::expectation`].
+    pub fn probability(
+        &self,
+        model_fn: &impl Fn() -> Model<G>,
+        event: impl Fn(&G) -> bool,
+    ) -> Option<f64> {
+        self.expectation(model_fn, |g| if event(g) { 1.0 } else { 0.0 })
+    }
+
+    /// The distinct decoded genomes with their **aggregated** posterior
+    /// weights (summing to 1), heaviest first; ties keep the order of first
+    /// appearance in the population. Resampling leaves many copies of the
+    /// same genome, and several traces can decode to one genome; this is
+    /// the posterior as a probability table.
+    pub fn distinct(&self, model_fn: &impl Fn() -> Model<G>) -> Vec<(G, f64)>
+    where
+        G: Eq + std::hash::Hash,
+    {
+        let mut index: std::collections::HashMap<G, usize> = std::collections::HashMap::new();
+        let mut out: Vec<(G, f64)> = Vec::new();
+        for (g, w) in self.weighted_genomes(model_fn) {
+            match index.get(&g) {
+                Some(&at) => out[at].1 += w,
+                None => {
+                    index.insert(g.clone(), out.len());
+                    out.push((g, w));
+                }
+            }
+        }
+        sort_by_weight(&mut out);
+        out
+    }
+
+    /// [`Self::distinct`] up to a user-supplied key, for genomes that are
+    /// not `Eq + Hash` or that should be identified more coarsely (by the
+    /// hash of the object they decode to, say). Each class is represented
+    /// by its first genome in the population.
+    pub fn distinct_by<K: Eq + std::hash::Hash>(
+        &self,
+        model_fn: &impl Fn() -> Model<G>,
+        key: impl Fn(&G) -> K,
+    ) -> Vec<(G, f64)> {
+        let mut index: std::collections::HashMap<K, usize> = std::collections::HashMap::new();
+        let mut out: Vec<(G, f64)> = Vec::new();
+        for (g, w) in self.weighted_genomes(model_fn) {
+            match index.entry(key(&g)) {
+                std::collections::hash_map::Entry::Occupied(at) => out[*at.get()].1 += w,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(out.len());
+                    out.push((g, w));
+                }
+            }
+        }
+        sort_by_weight(&mut out);
+        out
+    }
+
+    /// **Marginal inclusion probabilities**: `features` lists the features
+    /// a genome has (the moves of a sequence, the selected variables, the
+    /// function symbols of a tree, …), and each feature seen in the
+    /// population is returned with the posterior probability that a genome
+    /// has it, most probable first (ties in order of first appearance). A
+    /// feature listed twice by one genome counts once.
+    pub fn marginal_inclusion<T, I>(
+        &self,
+        model_fn: &impl Fn() -> Model<G>,
+        features: impl Fn(&G) -> I,
+    ) -> Vec<(T, f64)>
+    where
+        T: Eq + std::hash::Hash + Clone,
+        I: IntoIterator<Item = T>,
+    {
+        let mut index: std::collections::HashMap<T, usize> = std::collections::HashMap::new();
+        let mut out: Vec<(T, f64)> = Vec::new();
+        for (g, w) in self.weighted_genomes(model_fn) {
+            let mut seen = std::collections::HashSet::new();
+            for feature in features(&g) {
+                if !seen.insert(feature.clone()) {
+                    continue;
+                }
+                match index.get(&feature) {
+                    Some(&at) => out[at].1 += w,
+                    None => {
+                        index.insert(feature.clone(), out.len());
+                        out.push((feature, w));
+                    }
+                }
+            }
+        }
+        sort_by_weight(&mut out);
+        out
+    }
+}
+
+/// Heaviest first; a stable sort, so ties keep their order.
+fn sort_by_weight<T>(items: &mut [(T, f64)]) {
+    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 }
 
 /// The tempered-SMC evolution driver.
@@ -1062,5 +1250,90 @@ mod tests {
             let x = p.trace.get_f64(&fugue::addr!("gene", 0)).unwrap();
             assert!((-2.0..=2.0).contains(&x), "particle escaped bounds: {}", x);
         }
+    }
+    /// The decoded-genome summaries on a hand-built population with known
+    /// weights (unnormalised on purpose, with a zero-weight particle).
+    #[test]
+    fn test_decoded_summaries_on_known_weights() {
+        use crate::genome::bit_string::BitString;
+        use crate::genome::traits::BinaryGenome;
+        use crate::inference::prior::BitStringPrior;
+
+        let prior = BitStringPrior::uniform(2);
+        let model_fn = || prior.model();
+        let particle = |bits: [bool; 2], weight: f64| Particle {
+            trace: BitString::new(bits.to_vec()).to_trace(),
+            weight,
+            log_weight: weight.ln(),
+        };
+        let posterior: EvolutionPosterior<BitString> = EvolutionPosterior {
+            particles: vec![
+                particle([true, false], 1.0),
+                particle([true, true], 2.0),
+                particle([true, false], 3.0),
+                particle([false, false], 2.0),
+                particle([false, true], 0.0),
+            ],
+            log_evidence: 0.0,
+            _g: PhantomData,
+        };
+
+        // Total weight 8: 10 -> 4/8, 11 -> 2/8, 00 -> 2/8, 01 -> 0.
+        let ones = posterior
+            .expectation(&model_fn, |g| g.count_ones() as f64)
+            .unwrap();
+        assert!((ones - (4.0 + 2.0 * 2.0) / 8.0).abs() < 1e-12);
+        let first = posterior.probability(&model_fn, |g| g.bits()[0]).unwrap();
+        assert!((first - 0.75).abs() < 1e-12);
+
+        let distinct = posterior.distinct(&model_fn);
+        let table: Vec<(Vec<bool>, f64)> = distinct
+            .iter()
+            .map(|(g, w)| (g.bits().to_vec(), *w))
+            .collect();
+        // Heaviest first; the 2/8 tie keeps population order (11 before 00);
+        // the zero-weight genome is absent.
+        assert_eq!(
+            table,
+            vec![
+                (vec![true, false], 0.5),
+                (vec![true, true], 0.25),
+                (vec![false, false], 0.25),
+            ]
+        );
+
+        // Coarser identification: by number of set bits.
+        let by_count = posterior.distinct_by(&model_fn, |g| g.count_ones());
+        let counts: Vec<(usize, f64)> =
+            by_count.iter().map(|(g, w)| (g.count_ones(), *w)).collect();
+        assert_eq!(counts, vec![(1, 0.5), (2, 0.25), (0, 0.25)]);
+
+        // Inclusion of each set bit; a feature listed twice counts once.
+        let inclusion = posterior.marginal_inclusion(&model_fn, |g| {
+            let on: Vec<usize> = (0..2).filter(|&i| g.bits()[i]).collect();
+            on.clone().into_iter().chain(on).collect::<Vec<usize>>()
+        });
+        assert_eq!(inclusion, vec![(0, 0.75), (1, 0.25)]);
+    }
+
+    /// No positive-weight particle: `None` and empty tables, not zeros.
+    #[test]
+    fn test_decoded_summaries_on_empty_population() {
+        use crate::genome::bit_string::BitString;
+        use crate::inference::prior::BitStringPrior;
+        let prior = BitStringPrior::uniform(2);
+        let model_fn = || prior.model();
+        let posterior: EvolutionPosterior<BitString> = EvolutionPosterior {
+            particles: Vec::new(),
+            log_evidence: 0.0,
+            _g: PhantomData,
+        };
+        assert_eq!(posterior.expectation(&model_fn, |_| 1.0), None);
+        assert_eq!(posterior.probability(&model_fn, |_| true), None);
+        assert!(posterior.distinct(&model_fn).is_empty());
+        assert!(posterior.distinct_by(&model_fn, |_| 0u8).is_empty());
+        assert!(posterior
+            .marginal_inclusion(&model_fn, |_| vec![0u8])
+            .is_empty());
     }
 }
