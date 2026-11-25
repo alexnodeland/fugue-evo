@@ -960,6 +960,7 @@ fugue-evo/
 │       ├── mh.rs              # EvolutionChain: Metropolis–Hastings
 │       ├── smc.rs             # EvolutionSMC: tempered SMC, crossover kernel, anneal
 │       ├── grammar.rs         # ArithmeticGrammarPrior: GP over a probabilistic grammar
+│       ├── sequence.rs        # SequenceGrammarPrior: typed variable-length sequences, suffix crossover
 │       ├── pareto.rs          # Pareto / Chebyshev scalarization posteriors
 │       ├── bayesian_ga.rs     # BayesianAdaptiveGA: Thompson-sampled operators
 │       ├── effect_handlers.rs # fugue Handler implementations
