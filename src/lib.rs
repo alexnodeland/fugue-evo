@@ -47,7 +47,12 @@
 //! [`TraceGenome`](genome::trace_genome::TraceGenome) extension trait: classic
 //! algorithms require only [`EvolutionaryGenome`](genome::traits::EvolutionaryGenome);
 //! genomes that also implement `TraceGenome` can be driven by the inference
-//! layer.
+//! layer. A genome that is only ever produced and decoded by a prior program
+//! (a [`SequenceGenome`](inference::sequence::SequenceGenome) drawn from a
+//! [`SequenceGrammarPrior`](inference::sequence::SequenceGrammarPrior), or a
+//! downstream type) implements the
+//! [`ReplayGenome`](genome::trace_genome::ReplayGenome) marker instead and
+//! gets both traits from blanket impls.
 //!
 //! ## Features
 //!
